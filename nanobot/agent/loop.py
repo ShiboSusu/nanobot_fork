@@ -15,6 +15,12 @@ from loguru import logger
 
 from nanobot.agent.capabilities import CapabilityCatalogBuilder, PlanningContext
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.execution_policy import (
+    ExecutionDecision,
+    PolicyNodeContext,
+    PolicyTraceWriter,
+    RuleExecutionPolicy,
+)
 from nanobot.agent.memory import MemoryConsolidator
 from nanobot.agent.planning_memory import PlanningMemoryHintExtractor
 from nanobot.agent.subagent import SubagentManager
@@ -38,7 +44,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Complexity assessment tool — used by _needs_planning to decide whether a
+# Complexity assessment tool used by _needs_planning to decide whether a
 # task should be decomposed via TaskPlanner before execution.
 # ---------------------------------------------------------------------------
 
@@ -55,7 +61,7 @@ _COMPLEXITY_TOOL: dict[str, Any] = {
                 "needs_planning": {
                     "type": "boolean",
                     "description": (
-                        "True ONLY if the task requires GUI operations — screen taps, "
+                        "True ONLY if the task requires GUI operations - screen taps, "
                         "app navigation, interacting with device UI elements, opening "
                         "or switching between apps on a device screen. "
                         "False for tasks that can be completed with shell commands, "
@@ -109,6 +115,10 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.subagent_provider, self.subagent_model = self._resolve_subagent_runtime(
+            provider=provider,
+            default_model=self.model,
+        )
         self.max_iterations = max_iterations
         self.context_window_tokens = context_window_tokens
         self.web_search_config = web_search_config or WebSearchConfig()
@@ -119,15 +129,22 @@ class AgentLoop:
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._gui_config = gui_config
+        self._session_retry_count: dict[str, int] = {}
+        self._execution_policy = RuleExecutionPolicy.from_env()
+        self._policy_trace_writer = (
+            PolicyTraceWriter(workspace) if self._execution_policy.enabled else None
+        )
+        if self._execution_policy.enabled and self._policy_trace_writer is not None:
+            logger.info("Execution policy enabled; traces -> {}", self._policy_trace_writer.path)
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
-            provider=provider,
+            provider=self.subagent_provider,
             workspace=workspace,
             bus=bus,
-            model=self.model,
+            model=self.subagent_model,
             web_search_config=self.web_search_config,
             web_proxy=web_proxy,
             exec_config=self.exec_config,
@@ -161,6 +178,107 @@ class AgentLoop:
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
 
+    @staticmethod
+    def _env_first_non_empty(*names: str) -> str | None:
+        for name in names:
+            value = os.environ.get(name)
+            if not value:
+                continue
+            value = value.strip()
+            if value:
+                return value
+        return None
+
+    def _resolve_subagent_runtime(
+        self,
+        *,
+        provider: LLMProvider,
+        default_model: str,
+    ) -> tuple[LLMProvider, str]:
+        """Resolve optional subagent-only model/provider overrides from env vars."""
+        subagent_model = self._env_first_non_empty(
+            "NANOBOT_SUBAGENT_MODEL",
+            "OPENAI_MODEL",
+        ) or default_model
+        subagent_api_base = self._env_first_non_empty(
+            "NANOBOT_SUBAGENT_API_BASE",
+            "OPENAI_API_BASE",
+        )
+        subagent_api_key = self._env_first_non_empty(
+            "NANOBOT_SUBAGENT_API_KEY",
+            "OPENAI_API_KEY",
+        ) or "dummy"
+
+        if not subagent_api_base:
+            return provider, subagent_model
+
+        from nanobot.providers.custom_provider import CustomProvider
+
+        subagent_provider = CustomProvider(
+            api_key=subagent_api_key,
+            api_base=subagent_api_base,
+            default_model=subagent_model,
+        )
+        if hasattr(provider, "generation"):
+            subagent_provider.generation = provider.generation
+        logger.info(
+            "Subagent runtime override enabled: model={} api_base={}",
+            subagent_model,
+            subagent_api_base,
+        )
+        return subagent_provider, subagent_model
+
+    def _build_policy_node_context(self, *, task: str, session_key: str, history_len: int) -> PolicyNodeContext:
+        available_tools = tuple(sorted(self.tools.tool_names))
+        retry_count = self._session_retry_count.get(session_key, 0)
+        return PolicyNodeContext(
+            task=task,
+            has_gui=self._gui_config is not None,
+            available_tools=available_tools,
+            history_len=history_len,
+            retry_count=retry_count,
+            tool_error_signal=retry_count > 0,
+            mismatch_signal=False,
+        )
+
+    def _record_policy_decision(
+        self,
+        *,
+        session_key: str,
+        msg: InboundMessage,
+        node_context: PolicyNodeContext,
+        decision: ExecutionDecision,
+    ) -> None:
+        if self._policy_trace_writer is None:
+            return
+        try:
+            self._policy_trace_writer.append(
+                session_key=session_key,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                node_context=node_context,
+                decision=decision,
+            )
+        except Exception:
+            logger.warning("Failed to append execution-policy trace", exc_info=True)
+
+    @staticmethod
+    def _output_has_failure_signal(output: str | None) -> bool:
+        if not output:
+            return False
+        lowered = output.lower()
+        failure_markers = (
+            "error",
+            "failed",
+            "unable",
+            "exception",
+            "timeout",
+            "timed out",
+            "permission denied",
+            "not found",
+        )
+        return any(marker in lowered for marker in failure_markers)
+
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
@@ -187,8 +305,8 @@ class AgentLoop:
             self.tools.register(
                 GuiSubagentTool(
                     gui_config=self._gui_config,
-                    provider=self.provider,
-                    model=self.model,
+                    provider=self.subagent_provider,
+                    model=self.subagent_model,
                     workspace=self.workspace,
                 )
             )
@@ -224,7 +342,7 @@ class AgentLoop:
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
-        """Remove <think>…</think> blocks that some models embed in content."""
+        """Remove <think></think> blocks that some models embed in content."""
         if not text:
             return None
         from nanobot.utils.helpers import strip_think
@@ -238,7 +356,7 @@ class AgentLoop:
             val = next(iter(args.values()), None) if isinstance(args, dict) else None
             if not isinstance(val, str):
                 return tc.name
-            return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
+            return f'{tc.name}("{val[:40]}...")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
     @staticmethod
@@ -411,7 +529,7 @@ class AgentLoop:
                 # concurrent sessions don't clobber each other's routing.
                 self._set_tool_context(channel, chat_id, message_id)
 
-                # Execute all tool calls concurrently — the LLM batches
+                # Execute all tool calls concurrently - the LLM batches
                 # independent calls in a single response on purpose.
                 # return_exceptions=True ensures all results are collected
                 # even if one tool is cancelled or raises BaseException.
@@ -489,7 +607,7 @@ class AgentLoop:
         """One LLM call to assess whether a task warrants multi-step decomposition.
 
         Uses the ``assess_complexity`` tool to force a structured Boolean response.
-        Returns ``False`` on any parsing failure (safe default — never blocks
+        Returns ``False`` on any parsing failure (safe default - never blocks
         execution on gate ambiguity).
         """
         direct_tools_summary = "; ".join(
@@ -501,7 +619,7 @@ class AgentLoop:
                 "role": "system",
                 "content": (
                     "You are a task complexity assessor for a device automation agent. "
-                    "Determine if the user's task requires GUI operations — interacting "
+                    "Determine if the user's task requires GUI operations - interacting "
                     "with a device screen (tapping, swiping, typing into app UI, navigating "
                     "between apps, reading screen content). "
                     "ONLY return True when GUI interaction is needed.\n\n"
@@ -527,7 +645,7 @@ class AgentLoop:
                 except Exception:
                     return False
             return bool(args.get("needs_planning", False))
-        return False  # safe default: no tool call → treat as simple
+        return False  # safe default: no tool call -> treat as simple
 
     async def _plan_and_execute(
         self,
@@ -792,6 +910,22 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
+        task_text = msg.content.strip()
+        policy_node: PolicyNodeContext | None = None
+        policy_decision: ExecutionDecision | None = None
+        if self._execution_policy.enabled and task_text:
+            policy_node = self._build_policy_node_context(
+                task=task_text,
+                session_key=key,
+                history_len=len(history),
+            )
+            policy_decision = self._execution_policy.decide(policy_node)
+            self._record_policy_decision(
+                session_key=key,
+                msg=msg,
+                node_context=policy_node,
+                decision=policy_decision,
+            )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -806,9 +940,13 @@ class AgentLoop:
         # above via slash-command logic or trivially short content) and when no
         # GUI config is present (planning currently relies on GUI capability).
         use_planning = False
-        if self._gui_config is not None and len(msg.content.strip()) >= 20:
+        if policy_decision is not None and policy_decision.mode in {"slow", "replan"}:
+            use_planning = True
+        elif policy_decision is not None and policy_decision.route in {"gui", "hybrid"} and len(task_text) >= 20:
+            use_planning = True
+        elif self._gui_config is not None and len(task_text) >= 20:
             try:
-                use_planning = await self._needs_planning(msg.content.strip())
+                use_planning = await self._needs_planning(task_text)
             except Exception:
                 logger.debug(
                     "Complexity gate raised unexpectedly; falling back to direct agent loop"
@@ -816,7 +954,7 @@ class AgentLoop:
 
         if use_planning:
             final_content, _tools_used_plan, _ = await self._plan_and_execute(
-                msg.content.strip(),
+                task_text,
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 metadata=msg.metadata,
@@ -835,8 +973,36 @@ class AgentLoop:
                 message_id=msg.metadata.get("message_id"),
             )
 
+        policy_recovered = False
+        if (
+            policy_decision is not None
+            and policy_decision.mode in {"verify", "replan"}
+            and not use_planning
+            and self._output_has_failure_signal(final_content)
+        ):
+            try:
+                recovered_content, _tools_used_plan, _ = await self._plan_and_execute(
+                    task_text,
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    metadata=msg.metadata,
+                )
+                if recovered_content:
+                    final_content = recovered_content
+                    all_msgs = initial_messages + [{"role": "assistant", "content": final_content}]
+                    policy_recovered = True
+            except Exception:
+                logger.debug(
+                    "Policy recovery planning failed; keeping direct-loop output",
+                    exc_info=True,
+                )
+
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+        if self._output_has_failure_signal(final_content):
+            self._session_retry_count[key] = self._session_retry_count.get(key, 0) + 1
+        else:
+            self._session_retry_count[key] = 0
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
@@ -850,13 +1016,18 @@ class AgentLoop:
 
         meta = dict(msg.metadata or {})
         if on_stream is not None and not use_planning:
-            # _streamed=True tells the dispatcher to skip the final message because
-            # content was already sent via stream deltas. Only set this flag when
-            # streaming actually occurred — the planning path returns content directly
-            # and never calls on_stream, so its final response must NOT be skipped.
             meta["_streamed"] = True
+        if policy_decision is not None:
+            meta["_policy_route"] = policy_decision.route
+            meta["_policy_mode"] = policy_decision.mode
+            meta["_policy_risk"] = policy_decision.risk_level
+            meta["_policy_source"] = policy_decision.source
+            if policy_recovered:
+                meta["_policy_recovered"] = True
         return OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content=final_content,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=final_content,
             metadata=meta,
         )
 
@@ -913,7 +1084,7 @@ class AgentLoop:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
-                continue  # skip empty assistant messages — they poison session context
+                continue  # skip empty assistant messages - they poison session context
             if role == "tool":
                 if isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
                     entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
@@ -956,3 +1127,4 @@ class AgentLoop:
             msg, session_key=session_key, on_progress=on_progress,
             on_stream=on_stream, on_stream_end=on_stream_end,
         )
+
