@@ -79,8 +79,8 @@ class WdaBackend:
 
     def __init__(self, wda_url: str = "http://localhost:8100") -> None:
         self._wda_url = wda_url
-        wda = _import_wda()
-        self._client: Any = wda.Client(wda_url)
+        self._wda_module: Any = _import_wda()
+        self._client: Any = self._new_client()
         # Sensible iPhone defaults; updated on first observe() call.
         self._screen_width: int = 375
         self._screen_height: int = 812
@@ -93,9 +93,66 @@ class WdaBackend:
     # Async helper
     # ------------------------------------------------------------------
 
+    def _new_client(self) -> Any:
+        return self._wda_module.Client(self._wda_url)
+
+    def _reset_client(self) -> Any:
+        self._client = self._new_client()
+        return self._client
+
+    @staticmethod
+    def _is_connection_error(exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "connection refused",
+                "max retries exceeded",
+                "failed to establish a new connection",
+                "connection aborted",
+                "connection reset",
+                "broken pipe",
+                "remote end closed connection",
+            )
+        )
+
     async def _wda_call(self, fn: Callable[..., Any], *args: Any) -> Any:
-        """Run a blocking WDA call on the default thread-pool executor."""
-        return await asyncio.to_thread(fn, *args)
+        """Run a blocking WDA call with one reconnect retry on transport errors."""
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except Exception as exc:
+            if not self._is_connection_error(exc):
+                raise
+
+            logger.warning(
+                "WDA transport error (%s). Rebuilding client and retrying once...",
+                exc,
+            )
+
+            old_client = self._client
+            self._reset_client()
+            retry_fn: Callable[..., Any] | None = None
+
+            owner = getattr(fn, "__self__", None)
+            name = getattr(fn, "__name__", None)
+            if isinstance(name, str) and name:
+                if owner is old_client:
+                    candidate = getattr(self._client, name, None)
+                    if callable(candidate):
+                        retry_fn = candidate
+                else:
+                    # Likely a session-bound method (tap/swipe/etc); reacquire session.
+                    try:
+                        retry_session = await asyncio.to_thread(self._client.session)
+                        candidate = getattr(retry_session, name, None)
+                        if callable(candidate):
+                            retry_fn = candidate
+                    except Exception:
+                        retry_fn = None
+
+            if retry_fn is None:
+                raise
+            return await asyncio.to_thread(retry_fn, *args)
 
     # ------------------------------------------------------------------
     # Preflight
