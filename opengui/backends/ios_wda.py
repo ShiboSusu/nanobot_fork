@@ -316,8 +316,20 @@ class WdaBackend:
         elif t == "hotkey":
             keys = action.key or []
             for k in keys:
+                # iOS system screenshot requires hardware side-button combos
+                # that WDA cannot reliably trigger as a saved Photos screenshot.
+                if k.lower().strip() in {"screenshot", "screen_shot"}:
+                    raise WdaError(
+                        "iOS backend cannot trigger a system screenshot via WDA. "
+                        "Use request_intervention for manual screenshot capture."
+                    )
                 mapped = _IOS_KEYCODE_MAP.get(k.lower().strip())
                 if mapped is None:
+                    if k.lower().strip() in {"power", "side", "sidebutton", "side_button"}:
+                        raise WdaError(
+                            "iOS side/power button is not controllable via WDA hotkey. "
+                            "Cannot perform hardware screenshot combo automatically."
+                        )
                     raise ValueError(
                         f"Unknown iOS key {k!r}. Supported: {sorted(_IOS_KEYCODE_MAP.keys())}"
                     )

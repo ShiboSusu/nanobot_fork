@@ -66,6 +66,8 @@ def build_system_prompt(
         "- For size/quantity constraints, prefer exact match; small near-matches may be used only with explicit disclosure in the final response.",
         "- If only a far mismatch is available, do not substitute silently; ask for confirmation via request_intervention or report failure.",
         "- Do not call done(status=\"success\") unless key constraints are satisfied and any near-match is clearly disclosed.",
+        "- If a required step has failed (tool result contains 'Action failed'), do not call done(status=\"success\") until it is actually completed and verified on screen.",
+        "- On iOS backend, do not claim a system screenshot is captured unless its result is verifiably present in Photos/gallery. If hardware screenshot is required, use request_intervention.",
         coordinate_rules,
     ]
 
