@@ -18,6 +18,12 @@ class FakePromptDetails:
         self.cached_tokens = cached_tokens
 
 
+class FakeCompletionDetails:
+    """Mimics completion_tokens_details sub-object."""
+    def __init__(self, reasoning_tokens=0):
+        self.reasoning_tokens = reasoning_tokens
+
+
 class _FakeSpec:
     supports_prompt_caching = False
     model_id_prefix = None
@@ -231,3 +237,113 @@ def test_anthropic_no_cache_fields():
     )
     result = AnthropicProvider._parse_response(response)
     assert "cached_tokens" not in result.usage
+
+
+# --- reasoning_tokens extraction tests ---
+
+def test_extract_usage_reasoning_tokens_nested_dict():
+    """OpenAI format: completion_tokens_details.reasoning_tokens from a dict response."""
+    p = _provider()
+    response = {
+        "choices": [_DICT_CHOICE],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+            "completion_tokens_details": {"reasoning_tokens": 150},
+        }
+    }
+    result = p._parse(response)
+    assert result.usage["reasoning_tokens"] == 150
+
+
+def test_extract_usage_reasoning_tokens_toplevel_dict():
+    """Qwen format: reasoning_tokens at top level of usage dict."""
+    p = _provider()
+    response = {
+        "choices": [_DICT_CHOICE],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+            "reasoning_tokens": 200,
+        }
+    }
+    result = p._parse(response)
+    assert result.usage["reasoning_tokens"] == 200
+
+
+def test_extract_usage_reasoning_tokens_nested_obj():
+    """OpenAI format: completion_tokens_details.reasoning_tokens from an SDK object response."""
+    p = _provider()
+    usage_obj = FakeUsage(
+        prompt_tokens=1000,
+        completion_tokens=500,
+        total_tokens=1500,
+        completion_tokens_details=FakeCompletionDetails(reasoning_tokens=150),
+    )
+    response = FakeUsage(choices=[_FakeChoice()], usage=usage_obj)
+    result = p._parse(response)
+    assert result.usage["reasoning_tokens"] == 150
+
+
+def test_extract_usage_reasoning_tokens_toplevel_obj():
+    """Qwen format: reasoning_tokens as top-level SDK object attribute."""
+    p = _provider()
+    usage_obj = FakeUsage(
+        prompt_tokens=1000,
+        completion_tokens=500,
+        total_tokens=1500,
+        reasoning_tokens=200,
+    )
+    response = FakeUsage(choices=[_FakeChoice()], usage=usage_obj)
+    result = p._parse(response)
+    assert result.usage["reasoning_tokens"] == 200
+
+
+def test_extract_usage_reasoning_tokens_zero_excluded_dict():
+    """reasoning_tokens=0 should NOT be included (consistent with cached_tokens behavior)."""
+    p = _provider()
+    response = {
+        "choices": [_DICT_CHOICE],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+            "completion_tokens_details": {"reasoning_tokens": 0},
+        }
+    }
+    result = p._parse(response)
+    assert "reasoning_tokens" not in result.usage
+
+
+def test_extract_usage_reasoning_tokens_missing_dict():
+    """Response without any reasoning fields -> no reasoning_tokens key."""
+    p = _provider()
+    response = {
+        "choices": [_DICT_CHOICE],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "total_tokens": 1200,
+        }
+    }
+    result = p._parse(response)
+    assert "reasoning_tokens" not in result.usage
+
+
+def test_extract_usage_reasoning_tokens_priority_nested_over_toplevel_dict():
+    """When both nested and top-level reasoning_tokens exist, nested wins."""
+    p = _provider()
+    response = {
+        "choices": [_DICT_CHOICE],
+        "usage": {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "total_tokens": 1500,
+            "completion_tokens_details": {"reasoning_tokens": 100},
+            "reasoning_tokens": 500,
+        }
+    }
+    result = p._parse(response)
+    assert result.usage["reasoning_tokens"] == 100
