@@ -830,6 +830,18 @@ class OpenAICompatProvider(LLMProvider):
                 result["cached_tokens"] = cached
                 break
 
+        # --- reasoning_tokens (models with thinking/reasoning mode) ---
+        for path in (
+            ("completion_tokens_details", "reasoning_tokens"),  # OpenAI o1/o3 style
+            ("reasoning_tokens",),                              # Qwen/dashscope top-level
+        ):
+            reasoning = cls._get_nested_int(usage_map, path)
+            if not reasoning and usage_obj:
+                reasoning = cls._get_nested_int(usage_obj, path)
+            if reasoning:
+                result["reasoning_tokens"] = reasoning
+                break
+
         return result
 
     @staticmethod
