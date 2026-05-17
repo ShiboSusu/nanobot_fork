@@ -58,6 +58,7 @@ class Phase0Task:
     instruction: str
     instruction_ch: str
     risk_level: str
+    task_source: str = "dataset"
 
     @property
     def execution_instruction(self) -> str:
@@ -178,6 +179,26 @@ def filter_tasks(
     return selected
 
 
+def synthetic_task(task_text: str, allowed_risks: set[str], max_tasks: int | None, task_ids: list[str]) -> list[Phase0Task]:
+    if task_ids:
+        raise ValueError("--task-text cannot be combined with --task-id")
+    if "U0" not in allowed_risks:
+        raise ValueError("--task-text requires risk level U0")
+    task = Phase0Task(
+        task_id="__synthetic_smoke__",
+        instruction=task_text.strip(),
+        instruction_ch=task_text.strip(),
+        risk_level="U0",
+        task_source="synthetic",
+    )
+    if not task.instruction:
+        raise ValueError("--task-text cannot be empty")
+    ensure_synthetic_task_safe(task)
+    if max_tasks != 1:
+        raise ValueError("--task-text requires --max-tasks 1")
+    return [task]
+
+
 def ensure_task4b_safe(task: Phase0Task) -> None:
     if task.risk_level == "U2":
         raise RuntimeError(f"Refusing to run U2 task in Task 4B: {task.task_id}")
@@ -186,6 +207,25 @@ def ensure_task4b_safe(task: Phase0Task) -> None:
     if matched:
         raise RuntimeError(
             f"Refusing to run task {task.task_id}: safety guard matched {', '.join(sorted(set(matched)))}"
+        )
+
+
+def ensure_synthetic_task_safe(task: Phase0Task) -> None:
+    if task.risk_level != "U0":
+        raise RuntimeError(f"Refusing to run non-U0 synthetic task: {task.task_id}")
+    text = f"{task.task_id}\n{task.instruction}\n{task.instruction_ch}".lower()
+    for phrase in (
+        "do not send messages, emails, sms, wechat, make purchases, or change settings",
+        "do not send messages, emails, sms, wechat",
+        "do not send",
+        "do not make purchases",
+        "do not change settings",
+    ):
+        text = text.replace(phrase, "")
+    matched = [term for term in TASK4A_UNSAFE_TERMS if term in text]
+    if matched:
+        raise RuntimeError(
+            f"Refusing to run synthetic task {task.task_id}: safety guard matched {', '.join(sorted(set(matched)))}"
         )
 
 
@@ -376,6 +416,7 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
                 "step_index": index,
                 "outer_event_present": outer is not None,
                 "inner_event_present": inner is not None,
+                "alignment_status": alignment_status(outer, inner),
                 "model_output": safe_model_output_summary(outer),
                 "action": action,
                 "trigger_features": {
@@ -421,6 +462,14 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
     return aligned_steps, stats, quality
 
 
+def alignment_status(outer: dict[str, Any] | None, inner: dict[str, Any] | None) -> str:
+    if outer is not None and inner is not None:
+        return "aligned"
+    if outer is None:
+        return "missing_outer"
+    return "missing_inner"
+
+
 def trace_quality(
     outer_steps: list[dict[str, Any]],
     inner_steps: list[dict[str, Any]],
@@ -446,15 +495,27 @@ def trace_quality(
     return {
         "outer_step_count": outer_count,
         "inner_step_count": inner_count,
+        "outer_decision_step_count": None,
+        "inner_decision_step_count": None,
         "aligned_step_count": aligned_count,
         "missing_outer_count": stats["missing_outer_count"],
         "missing_inner_count": stats["missing_inner_count"],
         "inner_coverage": inner_coverage,
+        "inner_decision_coverage": None,
         "has_any_raw_content": has_any_raw_content,
         "has_any_parsed_action": has_any_parsed_action,
         "clean_for_signal_analysis": quality_warning is None,
         "quality_warning": quality_warning,
+        "coverage_note": coverage_note(stats, quality_warning),
     }
+
+
+def coverage_note(stats: dict[str, int], quality_warning: str | None) -> str | None:
+    if quality_warning == "low_inner_coverage":
+        return "outer_inner_step_mismatch_unclassified"
+    if stats["missing_inner_count"] or stats["missing_outer_count"]:
+        return "outer_inner_step_mismatch_unclassified"
+    return None
 
 
 def inner_model_output(step: dict[str, Any]) -> dict[str, Any]:
@@ -631,6 +692,7 @@ async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, A
 
     return {
         "task_id": task.task_id,
+        "task_source": task.task_source,
         "instruction": task.execution_instruction,
         "task_risk_level": task.risk_level,
         "runner_returned": runner_returned,
@@ -699,7 +761,10 @@ async def run(args: argparse.Namespace) -> int:
         if args.list_tasks:
             print_task_list(tasks)
             return 0
-        selected = filter_tasks(tasks, allowed_risks, args.max_tasks, task_ids)
+        if args.task_text:
+            selected = synthetic_task(args.task_text, allowed_risks, args.max_tasks, task_ids)
+        else:
+            selected = filter_tasks(tasks, allowed_risks, args.max_tasks, task_ids)
     except (RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -804,6 +869,7 @@ def print_run_summary(
     print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
     print(f"Selected task count: {len(selected)}")
     print("Selected task IDs: " + ", ".join(task.task_id for task in selected))
+    print("Selected task sources: " + ", ".join(task.task_source for task in selected))
     print(f"Effective risk levels: {','.join(sorted(allowed_risks))}")
     print(f"Effective max steps: {max_steps if max_steps is not None else 'config default'}")
     if cfg is not None:
@@ -883,6 +949,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tasks", type=int, help="Maximum number of selected tasks to run")
     parser.add_argument("--max-steps", type=int, help="Temporary GUI max_steps override for this run")
     parser.add_argument("--task-id", action="append", help="Task ID to select; may be repeated or comma-separated")
+    parser.add_argument("--task-text", help="Synthetic smoke-only task text; requires --risk-level U0 and --max-tasks 1")
     parser.add_argument("--list-tasks", action="store_true", help="List dataset tasks and exit without running GUI")
     parser.add_argument("--dry-select", action="store_true", help="Apply selection and safety checks without running GUI")
     parser.add_argument(
