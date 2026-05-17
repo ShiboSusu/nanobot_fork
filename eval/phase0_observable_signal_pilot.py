@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""Phase 0 observable signal pilot runner skeleton.
+
+Runs a small U0/U1-only GUI smoke through the existing AgentLoop/GuiSubagentTool
+path, then extracts outer/inner trace fields into incremental JSONL records.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import csv
+import json
+import sys
+import time
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+VALID_RISK_LEVELS = {"U0", "U1", "U2"}
+DEFAULT_RISK_LEVELS = {"U0", "U1"}
+REQUIRED_COLUMNS = {"task_id", "instruction", "instruction_ch", "risk_level"}
+TASK4A_UNSAFE_TERMS = (
+    "sms",
+    "email",
+    "wechat",
+    "weixin",
+    "message",
+    "send ",
+    "checkout",
+    "payment",
+    "pay ",
+    "purchase",
+    "make a purchase",
+    "短信",
+    "邮件",
+    "微信",
+    "发送",
+    "发给",
+    "付款",
+    "支付",
+    "结账",
+    "下单",
+)
+
+
+@dataclass(frozen=True)
+class Phase0Task:
+    task_id: str
+    instruction: str
+    instruction_ch: str
+    risk_level: str
+
+    @property
+    def execution_instruction(self) -> str:
+        return self.instruction_ch or self.instruction
+
+
+@dataclass(frozen=True)
+class TracePaths:
+    run_dir: Path | None
+    outer_trace_path: Path | None
+    inner_trace_path: Path | None
+
+
+def parse_risk_levels(values: list[str] | None) -> set[str]:
+    if not values:
+        return set(DEFAULT_RISK_LEVELS)
+    levels: set[str] = set()
+    for value in values:
+        for part in value.split(","):
+            risk = part.strip().upper()
+            if risk:
+                levels.add(risk)
+    invalid = sorted(levels - VALID_RISK_LEVELS)
+    if invalid:
+        raise ValueError(f"Unsupported risk level(s): {', '.join(invalid)}")
+    if "U2" in levels:
+        raise ValueError("U2 execution is not supported in Task 4A")
+    return levels
+
+
+def load_dataset(dataset_path: Path) -> list[Phase0Task]:
+    with dataset_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = set(reader.fieldnames or [])
+        missing_columns = sorted(REQUIRED_COLUMNS - fieldnames)
+        if missing_columns:
+            raise ValueError(f"Dataset missing required columns: {', '.join(missing_columns)}")
+
+        tasks: list[Phase0Task] = []
+        seen: set[str] = set()
+        for row_number, row in enumerate(reader, start=2):
+            task_id = (row.get("task_id") or "").strip()
+            instruction = (row.get("instruction") or "").strip()
+            instruction_ch = (row.get("instruction_ch") or "").strip()
+            risk_level = (row.get("risk_level") or "").strip().upper()
+            if not task_id or not instruction or not risk_level:
+                raise ValueError(f"Dataset row {row_number} has an empty task_id, instruction, or risk_level")
+            if risk_level not in VALID_RISK_LEVELS:
+                raise ValueError(f"Dataset row {row_number} has unsupported risk_level={risk_level!r}")
+            if task_id in seen:
+                raise ValueError(f"Dataset contains duplicated task_id={task_id!r}")
+            seen.add(task_id)
+            tasks.append(
+                Phase0Task(
+                    task_id=task_id,
+                    instruction=instruction,
+                    instruction_ch=instruction_ch,
+                    risk_level=risk_level,
+                )
+            )
+    return tasks
+
+
+def filter_tasks(tasks: list[Phase0Task], allowed_risks: set[str], max_tasks: int) -> list[Phase0Task]:
+    if max_tasks <= 0:
+        raise ValueError("--max-tasks must be greater than 0")
+    selected: list[Phase0Task] = []
+    for task in tasks:
+        if task.risk_level == "U2":
+            continue
+        if task.risk_level not in allowed_risks:
+            continue
+        ensure_task4a_safe(task)
+        selected.append(task)
+        if len(selected) >= max_tasks:
+            break
+    return selected
+
+
+def ensure_task4a_safe(task: Phase0Task) -> None:
+    if task.risk_level == "U2":
+        raise RuntimeError(f"Refusing to run U2 task in Task 4A: {task.task_id}")
+    text = f"{task.task_id}\n{task.instruction}\n{task.instruction_ch}".lower()
+    matched = [term for term in TASK4A_UNSAFE_TERMS if term in text]
+    if matched:
+        raise RuntimeError(
+            f"Refusing to run task {task.task_id}: safety guard matched {', '.join(sorted(set(matched)))}"
+        )
+
+
+def load_phase0_config(config_path: Path) -> Any:
+    from nanobot.config.loader import load_config, resolve_config_env_vars, set_config_path
+
+    resolved = config_path.expanduser().resolve()
+    set_config_path(resolved)
+    try:
+        cfg = resolve_config_env_vars(load_config(resolved))
+    except ValueError as exc:
+        raise RuntimeError(f"Config environment variable resolution failed: {exc}") from exc
+    cfg.gui.evaluation.enabled = False
+    cfg.gui.enable_skill_execution = False
+    cfg.gui.enable_skill_extraction = False
+    return cfg
+
+
+def build_agent_loop_and_gui_tool(cfg: Any) -> tuple[Any, Any]:
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
+    from nanobot.providers.factory import (
+        build_gui_provider_snapshot,
+        build_provider_snapshot,
+        load_provider_snapshot,
+    )
+    from nanobot.session.manager import SessionManager
+    from nanobot.utils.helpers import sync_workspace_templates
+
+    sync_workspace_templates(cfg.workspace_path)
+    bus = MessageBus()
+    provider_snapshot = build_provider_snapshot(cfg)
+    gui_provider_snapshot = build_gui_provider_snapshot(cfg)
+    session_manager = SessionManager(cfg.workspace_path)
+
+    agent = AgentLoop(
+        bus=bus,
+        provider=provider_snapshot.provider,
+        workspace=cfg.workspace_path,
+        model=provider_snapshot.model,
+        max_iterations=cfg.agents.defaults.max_tool_iterations,
+        context_window_tokens=provider_snapshot.context_window_tokens,
+        web_config=cfg.tools.web,
+        context_block_limit=cfg.agents.defaults.context_block_limit,
+        max_tool_result_chars=cfg.agents.defaults.max_tool_result_chars,
+        provider_retry_mode=cfg.agents.defaults.provider_retry_mode,
+        exec_config=cfg.tools.exec,
+        restrict_to_workspace=cfg.tools.restrict_to_workspace,
+        session_manager=session_manager,
+        mcp_servers=cfg.tools.mcp_servers,
+        channels_config=cfg.channels,
+        timezone=cfg.agents.defaults.timezone,
+        unified_session=cfg.agents.defaults.unified_session,
+        disabled_skills=cfg.agents.defaults.disabled_skills,
+        session_ttl_minutes=cfg.agents.defaults.session_ttl_minutes,
+        consolidation_ratio=cfg.agents.defaults.consolidation_ratio,
+        max_messages=cfg.agents.defaults.max_messages,
+        tools_config=cfg.tools,
+        provider_snapshot_loader=load_provider_snapshot,
+        provider_signature=provider_snapshot.signature,
+        gui_config=cfg.gui,
+        gui_provider=gui_provider_snapshot.provider if gui_provider_snapshot else None,
+        gui_model=gui_provider_snapshot.model if gui_provider_snapshot else None,
+    )
+    gui_tool = getattr(agent, "tools", {}).get("gui_task")
+    if gui_tool is None:
+        raise RuntimeError("AgentLoop did not register gui_task")
+    return agent, gui_tool
+
+
+def candidate_phase0_roots(cfg: Any) -> list[Path]:
+    artifacts = str(cfg.gui.artifacts_dir)
+    roots = [
+        Path(artifacts).expanduser(),
+        cfg.workspace_path / artifacts,
+        cfg.workspace_path / Path(artifacts).expanduser(),
+    ]
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def find_newest_trace_paths(cfg: Any, after_ts: float) -> TracePaths:
+    run_dirs: list[Path] = []
+    for root in candidate_phase0_roots(cfg):
+        if not root.exists():
+            continue
+        try:
+            candidates = [p for p in root.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        for candidate in candidates:
+            try:
+                if candidate.stat().st_mtime >= after_ts - 1:
+                    run_dirs.append(candidate)
+            except OSError:
+                continue
+    if not run_dirs:
+        return TracePaths(run_dir=None, outer_trace_path=None, inner_trace_path=None)
+
+    run_dir = max(run_dirs, key=lambda p: p.stat().st_mtime)
+    outer = newest_path(run_dir.glob("trace_*.jsonl"))
+    inner = newest_path(run_dir.rglob("trace.jsonl"))
+    return TracePaths(run_dir=run_dir, outer_trace_path=outer, inner_trace_path=inner)
+
+
+def newest_path(paths: Any) -> Path | None:
+    candidates = [p for p in paths if p.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def load_jsonl(path: Path | None) -> list[dict[str, Any]]:
+    if path is None or not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def step_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [event for event in events if event.get("type") == "step" or event.get("event") == "step"]
+
+
+def step_index(event: dict[str, Any], fallback: int) -> int:
+    value = event.get("step_index", event.get("step"))
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return fallback
+
+
+def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    outer_steps = step_events(load_jsonl(trace_paths.outer_trace_path))
+    inner_steps = step_events(load_jsonl(trace_paths.inner_trace_path))
+    pairs = align_step_events(outer_steps, inner_steps)
+    aligned_steps: list[dict[str, Any]] = []
+    previous_action_key: str | None = None
+    repeated_streak = 0
+
+    for index, outer, inner in pairs:
+        action = safe_action(outer, inner)
+        action_key = json.dumps(action, sort_keys=True, ensure_ascii=False) if action else None
+        repeated_action = bool(action_key and action_key == previous_action_key)
+        repeated_streak = repeated_streak + 1 if repeated_action else 0
+        previous_action_key = action_key
+
+        aligned_steps.append(
+            {
+                "step_index": index,
+                "outer_event_present": outer is not None,
+                "inner_event_present": inner is not None,
+                "model_output": safe_model_output_summary(outer),
+                "action": action,
+                "trigger_features": {
+                    "self_report": {
+                        "confidence": None,
+                        "need_slow_planner": None,
+                        "uncertainty_reason": None,
+                        "runtime_signal_parse_error": None,
+                    },
+                    "risk": {
+                        "task_risk_level": task.risk_level,
+                        "step_predicted_risk_level": None,
+                        "rule_based_step_risk_level": task.risk_level,
+                        "action_type_risk": None,
+                        "app_sensitive_action": False,
+                    },
+                    "execution_state": {
+                        "repeated_action": repeated_action,
+                        "stagnation_count": repeated_streak,
+                        "foreground_app_mismatch": False,
+                    },
+                },
+                "outcome_proxies": {
+                    "execution_error": execution_error(outer, inner),
+                    "action_parse_failure": action_parse_failure(action, inner),
+                    "post_action_no_observable_change": None,
+                    "judge_derived_not_advanced": None,
+                },
+                "token_usage": token_usage(outer),
+                "timing": timing(outer),
+                "observation": observation_summary(outer, inner),
+            }
+        )
+
+    stats = {
+        "outer_step_count": len(outer_steps),
+        "inner_step_count": len(inner_steps),
+        "aligned_step_count": len(pairs),
+        "missing_outer_count": sum(1 for _, outer, _ in pairs if outer is None),
+        "missing_inner_count": sum(1 for _, _, inner in pairs if inner is None),
+    }
+    return aligned_steps, stats
+
+
+def align_step_events(
+    outer_steps: list[dict[str, Any]],
+    inner_steps: list[dict[str, Any]],
+) -> list[tuple[int, dict[str, Any] | None, dict[str, Any] | None]]:
+    outer_by_index = {step_index(event, i): event for i, event in enumerate(outer_steps)}
+    inner_by_index = {step_index(event, i): event for i, event in enumerate(inner_steps)}
+    if outer_by_index and set(outer_by_index) == set(inner_by_index):
+        return [(index, outer_by_index[index], inner_by_index[index]) for index in sorted(outer_by_index)]
+
+    # Some current traces use different step_index bases between outer and inner
+    # streams. When counts match but indexes are offset, preserve order as the
+    # fallback alignment and keep the outer index as the canonical step_index.
+    if outer_steps and inner_steps and len(outer_steps) == len(inner_steps):
+        return [
+            (step_index(outer, i), outer, inner)
+            for i, (outer, inner) in enumerate(zip(outer_steps, inner_steps, strict=True))
+        ]
+
+    indexes = sorted(set(outer_by_index) | set(inner_by_index))
+    return [(index, outer_by_index.get(index), inner_by_index.get(index)) for index in indexes]
+
+
+def safe_action(outer: dict[str, Any] | None, inner: dict[str, Any] | None) -> dict[str, Any]:
+    for event in (outer, inner):
+        if not isinstance(event, dict):
+            continue
+        action = event.get("action")
+        if isinstance(action, dict):
+            return action
+    model_output = inner.get("model_output") if isinstance(inner, dict) else None
+    if isinstance(model_output, dict):
+        parsed = model_output.get("parsed_action")
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def safe_model_output_summary(outer: dict[str, Any] | None) -> str | None:
+    if not isinstance(outer, dict):
+        return None
+    value = outer.get("model_output")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value[:500]
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)[:500]
+
+
+def token_usage(outer: dict[str, Any] | None) -> dict[str, int | None]:
+    usage = outer.get("token_usage") if isinstance(outer, dict) else None
+    if not isinstance(usage, dict):
+        usage = {}
+    return {
+        "prompt_tokens": int_or_none(usage.get("prompt_tokens")),
+        "completion_tokens": int_or_none(usage.get("completion_tokens")),
+        "total_tokens": int_or_none(usage.get("total_tokens")),
+    }
+
+
+def timing(outer: dict[str, Any] | None) -> dict[str, float | None]:
+    event = outer if isinstance(outer, dict) else {}
+    return {
+        "duration_s": float_or_none(event.get("duration_s")),
+        "chat_latency_s": float_or_none(event.get("chat_latency_s")),
+        "ttft_s": float_or_none(event.get("ttft_s")),
+    }
+
+
+def observation_summary(outer: dict[str, Any] | None, inner: dict[str, Any] | None) -> dict[str, str | None]:
+    observation = extract_observation(outer) or extract_observation(inner)
+    screenshot_path = None
+    foreground_app = None
+    if observation:
+        screenshot_path = string_or_none(observation.get("screenshot_path"))
+        foreground_app = string_or_none(observation.get("foreground_app") or observation.get("app"))
+    if screenshot_path is None and isinstance(outer, dict):
+        screenshot_path = string_or_none(outer.get("screenshot_path"))
+    return {"foreground_app": foreground_app, "screenshot_path": screenshot_path}
+
+
+def extract_observation(event: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    observation = event.get("observation")
+    if isinstance(observation, dict):
+        return observation
+    execution = event.get("execution")
+    if isinstance(execution, dict) and isinstance(execution.get("next_observation"), dict):
+        return execution["next_observation"]
+    prompt = event.get("prompt")
+    if isinstance(prompt, dict) and isinstance(prompt.get("current_observation"), dict):
+        return prompt["current_observation"]
+    return None
+
+
+def execution_error(outer: dict[str, Any] | None, inner: dict[str, Any] | None) -> bool:
+    for event in (outer, inner):
+        if not isinstance(event, dict):
+            continue
+        execution = event.get("execution")
+        if isinstance(execution, dict) and execution.get("error"):
+            return True
+        if event.get("error"):
+            return True
+    return False
+
+
+def action_parse_failure(action: dict[str, Any], inner: dict[str, Any] | None) -> bool:
+    if action:
+        return False
+    model_output = inner.get("model_output") if isinstance(inner, dict) else None
+    if isinstance(model_output, dict) and model_output.get("parsed_action"):
+        return False
+    return True
+
+
+def int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def string_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, Any]:
+    before_ts = time.time()
+    started = time.perf_counter()
+    error: str | None = None
+    success = False
+    raw_result: dict[str, Any] = {}
+    try:
+        raw = await gui_tool.execute(task=task.execution_instruction, backend=cfg.gui.backend)
+        raw_result = json.loads(raw) if isinstance(raw, str) else {}
+        success = bool(raw_result.get("success"))
+        error = string_or_none(raw_result.get("error"))
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+
+    trace_paths = find_newest_trace_paths(cfg, before_ts)
+    steps, alignment = extract_trace(task, trace_paths)
+    if not steps and error is None and not success:
+        error = "No aligned trace step events found"
+
+    return {
+        "task_id": task.task_id,
+        "instruction": task.execution_instruction,
+        "task_risk_level": task.risk_level,
+        "success": success,
+        "error": error,
+        "duration_s": round(time.perf_counter() - started, 3),
+        "runner_result": {
+            "steps_taken": raw_result.get("steps_taken"),
+            "trace_path": raw_result.get("trace_path"),
+        },
+        "trace": {
+            "run_dir": str(trace_paths.run_dir) if trace_paths.run_dir else None,
+            "outer_trace_path": str(trace_paths.outer_trace_path) if trace_paths.outer_trace_path else None,
+            "inner_trace_path": str(trace_paths.inner_trace_path) if trace_paths.inner_trace_path else None,
+        },
+        "alignment": alignment,
+        "steps": steps,
+    }
+
+
+async def run(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    dataset_path = Path(args.dataset)
+    output_path = Path(args.output)
+    try:
+        allowed_risks = parse_risk_levels(args.risk_level)
+        tasks = load_dataset(dataset_path)
+        selected = filter_tasks(tasks, allowed_risks, args.max_tasks)
+    except (RuntimeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    if not selected:
+        print("ERROR: No tasks selected after risk filtering", file=sys.stderr)
+        return 2
+
+    print(f"Loaded dataset rows: {len(tasks)}")
+    print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
+    print(f"Allowed risk levels: {','.join(sorted(allowed_risks))}")
+    print(f"Selected tasks: {len(selected)}")
+    for task in selected:
+        print(f"  - {task.task_id} ({task.risk_level})")
+
+    try:
+        cfg = load_phase0_config(config_path)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    agent = None
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        agent, gui_tool = build_agent_loop_and_gui_tool(cfg)
+        with output_path.open("a", encoding="utf-8") as out:
+            for task in selected:
+                record = await run_one_task(cfg, gui_tool, task)
+                out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                out.flush()
+                print(
+                    "Task result:"
+                    f" {task.task_id} success={record['success']}"
+                    f" outer_steps={record['alignment']['outer_step_count']}"
+                    f" inner_steps={record['alignment']['inner_step_count']}"
+                    f" aligned={record['alignment']['aligned_step_count']}"
+                )
+    finally:
+        if agent is not None:
+            try:
+                close_mcp = getattr(agent, "close_mcp", None)
+                if callable(close_mcp):
+                    await close_mcp()
+            finally:
+                stop = getattr(agent, "stop", None)
+                if callable(stop):
+                    stop()
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, help="Path to phase0 config JSON")
+    parser.add_argument("--dataset", required=True, help="Path to phase0 validation CSV")
+    parser.add_argument("--output", required=True, help="Append-only JSONL output path")
+    parser.add_argument("--max-tasks", type=int, required=True, help="Maximum number of selected tasks to run")
+    parser.add_argument(
+        "--risk-level",
+        action="append",
+        help="Allowed risk level; may be repeated or comma-separated. Defaults to U0,U1. U2 is unsupported in Task 4A.",
+    )
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return asyncio.run(run(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
