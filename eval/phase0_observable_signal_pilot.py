@@ -312,6 +312,12 @@ def display_path(path: Path | str | None) -> str | None:
     return text
 
 
+def path_warning(*paths: Path | str | None) -> str | None:
+    if any(path is not None and "/~/.nanobot/workspace/" in str(path) for path in paths):
+        return "duplicated_workspace_prefix"
+    return None
+
+
 def newest_path(paths: Any) -> Path | None:
     candidates = [p for p in paths if p.is_file()]
     if not candidates:
@@ -350,7 +356,7 @@ def step_index(event: dict[str, Any], fallback: int) -> int:
     return fallback
 
 
-def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
     outer_steps = step_events(load_jsonl(trace_paths.outer_trace_path))
     inner_steps = step_events(load_jsonl(trace_paths.inner_trace_path))
     pairs = align_step_events(outer_steps, inner_steps)
@@ -411,7 +417,49 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
         "missing_outer_count": sum(1 for _, outer, _ in pairs if outer is None),
         "missing_inner_count": sum(1 for _, _, inner in pairs if inner is None),
     }
-    return aligned_steps, stats
+    quality = trace_quality(outer_steps, inner_steps, stats)
+    return aligned_steps, stats, quality
+
+
+def trace_quality(
+    outer_steps: list[dict[str, Any]],
+    inner_steps: list[dict[str, Any]],
+    stats: dict[str, int],
+) -> dict[str, Any]:
+    outer_count = stats["outer_step_count"]
+    inner_count = stats["inner_step_count"]
+    aligned_count = stats["aligned_step_count"]
+    inner_coverage = round(inner_count / outer_count, 3) if outer_count > 0 else 0
+    has_any_raw_content = any(inner_model_output(step).get("raw_content") for step in inner_steps)
+    has_any_parsed_action = any(inner_model_output(step).get("parsed_action") for step in inner_steps)
+
+    quality_warning = None
+    if aligned_count == 0:
+        quality_warning = "trace_missing"
+    elif inner_coverage < 0.8:
+        quality_warning = "low_inner_coverage"
+    elif not has_any_raw_content:
+        quality_warning = "missing_raw_content"
+    elif not has_any_parsed_action:
+        quality_warning = "missing_parsed_action"
+
+    return {
+        "outer_step_count": outer_count,
+        "inner_step_count": inner_count,
+        "aligned_step_count": aligned_count,
+        "missing_outer_count": stats["missing_outer_count"],
+        "missing_inner_count": stats["missing_inner_count"],
+        "inner_coverage": inner_coverage,
+        "has_any_raw_content": has_any_raw_content,
+        "has_any_parsed_action": has_any_parsed_action,
+        "clean_for_signal_analysis": quality_warning is None,
+        "quality_warning": quality_warning,
+    }
+
+
+def inner_model_output(step: dict[str, Any]) -> dict[str, Any]:
+    model_output = step.get("model_output")
+    return model_output if isinstance(model_output, dict) else {}
 
 
 def align_step_events(
@@ -551,28 +599,47 @@ def string_or_none(value: Any) -> str | None:
 async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, Any]:
     before_ts = time.time()
     started = time.perf_counter()
-    error: str | None = None
-    success = False
+    runner_returned = False
+    runner_error: str | None = None
+    task_success: bool | None = None
     raw_result: dict[str, Any] = {}
     try:
         raw = await gui_tool.execute(task=task.execution_instruction, backend=cfg.gui.backend)
         raw_result = json.loads(raw) if isinstance(raw, str) else {}
-        success = bool(raw_result.get("success"))
-        error = string_or_none(raw_result.get("error"))
+        runner_returned = isinstance(raw_result, dict)
+        if isinstance(raw_result.get("success"), bool):
+            task_success = raw_result["success"]
+        runner_error = string_or_none(raw_result.get("error"))
     except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
+        runner_error = f"{type(exc).__name__}: {exc}"
 
     trace_paths = find_newest_trace_paths(cfg, before_ts)
-    steps, alignment = extract_trace(task, trace_paths)
-    if not steps and error is None and not success:
-        error = "No aligned trace step events found"
+    steps, alignment, quality = extract_trace(task, trace_paths)
+    termination_reason = normalize_termination(
+        runner_error=runner_error,
+        task_success=task_success,
+        aligned_step_count=alignment["aligned_step_count"],
+        exception=not runner_returned,
+    )
+    clean_success = (
+        task_success is True
+        and runner_error is None
+        and termination_reason == "completed"
+        and quality["clean_for_signal_analysis"] is True
+    )
+    warning = path_warning(trace_paths.run_dir, trace_paths.outer_trace_path, trace_paths.inner_trace_path)
 
     return {
         "task_id": task.task_id,
         "instruction": task.execution_instruction,
         "task_risk_level": task.risk_level,
-        "success": success,
-        "error": error,
+        "runner_returned": runner_returned,
+        "runner_error": runner_error,
+        "task_success": task_success,
+        "clean_success": clean_success,
+        "termination_reason": termination_reason,
+        "success": clean_success,
+        "error": runner_error,
         "duration_s": round(time.perf_counter() - started, 3),
         "runner_result": {
             "steps_taken": raw_result.get("steps_taken"),
@@ -587,11 +654,43 @@ async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, A
             "inner_trace_path_display": display_path(trace_paths.inner_trace_path),
         },
         "alignment": alignment,
+        "trace_quality": quality,
+        "path_warning": warning,
         "steps": steps,
     }
 
 
+def normalize_termination(
+    *,
+    runner_error: str | None,
+    task_success: bool | None,
+    aligned_step_count: int,
+    exception: bool,
+) -> str:
+    if exception:
+        return "exception"
+    error_text = (runner_error or "").lower()
+    if "max_steps_exceeded" in error_text:
+        return "max_steps_exceeded"
+    if "stagnation_detected" in error_text:
+        return "stagnation_detected"
+    if aligned_step_count == 0:
+        return "trace_missing"
+    if runner_error:
+        return "unknown_error"
+    if task_success is True:
+        return "completed"
+    return "unknown_error"
+
+
 async def run(args: argparse.Namespace) -> int:
+    if args.summarize_output:
+        summarize_output(Path(args.summarize_output))
+        return 0
+
+    if not args.dataset:
+        print("ERROR: --dataset is required unless --summarize-output is used", file=sys.stderr)
+        return 2
     dataset_path = Path(args.dataset)
     try:
         allowed_risks = parse_risk_levels(args.risk_level)
@@ -662,10 +761,13 @@ async def run(args: argparse.Namespace) -> int:
                 print(
                     "Task result:"
                     f" {task.task_id} success={record['success']}"
+                    f" clean_success={record['clean_success']}"
+                    f" termination={record['termination_reason']}"
                     f" error={record['error']}"
                     f" outer_steps={record['alignment']['outer_step_count']}"
                     f" inner_steps={record['alignment']['inner_step_count']}"
                     f" aligned={record['alignment']['aligned_step_count']}"
+                    f" quality_warning={record['trace_quality']['quality_warning']}"
                     f" run_dir={record['trace']['run_dir_display']}"
                 )
     finally:
@@ -721,11 +823,63 @@ def preview(text: str, limit: int = 96) -> str:
     return normalized[: limit - 3] + "..."
 
 
+def summarize_output(path: Path) -> None:
+    records = load_output_records(path)
+    risk_distribution = Counter(record.get("task_risk_level") for record in records)
+    termination_distribution = Counter(record.get("termination_reason", "missing") for record in records)
+    clean_success_count = sum(1 for record in records if record.get("clean_success") is True)
+    coverage_values = [
+        quality["inner_coverage"]
+        for record in records
+        if isinstance((quality := record.get("trace_quality")), dict)
+        and isinstance(quality.get("inner_coverage"), (int, float))
+    ]
+    average_inner_coverage = round(sum(coverage_values) / len(coverage_values), 3) if coverage_values else 0
+    quality_warning_count = sum(
+        1
+        for record in records
+        if isinstance(record.get("trace_quality"), dict) and record["trace_quality"].get("quality_warning") is not None
+    )
+    clean_for_signal_count = sum(
+        1
+        for record in records
+        if isinstance(record.get("trace_quality"), dict)
+        and record["trace_quality"].get("clean_for_signal_analysis") is True
+    )
+
+    print(f"Total records: {len(records)}")
+    print(f"Risk distribution: {dict(risk_distribution)}")
+    print(f"Clean success count: {clean_success_count}")
+    print(f"Termination reason distribution: {dict(termination_distribution)}")
+    print(f"Average inner coverage: {average_inner_coverage}")
+    print(f"Records with quality warnings: {quality_warning_count}")
+    print(f"Clean for signal analysis count: {clean_for_signal_count}")
+
+
+def load_output_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise SystemExit(f"ERROR: Output JSONL does not exist: {path}")
+    records: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", help="Path to phase0 config JSON")
-    parser.add_argument("--dataset", required=True, help="Path to phase0 validation CSV")
+    parser.add_argument("--dataset", help="Path to phase0 validation CSV")
     parser.add_argument("--output", help="Append-only JSONL output path")
+    parser.add_argument("--summarize-output", help="Summarize an existing output JSONL without running GUI")
     parser.add_argument("--max-tasks", type=int, help="Maximum number of selected tasks to run")
     parser.add_argument("--max-steps", type=int, help="Temporary GUI max_steps override for this run")
     parser.add_argument("--task-id", action="append", help="Task ID to select; may be repeated or comma-separated")
