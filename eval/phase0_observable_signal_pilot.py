@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import csv
 import json
+import re
 import sys
 import time
 from collections import Counter
@@ -50,6 +51,17 @@ TASK4A_UNSAFE_TERMS = (
     "结账",
     "下单",
 )
+RUNTIME_SIGNAL_INSTRUCTION = (
+    "Before the <tool_call> block, output exactly one <runtime_signal>...</runtime_signal> "
+    "block as compact JSON. The JSON schema is: "
+    '{"confidence": number between 0 and 1, '
+    '"step_predicted_risk_level": "U0" | "U1" | "U2", '
+    '"need_slow_planner": boolean, '
+    '"uncertainty_reason": string}. '
+    "Then output the normal <tool_call> block exactly as required by the qwen3vl action format. "
+    "Do not put runtime_signal inside the tool_call arguments."
+)
+RUNTIME_SIGNAL_RE = re.compile(r"<runtime_signal>\s*(.*?)\s*</runtime_signal>", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -197,6 +209,13 @@ def synthetic_task(task_text: str, allowed_risks: set[str], max_tasks: int | Non
     if max_tasks != 1:
         raise ValueError("--task-text requires --max-tasks 1")
     return [task]
+
+
+def instruction_for_run(task: Phase0Task, runtime_signal_enabled: bool) -> str:
+    instruction = task.execution_instruction
+    if not runtime_signal_enabled:
+        return instruction
+    return f"{RUNTIME_SIGNAL_INSTRUCTION}\n\nTask:\n{instruction}"
 
 
 def ensure_task4b_safe(task: Phase0Task) -> None:
@@ -406,6 +425,7 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
 
     for index, outer, inner in pairs:
         action = safe_action(outer, inner)
+        signal = extract_runtime_signal(inner)
         action_key = json.dumps(action, sort_keys=True, ensure_ascii=False) if action else None
         repeated_action = bool(action_key and action_key == previous_action_key)
         repeated_streak = repeated_streak + 1 if repeated_action else 0
@@ -421,14 +441,14 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
                 "action": action,
                 "trigger_features": {
                     "self_report": {
-                        "confidence": None,
-                        "need_slow_planner": None,
-                        "uncertainty_reason": None,
-                        "runtime_signal_parse_error": None,
+                        "confidence": signal["confidence"],
+                        "need_slow_planner": signal["need_slow_planner"],
+                        "uncertainty_reason": signal["uncertainty_reason"],
+                        "runtime_signal_parse_error": signal["runtime_signal_parse_error"],
                     },
                     "risk": {
                         "task_risk_level": task.risk_level,
-                        "step_predicted_risk_level": None,
+                        "step_predicted_risk_level": signal["step_predicted_risk_level"],
                         "rule_based_step_risk_level": task.risk_level,
                         "action_type_risk": None,
                         "app_sensitive_action": False,
@@ -521,6 +541,61 @@ def coverage_note(stats: dict[str, int], quality_warning: str | None) -> str | N
 def inner_model_output(step: dict[str, Any]) -> dict[str, Any]:
     model_output = step.get("model_output")
     return model_output if isinstance(model_output, dict) else {}
+
+
+def extract_runtime_signal(inner: dict[str, Any] | None) -> dict[str, Any]:
+    result = {
+        "confidence": None,
+        "need_slow_planner": None,
+        "uncertainty_reason": None,
+        "step_predicted_risk_level": None,
+        "runtime_signal_parse_error": None,
+    }
+    if not isinstance(inner, dict):
+        return result
+    raw_content = inner_model_output(inner).get("raw_content")
+    if not isinstance(raw_content, str):
+        return result
+    match = RUNTIME_SIGNAL_RE.search(raw_content)
+    if not match:
+        return result
+
+    errors: list[str] = []
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        result["runtime_signal_parse_error"] = f"invalid_json:{exc.msg}"
+        return result
+    if not isinstance(payload, dict):
+        result["runtime_signal_parse_error"] = "runtime_signal_not_object"
+        return result
+
+    confidence = payload.get("confidence")
+    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and 0 <= confidence <= 1:
+        result["confidence"] = float(confidence)
+    else:
+        errors.append("invalid_confidence")
+
+    need_slow_planner = payload.get("need_slow_planner")
+    if isinstance(need_slow_planner, bool):
+        result["need_slow_planner"] = need_slow_planner
+    else:
+        errors.append("invalid_need_slow_planner")
+
+    step_risk = payload.get("step_predicted_risk_level")
+    if step_risk in VALID_RISK_LEVELS:
+        result["step_predicted_risk_level"] = step_risk
+    else:
+        errors.append("invalid_step_predicted_risk_level")
+
+    uncertainty_reason = payload.get("uncertainty_reason")
+    if isinstance(uncertainty_reason, str):
+        result["uncertainty_reason"] = uncertainty_reason
+    else:
+        errors.append("invalid_uncertainty_reason")
+
+    result["runtime_signal_parse_error"] = ";".join(errors) if errors else None
+    return result
 
 
 def align_step_events(
@@ -657,7 +732,13 @@ def string_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, Any]:
+async def run_one_task(
+    cfg: Any,
+    gui_tool: Any,
+    task: Phase0Task,
+    *,
+    runtime_signal_enabled: bool = False,
+) -> dict[str, Any]:
     before_ts = time.time()
     started = time.perf_counter()
     runner_returned = False
@@ -665,7 +746,10 @@ async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, A
     task_success: bool | None = None
     raw_result: dict[str, Any] = {}
     try:
-        raw = await gui_tool.execute(task=task.execution_instruction, backend=cfg.gui.backend)
+        raw = await gui_tool.execute(
+            task=instruction_for_run(task, runtime_signal_enabled),
+            backend=cfg.gui.backend,
+        )
         raw_result = json.loads(raw) if isinstance(raw, str) else {}
         runner_returned = isinstance(raw_result, dict)
         if isinstance(raw_result.get("success"), bool):
@@ -695,6 +779,7 @@ async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, A
         "task_source": task.task_source,
         "instruction": task.execution_instruction,
         "task_risk_level": task.risk_level,
+        "runtime_signal_enabled": runtime_signal_enabled,
         "runner_returned": runner_returned,
         "runner_error": runner_error,
         "task_success": task_success,
@@ -781,6 +866,7 @@ async def run(args: argparse.Namespace) -> int:
             cfg=None,
             output_path=None,
             max_steps=args.max_steps,
+            runtime_signal_enabled=args.runtime_signal,
         )
         print("Dry-select mode: AgentLoop was not initialized; no GUI task was run; no output JSONL was written.")
         return 0
@@ -812,6 +898,7 @@ async def run(args: argparse.Namespace) -> int:
         cfg=cfg,
         output_path=output_path,
         max_steps=cfg.gui.max_steps,
+        runtime_signal_enabled=args.runtime_signal,
     )
 
     agent = None
@@ -820,7 +907,12 @@ async def run(args: argparse.Namespace) -> int:
         agent, gui_tool = build_agent_loop_and_gui_tool(cfg)
         with output_path.open("a", encoding="utf-8") as out:
             for task in selected:
-                record = await run_one_task(cfg, gui_tool, task)
+                record = await run_one_task(
+                    cfg,
+                    gui_tool,
+                    task,
+                    runtime_signal_enabled=args.runtime_signal,
+                )
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 out.flush()
                 print(
@@ -864,6 +956,7 @@ def print_run_summary(
     cfg: Any | None,
     output_path: Path | None,
     max_steps: int | None,
+    runtime_signal_enabled: bool,
 ) -> None:
     print(f"Loaded dataset rows: {len(tasks)}")
     print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
@@ -872,6 +965,7 @@ def print_run_summary(
     print("Selected task sources: " + ", ".join(task.task_source for task in selected))
     print(f"Effective risk levels: {','.join(sorted(allowed_risks))}")
     print(f"Effective max steps: {max_steps if max_steps is not None else 'config default'}")
+    print(f"Runtime signal enabled: {runtime_signal_enabled}")
     if cfg is not None:
         print(f"Backend: {cfg.gui.backend}")
         print(f"Agent profile: {cfg.gui.agent_profile}")
@@ -950,6 +1044,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, help="Temporary GUI max_steps override for this run")
     parser.add_argument("--task-id", action="append", help="Task ID to select; may be repeated or comma-separated")
     parser.add_argument("--task-text", help="Synthetic smoke-only task text; requires --risk-level U0 and --max-tasks 1")
+    parser.add_argument("--runtime-signal", action="store_true", help="Ask qwen3vl text profile to emit a runtime_signal block before tool_call")
     parser.add_argument("--list-tasks", action="store_true", help="List dataset tasks and exit without running GUI")
     parser.add_argument("--dry-select", action="store_true", help="Apply selection and safety checks without running GUI")
     parser.add_argument(
