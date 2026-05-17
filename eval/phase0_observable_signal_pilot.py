@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 VALID_RISK_LEVELS = {"U0", "U1", "U2"}
 DEFAULT_RISK_LEVELS = {"U0", "U1"}
 REQUIRED_COLUMNS = {"task_id", "instruction", "instruction_ch", "risk_level"}
+MAX_EXECUTION_TASKS = 3
 TASK4A_UNSAFE_TERMS = (
     "sms",
     "email",
@@ -83,8 +84,20 @@ def parse_risk_levels(values: list[str] | None) -> set[str]:
     if invalid:
         raise ValueError(f"Unsupported risk level(s): {', '.join(invalid)}")
     if "U2" in levels:
-        raise ValueError("U2 execution is not supported in Task 4A")
+        raise ValueError("U2 execution is not supported in Task 4B")
     return levels
+
+
+def parse_task_ids(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    task_ids: list[str] = []
+    for value in values:
+        for part in value.split(","):
+            task_id = part.strip()
+            if task_id:
+                task_ids.append(task_id)
+    return task_ids
 
 
 def load_dataset(dataset_path: Path) -> list[Phase0Task]:
@@ -120,25 +133,54 @@ def load_dataset(dataset_path: Path) -> list[Phase0Task]:
     return tasks
 
 
-def filter_tasks(tasks: list[Phase0Task], allowed_risks: set[str], max_tasks: int) -> list[Phase0Task]:
-    if max_tasks <= 0:
+def filter_tasks(
+    tasks: list[Phase0Task],
+    allowed_risks: set[str],
+    max_tasks: int | None,
+    task_ids: list[str] | None = None,
+) -> list[Phase0Task]:
+    if max_tasks is not None and max_tasks <= 0:
         raise ValueError("--max-tasks must be greater than 0")
+    requested_ids = task_ids or []
+    if requested_ids:
+        by_id = {task.task_id: task for task in tasks}
+        missing = [task_id for task_id in requested_ids if task_id not in by_id]
+        if missing:
+            raise ValueError(f"Unknown task_id(s): {', '.join(missing)}")
+        requested_tasks = [by_id[task_id] for task_id in requested_ids]
+        u2_requested = [task.task_id for task in requested_tasks if task.risk_level == "U2"]
+        if u2_requested:
+            raise ValueError(
+                "U2 execution is not supported in Task 4B; blocked task_id(s): "
+                + ", ".join(u2_requested)
+            )
+        selected = [task for task in requested_tasks if task.risk_level in allowed_risks]
+        if len(selected) != len(requested_tasks):
+            excluded = [task.task_id for task in requested_tasks if task.risk_level not in allowed_risks]
+            raise ValueError(
+                "Selected task_id(s) excluded by effective risk levels: "
+                + ", ".join(excluded)
+            )
+        for task in selected:
+            ensure_task4b_safe(task)
+        return selected[:max_tasks] if max_tasks is not None else selected
+
     selected: list[Phase0Task] = []
     for task in tasks:
         if task.risk_level == "U2":
             continue
         if task.risk_level not in allowed_risks:
             continue
-        ensure_task4a_safe(task)
+        ensure_task4b_safe(task)
         selected.append(task)
-        if len(selected) >= max_tasks:
+        if max_tasks is not None and len(selected) >= max_tasks:
             break
     return selected
 
 
-def ensure_task4a_safe(task: Phase0Task) -> None:
+def ensure_task4b_safe(task: Phase0Task) -> None:
     if task.risk_level == "U2":
-        raise RuntimeError(f"Refusing to run U2 task in Task 4A: {task.task_id}")
+        raise RuntimeError(f"Refusing to run U2 task in Task 4B: {task.task_id}")
     text = f"{task.task_id}\n{task.instruction}\n{task.instruction_ch}".lower()
     matched = [term for term in TASK4A_UNSAFE_TERMS if term in text]
     if matched:
@@ -147,7 +189,7 @@ def ensure_task4a_safe(task: Phase0Task) -> None:
         )
 
 
-def load_phase0_config(config_path: Path) -> Any:
+def load_phase0_config(config_path: Path, max_steps: int | None = None) -> Any:
     from nanobot.config.loader import load_config, resolve_config_env_vars, set_config_path
 
     resolved = config_path.expanduser().resolve()
@@ -159,6 +201,10 @@ def load_phase0_config(config_path: Path) -> Any:
     cfg.gui.evaluation.enabled = False
     cfg.gui.enable_skill_execution = False
     cfg.gui.enable_skill_extraction = False
+    if max_steps is not None:
+        if max_steps <= 0:
+            raise RuntimeError("--max-steps must be greater than 0")
+        cfg.gui.max_steps = max_steps
     return cfg
 
 
@@ -253,6 +299,17 @@ def find_newest_trace_paths(cfg: Any, after_ts: float) -> TracePaths:
     outer = newest_path(run_dir.glob("trace_*.jsonl"))
     inner = newest_path(run_dir.rglob("trace.jsonl"))
     return TracePaths(run_dir=run_dir, outer_trace_path=outer, inner_trace_path=inner)
+
+
+def display_path(path: Path | str | None) -> str | None:
+    if path is None:
+        return None
+    text = str(path)
+    marker = "/~/.nanobot/workspace/"
+    if marker in text:
+        prefix, suffix = text.split(marker, 1)
+        return f"{prefix}/{suffix}"
+    return text
 
 
 def newest_path(paths: Any) -> Path | None:
@@ -523,8 +580,11 @@ async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, A
         },
         "trace": {
             "run_dir": str(trace_paths.run_dir) if trace_paths.run_dir else None,
+            "run_dir_display": display_path(trace_paths.run_dir),
             "outer_trace_path": str(trace_paths.outer_trace_path) if trace_paths.outer_trace_path else None,
+            "outer_trace_path_display": display_path(trace_paths.outer_trace_path),
             "inner_trace_path": str(trace_paths.inner_trace_path) if trace_paths.inner_trace_path else None,
+            "inner_trace_path_display": display_path(trace_paths.inner_trace_path),
         },
         "alignment": alignment,
         "steps": steps,
@@ -532,13 +592,15 @@ async def run_one_task(cfg: Any, gui_tool: Any, task: Phase0Task) -> dict[str, A
 
 
 async def run(args: argparse.Namespace) -> int:
-    config_path = Path(args.config)
     dataset_path = Path(args.dataset)
-    output_path = Path(args.output)
     try:
         allowed_risks = parse_risk_levels(args.risk_level)
+        task_ids = parse_task_ids(args.task_id)
         tasks = load_dataset(dataset_path)
-        selected = filter_tasks(tasks, allowed_risks, args.max_tasks)
+        if args.list_tasks:
+            print_task_list(tasks)
+            return 0
+        selected = filter_tasks(tasks, allowed_risks, args.max_tasks, task_ids)
     except (RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -547,18 +609,46 @@ async def run(args: argparse.Namespace) -> int:
         print("ERROR: No tasks selected after risk filtering", file=sys.stderr)
         return 2
 
-    print(f"Loaded dataset rows: {len(tasks)}")
-    print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
-    print(f"Allowed risk levels: {','.join(sorted(allowed_risks))}")
-    print(f"Selected tasks: {len(selected)}")
-    for task in selected:
-        print(f"  - {task.task_id} ({task.risk_level})")
+    if args.dry_select:
+        print_run_summary(
+            tasks=tasks,
+            selected=selected,
+            allowed_risks=allowed_risks,
+            cfg=None,
+            output_path=None,
+            max_steps=args.max_steps,
+        )
+        print("Dry-select mode: AgentLoop was not initialized; no GUI task was run; no output JSONL was written.")
+        return 0
+
+    if args.max_tasks is None:
+        print("ERROR: --max-tasks is required when running GUI tasks", file=sys.stderr)
+        return 2
+    if args.max_tasks > MAX_EXECUTION_TASKS:
+        print(
+            f"ERROR: Refusing to run {args.max_tasks} tasks in Task 4B; maximum is {MAX_EXECUTION_TASKS}",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.config or not args.output:
+        print("ERROR: --config and --output are required when running GUI tasks", file=sys.stderr)
+        return 2
 
     try:
-        cfg = load_phase0_config(config_path)
+        cfg = load_phase0_config(Path(args.config), max_steps=args.max_steps)
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    output_path = Path(args.output)
+    print_run_summary(
+        tasks=tasks,
+        selected=selected,
+        allowed_risks=allowed_risks,
+        cfg=cfg,
+        output_path=output_path,
+        max_steps=cfg.gui.max_steps,
+    )
 
     agent = None
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -572,9 +662,11 @@ async def run(args: argparse.Namespace) -> int:
                 print(
                     "Task result:"
                     f" {task.task_id} success={record['success']}"
+                    f" error={record['error']}"
                     f" outer_steps={record['alignment']['outer_step_count']}"
                     f" inner_steps={record['alignment']['inner_step_count']}"
                     f" aligned={record['alignment']['aligned_step_count']}"
+                    f" run_dir={record['trace']['run_dir_display']}"
                 )
     finally:
         if agent is not None:
@@ -589,16 +681,60 @@ async def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_task_list(tasks: list[Phase0Task]) -> None:
+    print(f"Loaded dataset rows: {len(tasks)}")
+    print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
+    for task in tasks:
+        marker = " [U2 BLOCKED]" if task.risk_level == "U2" else ""
+        print(f"{task.task_id}\t{task.risk_level}{marker}\t{preview(task.execution_instruction)}")
+
+
+def print_run_summary(
+    *,
+    tasks: list[Phase0Task],
+    selected: list[Phase0Task],
+    allowed_risks: set[str],
+    cfg: Any | None,
+    output_path: Path | None,
+    max_steps: int | None,
+) -> None:
+    print(f"Loaded dataset rows: {len(tasks)}")
+    print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
+    print(f"Selected task count: {len(selected)}")
+    print("Selected task IDs: " + ", ".join(task.task_id for task in selected))
+    print(f"Effective risk levels: {','.join(sorted(allowed_risks))}")
+    print(f"Effective max steps: {max_steps if max_steps is not None else 'config default'}")
+    if cfg is not None:
+        print(f"Backend: {cfg.gui.backend}")
+        print(f"Agent profile: {cfg.gui.agent_profile}")
+    else:
+        print("Backend: not initialized")
+        print("Agent profile: not initialized")
+    print(f"Output path: {output_path if output_path is not None else 'not writing output'}")
+    print("Warning: U2 is blocked in Task 4B.")
+
+
+def preview(text: str, limit: int = 96) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, help="Path to phase0 config JSON")
+    parser.add_argument("--config", help="Path to phase0 config JSON")
     parser.add_argument("--dataset", required=True, help="Path to phase0 validation CSV")
-    parser.add_argument("--output", required=True, help="Append-only JSONL output path")
-    parser.add_argument("--max-tasks", type=int, required=True, help="Maximum number of selected tasks to run")
+    parser.add_argument("--output", help="Append-only JSONL output path")
+    parser.add_argument("--max-tasks", type=int, help="Maximum number of selected tasks to run")
+    parser.add_argument("--max-steps", type=int, help="Temporary GUI max_steps override for this run")
+    parser.add_argument("--task-id", action="append", help="Task ID to select; may be repeated or comma-separated")
+    parser.add_argument("--list-tasks", action="store_true", help="List dataset tasks and exit without running GUI")
+    parser.add_argument("--dry-select", action="store_true", help="Apply selection and safety checks without running GUI")
     parser.add_argument(
         "--risk-level",
         action="append",
-        help="Allowed risk level; may be repeated or comma-separated. Defaults to U0,U1. U2 is unsupported in Task 4A.",
+        help="Allowed risk level; may be repeated or comma-separated. Defaults to U0,U1. U2 is unsupported in Task 4B.",
     )
     return parser
 
