@@ -714,7 +714,7 @@ payload = json.dumps({
 r = req.Request(
     'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
     data=payload,
-    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer sk-1232a27eebe04114a13f62024966e0de'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${DASHSCOPE_API_KEY}'},
     method='POST',
 )
 try:

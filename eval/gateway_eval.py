@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -25,7 +26,7 @@ import aiohttp
 GATEWAY_URL = "http://localhost:18790/v1/chat/completions"
 TRACES_DIR = Path.home() / ".nanobot/workspace/gui_runs"
 JUDGE_MODEL = "qwen3.5-flash"
-JUDGE_API_KEY = "sk-1232a27eebe04114a13f62024966e0de"
+JUDGE_API_KEY_ENV = "DASHSCOPE_API_KEY"
 JUDGE_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 TASK_TIMEOUT_S = 600  # 10 min per task
 INTER_TASK_PAUSE_S = 5  # pause between tasks to let phone settle
@@ -108,9 +109,17 @@ async def send_task(
 
 # ── Judge ────────────────────────────────────────────────────────────────────
 
+def _required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} must be set for gateway eval judging")
+    return value
+
+
 def judge_text(task_id: str, instruction: str, response: str) -> tuple[bool, str]:
     """Judge success from agent's text response when no GUI trace exists."""
     import urllib.request as _req
+    judge_api_key = _required_env(JUDGE_API_KEY_ENV)
     prompt = (
         "You are an evaluator for a mobile AI agent benchmark.\n"
         "Task instruction: {instr}\n\n"
@@ -127,7 +136,7 @@ def judge_text(task_id: str, instruction: str, response: str) -> tuple[bool, str
     req = _req.Request(
         f"{JUDGE_API_BASE}/chat/completions",
         data=payload,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {JUDGE_API_KEY}"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {judge_api_key}"},
         method="POST",
     )
     try:
@@ -153,6 +162,7 @@ def judge_text(task_id: str, instruction: str, response: str) -> tuple[bool, str
 
 def judge(task_id: str, instruction: str, trace_path: Path | None, response: str = "") -> tuple[bool, str]:
     if trace_path is not None:
+        judge_api_key = _required_env(JUDGE_API_KEY_ENV)
         try:
             from eval.batch.judge import judge_run
             return judge_run(
@@ -160,7 +170,7 @@ def judge(task_id: str, instruction: str, trace_path: Path | None, response: str
                 trace_path=trace_path,
                 task_id=task_id,
                 model=JUDGE_MODEL,
-                api_key=JUDGE_API_KEY,
+                api_key=judge_api_key,
                 api_base=JUDGE_API_BASE,
             )
         except Exception as exc:

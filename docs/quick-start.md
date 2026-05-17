@@ -77,7 +77,7 @@ Configure these **two parts** in your config (other options have defaults).
 {
   "providers": {
     "openrouter": {
-      "apiKey": "sk-or-v1-xxx"
+      "apiKey": "your-api-key"
     }
   }
 }

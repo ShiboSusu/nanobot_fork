@@ -110,3 +110,11 @@ gui_runs/
 
 # Eval run outputs
 eval/results/
+
+# Phase 0 local/evaluation artifacts
+eval/phase0_results.jsonl
+eval/phase0_report/
+eval/phase0_observable_results.jsonl
+eval/phase0_observable_report/
+eval/traces/
+eval/screenshots/
