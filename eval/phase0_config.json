@@ -4,7 +4,7 @@
       "workspace": "~/.nanobot/workspace",
       "model": "qwen3-vl-8b",
       "provider": "custom",
-      "maxTokens": 8192,
+      "maxTokens": 1024,
       "temperature": 0,
       "maxToolIterations": 15
     }
@@ -45,7 +45,7 @@
       "apiKey": "${DASHSCOPE_API_KEY}",
       "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     },
-    "agentProfile": "default",
+    "agentProfile": "qwen3vl",
     "capture_ttft": true,
     "imageScaleRatio": 1.0
   }
