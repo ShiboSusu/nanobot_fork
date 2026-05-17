@@ -1,0 +1,52 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "model": "qwen3-vl-8b",
+      "provider": "custom",
+      "maxTokens": 8192,
+      "temperature": 0,
+      "maxToolIterations": 15
+    }
+  },
+  "providers": {
+    "custom": {
+      "apiKey": "${NPU_API_KEY}",
+      "apiBase": "http://127.0.0.1:8001/v1",
+      "extra_body": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    },
+    "dashscope": {
+      "apiKey": "${DASHSCOPE_API_KEY}",
+      "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "extra_body": {
+        "enable_thinking": true
+      }
+    }
+  },
+  "gui": {
+    "model": "qwen3-vl-8b",
+    "provider": "custom",
+    "backend": "adb",
+    "maxSteps": 15,
+    "artifactsDir": "~/.nanobot/workspace/phase0_runs",
+    "stagnationLimit": 3,
+    "enableSkillExecution": false,
+    "enableSkillExtraction": false,
+    "adb": {
+      "serial": "APH0219524034229"
+    },
+    "evaluation": {
+      "enabled": true,
+      "judgeModel": "qwen-vl-max-latest",
+      "apiKey": "${DASHSCOPE_API_KEY}",
+      "apiBase": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "agentProfile": "default",
+    "capture_ttft": true,
+    "imageScaleRatio": 1.0
+  }
+}
