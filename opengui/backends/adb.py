@@ -86,7 +86,7 @@ _FOCUSED_APP_RE = re.compile(
     re.IGNORECASE,
 )
 
-_DEVICE_SCREENSHOT_PATH = "/sdcard/__opengui_cap.png"
+_DEVICE_SCREENSHOT_PATH = "/data/local/tmp/__opengui_cap.png"
 _ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 _YADB_PATH = "/data/local/tmp/yadb"
 _YADB_MAIN_CLASS = "com.ysbing.yadb.Main"

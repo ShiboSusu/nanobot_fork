@@ -15,6 +15,7 @@ from opengui.backends.adb import (
     AdbBackend,
     ScrcpyFrameSource,
     ScrcpyFrameSnapshot,
+    _DEVICE_SCREENSHOT_PATH,
     _pil_image_from_frame,
 )
 from opengui.observation import Observation
@@ -165,6 +166,10 @@ async def test_adb_observe_falls_back_to_screencap_after_scrcpy_restart_failure(
     assert frame_source.stop_calls == 1
     assert frame_source.save_calls == 2
     fallback.assert_awaited_once()
+
+
+def test_adb_screencap_temp_path_uses_data_local_tmp() -> None:
+    assert _DEVICE_SCREENSHOT_PATH == "/data/local/tmp/__opengui_cap.png"
 
 
 @pytest.mark.asyncio
