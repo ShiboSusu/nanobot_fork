@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -459,6 +460,124 @@ def verifier_metadata_from_result(result: S2VerifierCallResult, *, reason_for_ve
     }
 
 
+def verifier_block_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "called": bool(metadata.get("verifier_called")),
+        "mode": metadata.get("verifier_mode"),
+        "reason_for_verification": metadata.get("reason_for_verification"),
+        "decision": metadata.get("verifier_decision"),
+        "safety_risk": metadata.get("safety_risk"),
+        "failure_risk": metadata.get("failure_risk"),
+        "allowed_to_execute_s1_action": bool(metadata.get("allowed_to_execute_s1_action")),
+        "latency_s": metadata.get("verifier_latency_s"),
+        "token_usage": metadata.get("verifier_token_usage"),
+        "error": metadata.get("verifier_error"),
+        "model": metadata.get("s2_model"),
+        "endpoint_route": metadata.get("s2_endpoint_route"),
+    }
+
+
+def build_verifier_summary(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    decision_counts = {value: 0 for value in sorted(ALLOWED_DECISIONS)}
+    safety_risk_counts = {value: 0 for value in sorted(ALLOWED_SAFETY_RISKS)}
+    failure_risk_counts = {value: 0 for value in sorted(ALLOWED_FAILURE_RISKS)}
+    called_count = 0
+    error_count = 0
+    total_latency_s = 0.0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+
+    for step in steps:
+        verifier = step.get("verifier") if isinstance(step.get("verifier"), dict) else {}
+        if verifier.get("called"):
+            called_count += 1
+        if verifier.get("error"):
+            error_count += 1
+        decision = verifier.get("decision")
+        if decision in decision_counts:
+            decision_counts[decision] += 1
+        safety_risk = verifier.get("safety_risk")
+        if safety_risk in safety_risk_counts:
+            safety_risk_counts[safety_risk] += 1
+        failure_risk = verifier.get("failure_risk")
+        if failure_risk in failure_risk_counts:
+            failure_risk_counts[failure_risk] += 1
+        latency_s = verifier.get("latency_s")
+        if isinstance(latency_s, (int, float)):
+            total_latency_s += float(latency_s)
+        token_usage = verifier.get("token_usage") if isinstance(verifier.get("token_usage"), dict) else {}
+        prompt_tokens = token_usage.get("prompt_tokens")
+        completion_tokens = token_usage.get("completion_tokens")
+        if isinstance(prompt_tokens, int):
+            total_prompt_tokens += prompt_tokens
+        if isinstance(completion_tokens, int):
+            total_completion_tokens += completion_tokens
+
+    return {
+        "called_count": called_count,
+        "error_count": error_count,
+        "decision_counts": decision_counts,
+        "safety_risk_counts": safety_risk_counts,
+        "failure_risk_counts": failure_risk_counts,
+        "total_latency_s": round(total_latency_s, 3),
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+    }
+
+
+def build_sanitized_offline_record(
+    record: dict[str, Any],
+    request: S2VerifierRequest,
+    selected_step: dict[str, Any],
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    trigger_features = selected_step.get("trigger_features") if isinstance(selected_step.get("trigger_features"), dict) else {}
+    outcome_proxies = selected_step.get("outcome_proxies") if isinstance(selected_step.get("outcome_proxies"), dict) else {}
+    step_record = {
+        "step_index": selected_step.get("step_index"),
+        "trigger_features": trigger_features,
+        "outcome_proxies": outcome_proxies,
+        "verifier": verifier_block_from_metadata(metadata),
+    }
+    task_source = record.get("task_source")
+    if not task_source:
+        task_source = "synthetic" if request.task_id.startswith("__synthetic") else "phase0_record"
+    runtime_signal_enabled = record.get("runtime_signal_enabled")
+    if runtime_signal_enabled is None:
+        runtime_signal_enabled = bool(trigger_features.get("self_report"))
+    output_record = {
+        "schema_version": "phase0_observable_v2",
+        "task_id": request.task_id,
+        "task_source": task_source,
+        "task_risk_level": request.risk_level,
+        "selected_step_index": selected_step.get("step_index"),
+        "features": {
+            "runtime_signal": bool(runtime_signal_enabled),
+            "s2_verifier": True,
+            "controller": False,
+        },
+        "steps": [step_record],
+        "verifier_summary": build_verifier_summary([step_record]),
+    }
+    return output_record
+
+
+def git_ignores_path(path: Path) -> bool:
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", str(path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 def load_latest_record(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -502,7 +621,13 @@ def synthetic_phase0_record() -> dict[str, Any]:
     }
 
 
-def run_offline_smoke(input_path: Path | None, latest: bool, step_index: int | None, timeout_s: float) -> int:
+def run_offline_smoke(
+    input_path: Path | None,
+    latest: bool,
+    step_index: int | None,
+    timeout_s: float,
+    write_output: Path | None,
+) -> int:
     record = load_latest_record(input_path) if input_path and latest else None
     source = str(input_path) if record is not None else "synthetic_fallback"
     if record is None:
@@ -531,11 +656,25 @@ def run_offline_smoke(input_path: Path | None, latest: bool, step_index: int | N
             error=str(exc),
             model=DEFAULT_MODEL,
         )
-        print("verifier_metadata:", json.dumps(verifier_metadata_from_result(result, reason_for_verification=request.reason_for_verification), ensure_ascii=False, sort_keys=True))
+        metadata = verifier_metadata_from_result(result, reason_for_verification=request.reason_for_verification)
+        print("verifier_metadata:", json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+        if write_output:
+            if not git_ignores_path(write_output):
+                print(f"ERROR: output path is not gitignored: {write_output}")
+                return 2
+            append_jsonl(write_output, build_sanitized_offline_record(record, request, selected_step, metadata))
+            print(f"wrote_output: {write_output}")
         return 0
 
     result = client.verify(request)
-    print("verifier_metadata:", json.dumps(verifier_metadata_from_result(result, reason_for_verification=request.reason_for_verification), ensure_ascii=False, sort_keys=True))
+    metadata = verifier_metadata_from_result(result, reason_for_verification=request.reason_for_verification)
+    print("verifier_metadata:", json.dumps(metadata, ensure_ascii=False, sort_keys=True))
+    if write_output:
+        if not git_ignores_path(write_output):
+            print(f"ERROR: output path is not gitignored: {write_output}")
+            return 2
+        append_jsonl(write_output, build_sanitized_offline_record(record, request, selected_step, metadata))
+        print(f"wrote_output: {write_output}")
     return 0 if result.ok else 1
 
 
@@ -619,6 +758,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--latest", action="store_true", help="Use latest record from --input")
     parser.add_argument("--step-index", type=int, help="Optional step index for offline smoke")
     parser.add_argument("--timeout-s", type=float, default=60.0, help="Verifier request timeout")
+    parser.add_argument("--write-output", type=Path, help="Append sanitized offline verifier JSONL output")
     return parser
 
 
@@ -629,7 +769,7 @@ def main() -> int:
     if args.smoke == "text":
         return run_smoke_text(args.timeout_s)
     if args.offline_smoke:
-        return run_offline_smoke(args.input, args.latest, args.step_index, args.timeout_s)
+        return run_offline_smoke(args.input, args.latest, args.step_index, args.timeout_s, args.write_output)
     build_parser().print_help()
     return 0
 
