@@ -23,6 +23,11 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from phase0_controller_dry_run import route_step
 
 
 VALID_RISK_LEVELS = {"U0", "U1", "U2"}
@@ -738,6 +743,7 @@ async def run_one_task(
     task: Phase0Task,
     *,
     runtime_signal_enabled: bool = False,
+    controller_shadow: bool = False,
 ) -> dict[str, Any]:
     before_ts = time.time()
     started = time.perf_counter()
@@ -774,7 +780,7 @@ async def run_one_task(
     )
     warning = path_warning(trace_paths.run_dir, trace_paths.outer_trace_path, trace_paths.inner_trace_path)
 
-    return {
+    record = {
         "task_id": task.task_id,
         "task_source": task.task_source,
         "instruction": task.execution_instruction,
@@ -805,6 +811,27 @@ async def run_one_task(
         "path_warning": warning,
         "steps": steps,
     }
+    if controller_shadow:
+        attach_shadow_controller(record)
+    return record
+
+
+def attach_shadow_controller(record: dict[str, Any]) -> None:
+    steps = record.get("steps")
+    if not isinstance(steps, list):
+        return
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        route, reason, inputs = route_step(record, step)
+        step["controller"] = {
+            "enabled": False,
+            "shadow_mode": True,
+            "dry_run": True,
+            "route": route,
+            "reason": reason,
+            "inputs": inputs,
+        }
 
 
 def normalize_termination(
@@ -867,6 +894,7 @@ async def run(args: argparse.Namespace) -> int:
             output_path=None,
             max_steps=args.max_steps,
             runtime_signal_enabled=args.runtime_signal,
+            controller_shadow=args.controller_shadow,
         )
         print("Dry-select mode: AgentLoop was not initialized; no GUI task was run; no output JSONL was written.")
         return 0
@@ -899,6 +927,7 @@ async def run(args: argparse.Namespace) -> int:
         output_path=output_path,
         max_steps=cfg.gui.max_steps,
         runtime_signal_enabled=args.runtime_signal,
+        controller_shadow=args.controller_shadow,
     )
 
     agent = None
@@ -912,6 +941,7 @@ async def run(args: argparse.Namespace) -> int:
                     gui_tool,
                     task,
                     runtime_signal_enabled=args.runtime_signal,
+                    controller_shadow=args.controller_shadow,
                 )
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 out.flush()
@@ -957,6 +987,7 @@ def print_run_summary(
     output_path: Path | None,
     max_steps: int | None,
     runtime_signal_enabled: bool,
+    controller_shadow: bool,
 ) -> None:
     print(f"Loaded dataset rows: {len(tasks)}")
     print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
@@ -966,6 +997,7 @@ def print_run_summary(
     print(f"Effective risk levels: {','.join(sorted(allowed_risks))}")
     print(f"Effective max steps: {max_steps if max_steps is not None else 'config default'}")
     print(f"Runtime signal enabled: {runtime_signal_enabled}")
+    print(f"Controller shadow enabled: {controller_shadow}")
     if cfg is not None:
         print(f"Backend: {cfg.gui.backend}")
         print(f"Agent profile: {cfg.gui.agent_profile}")
@@ -1045,6 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-id", action="append", help="Task ID to select; may be repeated or comma-separated")
     parser.add_argument("--task-text", help="Synthetic smoke-only task text; requires --risk-level U0 and --max-tasks 1")
     parser.add_argument("--runtime-signal", action="store_true", help="Ask qwen3vl text profile to emit a runtime_signal block before tool_call")
+    parser.add_argument("--controller-shadow", action="store_true", help="Attach offline Controller v0 shadow route blocks without changing execution")
     parser.add_argument("--list-tasks", action="store_true", help="List dataset tasks and exit without running GUI")
     parser.add_argument("--dry-select", action="store_true", help="Apply selection and safety checks without running GUI")
     parser.add_argument(
