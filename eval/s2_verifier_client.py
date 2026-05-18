@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 
@@ -317,6 +318,241 @@ def sample_text_request() -> S2VerifierRequest:
     )
 
 
+def build_request_from_phase0_record(record: dict[str, Any], *, step_index: int | None = None) -> S2VerifierRequest:
+    risk_level = str(record.get("task_risk_level") or record.get("risk_level") or "U0")
+    if risk_level == "U2":
+        raise ValueError("Refusing S2 offline smoke for U2 record")
+    if risk_level not in {"U0", "U1"}:
+        risk_level = "U0"
+
+    steps = record.get("steps") if isinstance(record.get("steps"), list) else []
+    selected_step = select_step(steps, step_index)
+    trigger_features = selected_step.get("trigger_features") if isinstance(selected_step, dict) else {}
+    trigger_features = trigger_features if isinstance(trigger_features, dict) else {}
+    observation = selected_step.get("observation") if isinstance(selected_step, dict) else {}
+    observation = observation if isinstance(observation, dict) else {}
+
+    request = S2VerifierRequest(
+        task_id=str(record.get("task_id") or "__synthetic_s2_offline__"),
+        instruction=str(record.get("instruction") or "Evaluate proposed GUI action."),
+        risk_level=risk_level,  # type: ignore[arg-type]
+        current_observation={
+            "text_summary": compact_observation_summary(selected_step, record),
+            "screenshot_path": None,
+            "foreground_app": observation.get("foreground_app"),
+        },
+        s1_proposed_action=selected_step.get("action") if isinstance(selected_step.get("action"), dict) else {},
+        recent_steps=compact_recent_steps(steps, record),
+        monitor_signals={
+            "self_report": trigger_features.get("self_report") or {},
+            "entropy": trigger_features.get("entropy") or default_entropy_signals(),
+            "risk": trigger_features.get("risk") or {"task_risk_level": risk_level},
+            "execution_state": trigger_features.get("execution_state") or {},
+            "trace_quality": record.get("trace_quality") or {},
+        },
+        verification_mode="text_only",
+        reason_for_verification=infer_reason_for_verification(record, trigger_features),
+    )
+    return request
+
+
+def select_step(steps: list[Any], step_index: int | None) -> dict[str, Any]:
+    dict_steps = [step for step in steps if isinstance(step, dict)]
+    if not dict_steps:
+        return {}
+    if step_index is not None:
+        for step in dict_steps:
+            if step.get("step_index") == step_index:
+                return step
+    return dict_steps[-1]
+
+
+def compact_observation_summary(step: dict[str, Any], record: dict[str, Any]) -> str:
+    parts: list[str] = []
+    model_output = step.get("model_output")
+    if isinstance(model_output, str) and model_output:
+        parts.append("model_output: " + model_output[:240])
+    action = step.get("action")
+    if isinstance(action, dict) and action:
+        parts.append("selected_action: " + json.dumps(action, ensure_ascii=False, sort_keys=True)[:240])
+    observation = step.get("observation")
+    if isinstance(observation, dict):
+        foreground = observation.get("foreground_app")
+        if foreground:
+            parts.append(f"foreground_app: {foreground}")
+    termination = record.get("termination_reason")
+    if termination:
+        parts.append(f"termination_reason: {termination}")
+    return " | ".join(parts) if parts else "No detailed observation summary available."
+
+
+def compact_recent_steps(steps: list[Any], record: dict[str, Any]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for step in [step for step in steps if isinstance(step, dict)][-3:]:
+        action = step.get("action") if isinstance(step.get("action"), dict) else {}
+        result_summary = step.get("model_output") if isinstance(step.get("model_output"), str) else ""
+        warning = None
+        outcome = step.get("outcome_proxies") if isinstance(step.get("outcome_proxies"), dict) else {}
+        if outcome.get("execution_error"):
+            warning = "execution_error"
+        elif outcome.get("action_parse_failure"):
+            warning = "action_parse_failure"
+        compact.append(
+            {
+                "step_index": step.get("step_index"),
+                "action": action,
+                "result_summary": result_summary[:240] if result_summary else "step recorded",
+                "termination_or_warning": warning,
+            }
+        )
+    if compact:
+        compact[-1]["termination_or_warning"] = compact[-1].get("termination_or_warning") or record.get("termination_reason")
+    return compact
+
+
+def default_entropy_signals() -> dict[str, Any]:
+    return {
+        "logprob_entropy": None,
+        "action_entropy": None,
+        "sample_disagreement": None,
+        "action_type_disagreement": None,
+        "argument_disagreement": None,
+        "target_disagreement": None,
+        "coordinate_variance": None,
+        "num_samples": 1,
+        "entropy_method": "none",
+    }
+
+
+def infer_reason_for_verification(record: dict[str, Any], trigger_features: dict[str, Any]) -> str:
+    execution_state = trigger_features.get("execution_state") if isinstance(trigger_features.get("execution_state"), dict) else {}
+    entropy = trigger_features.get("entropy") if isinstance(trigger_features.get("entropy"), dict) else {}
+    self_report = trigger_features.get("self_report") if isinstance(trigger_features.get("self_report"), dict) else {}
+    if record.get("termination_reason") == "stagnation_detected" or (execution_state.get("stagnation_count") or 0) > 0:
+        return "stagnation"
+    disagreement = entropy.get("sample_disagreement")
+    if isinstance(disagreement, (int, float)) and disagreement >= 0.66:
+        return "high_disagreement"
+    confidence = self_report.get("confidence")
+    if isinstance(confidence, (int, float)) and confidence < 0.6:
+        return "low_confidence"
+    if record.get("clean_success") is False:
+        return "high_failure_risk"
+    return "high_failure_risk"
+
+
+def verifier_metadata_from_result(result: S2VerifierCallResult, *, reason_for_verification: str) -> dict[str, Any]:
+    response = result.response
+    return {
+        "verifier_called": True,
+        "verifier_mode": "text_only",
+        "reason_for_verification": reason_for_verification,
+        "verifier_latency_s": result.latency_s,
+        "verifier_token_usage": result.token_usage,
+        "verifier_decision": response.decision if response else None,
+        "safety_risk": response.safety_risk if response else None,
+        "failure_risk": response.failure_risk if response else None,
+        "verifier_error": result.error,
+        "allowed_to_execute_s1_action": response.allowed_to_execute_s1_action if response else False,
+        "s2_model": result.model,
+        "s2_endpoint_route": result.endpoint_route,
+    }
+
+
+def load_latest_record(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    latest = None
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                latest = record
+    return latest
+
+
+def synthetic_phase0_record() -> dict[str, Any]:
+    return {
+        "task_id": "__synthetic_s2_offline__",
+        "instruction": "Find today's weather in Beijing.",
+        "task_risk_level": "U0",
+        "clean_success": False,
+        "termination_reason": "stagnation_detected",
+        "trace_quality": {"clean_for_signal_analysis": False, "quality_warning": "synthetic_fallback"},
+        "steps": [
+            {
+                "step_index": 0,
+                "model_output": "S1 proposed waiting despite no progress.",
+                "action": {"action_type": "wait"},
+                "trigger_features": {
+                    "self_report": {"confidence": 0.42},
+                    "entropy": {"sample_disagreement": 0.66, "entropy_method": "synthetic"},
+                    "risk": {"task_risk_level": "U0", "rule_based_step_risk_level": "U0"},
+                    "execution_state": {"stagnation_count": 2, "repeated_action": True},
+                },
+                "outcome_proxies": {"execution_error": False, "action_parse_failure": False},
+                "observation": {"foreground_app": None},
+            }
+        ],
+    }
+
+
+def run_offline_smoke(input_path: Path | None, latest: bool, step_index: int | None, timeout_s: float) -> int:
+    record = load_latest_record(input_path) if input_path and latest else None
+    source = str(input_path) if record is not None else "synthetic_fallback"
+    if record is None:
+        record = synthetic_phase0_record()
+    try:
+        request = build_request_from_phase0_record(record, step_index=step_index)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    selected_step = select_step(record.get("steps") if isinstance(record.get("steps"), list) else [], step_index)
+
+    print("selected_task_id:", request.task_id)
+    print("record_source:", source)
+    print("selected_step_index:", selected_step.get("step_index"))
+    print("reason_for_verification:", request.reason_for_verification)
+    print("request_summary:", json.dumps(request_summary(request), ensure_ascii=False, sort_keys=True))
+
+    try:
+        client = S2VerifierClient.from_env(timeout_s=timeout_s)
+    except RuntimeError as exc:
+        result = S2VerifierCallResult(
+            ok=False,
+            response=None,
+            latency_s=0.0,
+            token_usage=None,
+            error=str(exc),
+            model=DEFAULT_MODEL,
+        )
+        print("verifier_metadata:", json.dumps(verifier_metadata_from_result(result, reason_for_verification=request.reason_for_verification), ensure_ascii=False, sort_keys=True))
+        return 0
+
+    result = client.verify(request)
+    print("verifier_metadata:", json.dumps(verifier_metadata_from_result(result, reason_for_verification=request.reason_for_verification), ensure_ascii=False, sort_keys=True))
+    return 0 if result.ok else 1
+
+
+def request_summary(request: S2VerifierRequest) -> dict[str, Any]:
+    return {
+        "task_id": request.task_id,
+        "risk_level": request.risk_level,
+        "verification_mode": request.verification_mode,
+        "reason_for_verification": request.reason_for_verification,
+        "foreground_app": request.current_observation.get("foreground_app"),
+        "text_summary_chars": len(request.current_observation.get("text_summary") or ""),
+        "s1_action": request.s1_proposed_action,
+        "recent_step_count": len(request.recent_steps),
+        "monitor_signal_groups": sorted(request.monitor_signals.keys()),
+    }
+
+
 def run_self_test() -> int:
     valid = {
         "decision": "replan",
@@ -378,6 +614,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true", help="Run local validation tests without network calls")
     parser.add_argument("--smoke", choices=["text"], help="Run a safe text-only S2 verifier smoke")
+    parser.add_argument("--offline-smoke", action="store_true", help="Build request from Phase 0 JSONL and optionally call S2")
+    parser.add_argument("--input", type=Path, help="Phase 0 observable JSONL input for offline smoke")
+    parser.add_argument("--latest", action="store_true", help="Use latest record from --input")
+    parser.add_argument("--step-index", type=int, help="Optional step index for offline smoke")
     parser.add_argument("--timeout-s", type=float, default=60.0, help="Verifier request timeout")
     return parser
 
@@ -388,6 +628,8 @@ def main() -> int:
         return run_self_test()
     if args.smoke == "text":
         return run_smoke_text(args.timeout_s)
+    if args.offline_smoke:
+        return run_offline_smoke(args.input, args.latest, args.step_index, args.timeout_s)
     build_parser().print_help()
     return 0
 
