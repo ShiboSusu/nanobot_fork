@@ -117,5 +117,6 @@ eval/phase0_report/
 eval/phase0_observable_results.jsonl
 eval/phase0_observable_report/
 eval/phase0_s2_verifier_offline.jsonl
+eval/phase0_controller_dry_run.jsonl
 eval/traces/
 eval/screenshots/
