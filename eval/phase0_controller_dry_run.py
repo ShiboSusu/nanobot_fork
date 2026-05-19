@@ -15,8 +15,18 @@ ROUTES = {"FAST", "VERIFY", "SLOW", "RECOVER", "BLOCK", "ASK_USER", "SKIP_UNSAFE
 RISK_LEVELS = {"U0", "U1", "U2"}
 
 
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("positive integer required") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("positive integer required")
+    return parsed
+
+
+def load_jsonl_with_lines(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    records: list[tuple[int, dict[str, Any]]] = []
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line_no, line in enumerate(handle, start=1):
             if not line.strip():
@@ -26,8 +36,25 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_no}: invalid JSONL record") from exc
             if isinstance(record, dict):
-                records.append(record)
+                records.append((line_no, record))
     return records
+
+
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [record for _line_no, record in load_jsonl_with_lines(path)]
+
+
+def apply_input_filters(
+    records_with_lines: list[tuple[int, dict[str, Any]]],
+    *,
+    since_line: int | None,
+    last: int | None,
+) -> list[tuple[int, dict[str, Any]]]:
+    if since_line is not None:
+        records_with_lines = [(line_no, record) for line_no, record in records_with_lines if line_no >= since_line]
+    if last is not None:
+        records_with_lines = records_with_lines[-last:]
+    return records_with_lines
 
 
 def git_ignores_path(path: Path) -> bool:
@@ -315,7 +342,13 @@ def build_outputs(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return outputs
 
 
-def print_summary(outputs: list[dict[str, Any]], source_records: list[dict[str, Any]]) -> None:
+def print_summary(
+    outputs: list[dict[str, Any]],
+    source_records: list[dict[str, Any]],
+    *,
+    input_line_range: list[int] | None,
+    input_filters: dict[str, int | None],
+) -> None:
     routes = Counter(output.get("controller", {}).get("route") for output in outputs)
     verifier_decisions: Counter[str] = Counter()
     verifier_error_count = 0
@@ -336,6 +369,8 @@ def print_summary(outputs: list[dict[str, Any]], source_records: list[dict[str, 
         "unusable_trace_count": routes.get("UNUSABLE_TRACE", 0),
         "verifier_decision_distribution": dict(sorted(verifier_decisions.items())),
         "verifier_error_count": verifier_error_count,
+        "input_line_range": input_line_range,
+        "input_filters": input_filters,
     }
     print("summary:", json.dumps(summary, ensure_ascii=False, sort_keys=True))
 
@@ -345,6 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, type=Path, help="Phase 0 observable or S2 verifier JSONL input")
     parser.add_argument("--output", required=True, type=Path, help="Ignored JSONL path for dry-run controller output")
     parser.add_argument("--summary", action="store_true", help="Print dry-run routing summary")
+    parser.add_argument("--input-last", type=positive_int, help="Route only the last N valid JSONL records after other filters")
+    parser.add_argument("--input-since-line", type=positive_int, help="Route valid records from this physical JSONL line onward")
     return parser
 
 
@@ -354,14 +391,26 @@ def main() -> int:
         print(f"ERROR: output path is not gitignored: {args.output}")
         return 2
     try:
-        source_records = load_jsonl(args.input)
+        records_with_lines = load_jsonl_with_lines(args.input)
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 2
+    records_with_lines = apply_input_filters(
+        records_with_lines,
+        since_line=args.input_since_line,
+        last=args.input_last,
+    )
+    source_records = [record for _line_no, record in records_with_lines]
     outputs = build_outputs(source_records)
     append_jsonl(args.output, outputs)
     if args.summary:
-        print_summary(outputs, source_records)
+        input_line_range = [records_with_lines[0][0], records_with_lines[-1][0]] if records_with_lines else None
+        print_summary(
+            outputs,
+            source_records,
+            input_line_range=input_line_range,
+            input_filters={"since_line": args.input_since_line, "last": args.input_last},
+        )
     print(f"wrote_records: {len(outputs)}")
     print(f"output: {args.output}")
     return 0
