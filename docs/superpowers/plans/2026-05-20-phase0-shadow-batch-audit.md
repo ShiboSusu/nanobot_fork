@@ -24,7 +24,7 @@ The scoped batch contains three real U0 records:
 | ---: | --- | --- | --- | --- | --- | --- |
 | 29 | `ChromeSearchBeijingWeatherTask` | failed with `stagnation_detected` | false | `repeated_region_action`, `action_type_run` | `replan`, failure `high` | `SLOW` |
 | 30 | `CheckPuchasedItem` | clean `done(success)` | false | `semantic_missing_answer` | `replan`, failure `high` | `SLOW` |
-| 31 | `RecentTotalExpenseTask` | clean `done(success)` | false | `semantic_missing_answer` | `block`, failure `high` | `BLOCK` |
+| 31 | `RecentTotalExpenseTask` | clean `done(success)` | false | `semantic_missing_answer` | `block`, failure `high` | `SLOW` |
 
 All three records are `clean_for_signal_analysis=true` with `inner_coverage=1.0`, so the current trace path is usable for diagnosis.
 
@@ -58,9 +58,9 @@ The current runner safety filter blocks U2 and obvious external side effects suc
 
    Both answer-required Taobao tasks ended with empty `done(success)` and semantic failure.
 
-3. S2 offline decisions are not yet a policy.
+3. S2 offline decisions are now normalized before dry-run routing.
 
-   The same `semantic_missing_answer` trigger produced `replan` for one record and `block` for another. That may be reasonable, but it should be audited before any live controller uses it.
+   The same `semantic_missing_answer` trigger produced `replan` for one record and `block` for another. The dry-run policy now treats U0 answer-missing `block` as a slow-path task-failure route rather than an unsafe-action `BLOCK`.
 
 4. Controller dry-run is correctly scoped, but still descriptive.
 
@@ -95,3 +95,9 @@ Acceptance:
 - No U2.
 - No token or endpoint written to repo.
 - A short written route-policy note or code-level TODO exists before the next live-data run.
+
+## Implementation Outcome
+
+- Local side-effect U0/U1 tasks are now hard-gated before live execution.
+- U0 `semantic_missing_answer` with S2 offline `block` is treated as a slow-path task-failure route in controller dry-run, not as an unsafe-action `BLOCK`.
+- The current scoped batch now routes to `SLOW` for all three records after normalization.

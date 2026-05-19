@@ -81,7 +81,7 @@ Current controller dry-run closed loop:
 Observed route summary:
 
 ```text
-route_distribution: {"BLOCK": 1, "SLOW": 2}
+route_distribution: {"SLOW": 3}
 verifier_decision_distribution: {"block": 1, "replan": 2}
 skipped_unsafe_count: 0
 unusable_trace_count: 0
@@ -93,7 +93,7 @@ unusable_trace_count: 0
 | ---: | --- | --- | --- | --- | --- |
 | 29 | `ChromeSearchBeijingWeatherTask` | `stagnation_detected`, semantic failure | repeated tap / `stagnation`, high confidence `1.0` | `replan`, failure `high` | `SLOW` |
 | 30 | `CheckPuchasedItem` | runner clean, semantic failure | empty `done(success)` / `semantic_missing_answer` | `replan`, failure `high` | `SLOW` |
-| 31 | `RecentTotalExpenseTask` | runner clean, semantic failure | empty `done(success)` / `semantic_missing_answer` | `block`, failure `high` | `BLOCK` |
+| 31 | `RecentTotalExpenseTask` | runner clean, semantic failure | empty `done(success)` / `semantic_missing_answer` | `block`, failure `high` | `SLOW` |
 
 Interpretation:
 
@@ -102,7 +102,7 @@ Interpretation:
 - Self-reported confidence remains unreliable. Chrome had confidence `1.0` while stuck in repeated taps and then failed.
 - `semantic_missing_answer`, `repeated_region_action`, and `action_type_run` are useful shadow signals for diagnosability.
 - S2 offline verifier can classify these failures as high failure risk when semantic/controller diagnostics are included in the request.
-- Controller dry-run maps S2 `replan` to `SLOW` and `block` to `BLOCK`, giving a complete offline shadow loop.
+- Controller dry-run maps S2 `replan` to `SLOW`, and normalizes U0 missing-answer `block` decisions to `SLOW`, giving a complete offline shadow loop.
 
 ## What Changed Recently
 
