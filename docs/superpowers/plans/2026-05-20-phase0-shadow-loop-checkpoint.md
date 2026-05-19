@@ -152,11 +152,26 @@ real U0/U1 shadow records usable
 
 Do not implement live intervention yet.
 
-The first 3-record U0-only version of this gate is now met for diagnosability. It is not enough for formal thresholds or live intervention. Before any live S2/controller action, either stop for human audit and design review, or collect at most two additional safe U0/U1 records if there are genuinely safe candidates:
+The first 3-record U0-only version of this gate is now met for diagnosability. It is not enough for formal thresholds or live intervention.
+
+Task 8AG defines the next gate in `docs/superpowers/plans/2026-05-20-phase0-live-shadow-reset-protocol.md`: stop live collection by default, classify any future task by side-effect class, and require a reset/cleanup protocol before any local device mutation task is allowed.
+
+Current live candidates under that gate:
+
+```text
+ChromeSearchBeijingWeatherTask
+CheckPuchasedItem
+RecentTotalExpenseTask
+```
+
+All three have already been run in the current scoped slice. Therefore the default next action is route-policy and recovery-design audit, not collecting more device records.
+
+Before any live S2/controller action, or before expanding live shadow beyond the current read-only tasks:
 
 - 5 U0/U1 records maximum for this scoped batch.
 - No U2.
 - No messages, email, WeChat, purchases, payments, account/security changes, destructive settings, or full pilot.
+- No alarm, camera/photo, brightness, font/icon, wallpaper, or flight-mode task unless a task-specific reset/cleanup protocol is approved first.
 - Runtime signal on.
 - Controller shadow on.
 - S2 only offline after the GUI run.
