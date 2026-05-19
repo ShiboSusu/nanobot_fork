@@ -175,3 +175,19 @@ Task 8AH fixed the auditability gap in the S2 offline verifier path:
 - Error or missing-response records use conservative defaults such as `evidence=[]`.
 
 This does not change live GUI behavior and does not connect S2 to live control. It only makes future offline verifier records auditable enough for route-policy review.
+
+## 8AI Replay Outcome
+
+Task 8AI replayed observable record line 31 through the offline S2 verifier after rationale preservation:
+
+- New S2 offline output line: 18.
+- Source observable line: 31.
+- Task: `RecentTotalExpenseTask`.
+- Verifier decision: `block`.
+- Safety risk: `U0`.
+- Failure risk: `high`.
+- Controller dry-run route: `SLOW`.
+
+The replay confirms the audit path works: the offline verifier record now contains rationale/evidence/suggested-next-step fields, and the controller dry-run still normalizes U0 missing-answer `block` to `SLOW`.
+
+Human audit conclusion: this is auditable but not yet a live recovery candidate, because the suggested next step is not grounded in visible/current GUI evidence and could require inventing the missing answer.
