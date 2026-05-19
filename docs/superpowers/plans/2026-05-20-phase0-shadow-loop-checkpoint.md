@@ -125,6 +125,7 @@ These are still on the main line because they reduce ambiguity in the shadow pip
 - The sample is tiny and biased toward debugging. It is not an evaluation set.
 - S2 offline output is not ground truth. It is a verifier candidate whose behavior still needs human audit and larger scoped samples.
 - The ignored S2 output contains missing-env and non-JSON retry artifacts. Always use `source_record` and scoped summaries.
+- S2 verifier rationale is preserved only for newly generated offline records after `722db154`; older line 29-31 records are decision/risk-only.
 - S2 has not been connected to live GUI control.
 - Controller has not intervened in live execution.
 - U2 remains blocked.

@@ -88,6 +88,7 @@ Interpretation:
 - `repeated_region_action` and `action_type_run` are recovery/planning signals, but current Phase 0 only records them in shadow mode.
 - S2 offline output is verifier evidence, not ground truth.
 - `allowed_to_execute_s1_action=false` must not be treated as permission for live S2 action. It only means the verifier would not continue the same S1 action.
+- New S2 offline records preserve verifier `reason`, `evidence`, `suggested_next_step`, `requires_image_context`, and verifier `confidence` for human audit. Older scoped records from lines 29-31 predate that schema enrichment and should be treated as decision/risk-only artifacts.
 
 Human audit must check, for each candidate route:
 
@@ -159,6 +160,18 @@ Phase 0 may move toward a live intervention design only after:
 - at least one `READ_ONLY_ANSWER` failure has a human-approved stateful recovery action,
 - the recovery action is expressible without external side effects,
 - the controller route can be replayed offline from scoped provenance,
-- S2 verifier rationale is available for human audit,
+- S2 verifier rationale is available for human audit in newly generated offline records,
 - reset/cleanup protocol exists for any non-read-only task,
 - current self-reported confidence is treated as uncalibrated and never used alone.
+
+## 8AH Outcome
+
+Task 8AH fixed the auditability gap in the S2 offline verifier path:
+
+- `S2VerifierResponse.reason` is preserved as `steps[0].verifier.reason`.
+- `S2VerifierResponse.evidence` is preserved as `steps[0].verifier.evidence`.
+- `S2VerifierResponse.suggested_next_step` is preserved as `steps[0].verifier.suggested_next_step`.
+- `requires_image_context` and verifier `confidence` are preserved for audit context.
+- Error or missing-response records use conservative defaults such as `evidence=[]`.
+
+This does not change live GUI behavior and does not connect S2 to live control. It only makes future offline verifier records auditable enough for route-policy review.
