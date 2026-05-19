@@ -80,6 +80,28 @@ def trace_quality_is_unusable(record: dict[str, Any]) -> bool:
     return clean is False
 
 
+def hard_gate_reason(record: dict[str, Any], step: dict[str, Any]) -> str | None:
+    task_risk_level = str(record.get("task_risk_level") or record.get("risk_level") or "U0")
+    if task_risk_level == "U2":
+        return "blocked_u2"
+
+    trace_quality = record.get("trace_quality")
+    if isinstance(trace_quality, dict) and trace_quality.get("clean_for_signal_analysis") is False:
+        quality_warning = trace_quality.get("quality_warning")
+        if quality_warning in {"low_inner_coverage", "trace_missing"}:
+            return str(quality_warning)
+        return "trace_quality_unusable"
+
+    trigger_features = nested_dict(step, "trigger_features")
+    execution_state = nested_dict(trigger_features, "execution_state")
+    environment_anomalies = record.get("environment_anomalies") if isinstance(record.get("environment_anomalies"), dict) else {}
+    if execution_state.get("screenshot_capture_failure") or environment_anomalies.get("screenshot_capture_failure"):
+        return "screenshot_capture_failure"
+    if execution_state.get("secure_surface_suspected") or environment_anomalies.get("secure_surface_suspected"):
+        return "secure_surface_suspected"
+    return None
+
+
 def monitor_trigger(trigger_features: dict[str, Any]) -> str:
     risk = nested_dict(trigger_features, "risk")
     entropy = nested_dict(trigger_features, "entropy")
@@ -116,13 +138,27 @@ def monitor_trigger(trigger_features: dict[str, Any]) -> str:
     return "none"
 
 
+def without_observation_hard_gate_signals(trigger_features: dict[str, Any]) -> dict[str, Any]:
+    execution_state = nested_dict(trigger_features, "execution_state")
+    if not execution_state:
+        return trigger_features
+    sanitized_execution_state = dict(execution_state)
+    sanitized_execution_state.pop("screenshot_capture_failure", None)
+    sanitized_execution_state.pop("secure_surface_suspected", None)
+    sanitized_trigger_features = dict(trigger_features)
+    sanitized_trigger_features["execution_state"] = sanitized_execution_state
+    return sanitized_trigger_features
+
+
 def has_monitor_severity(trigger_features: dict[str, Any]) -> bool:
     return monitor_trigger(trigger_features) != "none"
 
 
-def route_step(record: dict[str, Any], step: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observation_hard_gates: bool) -> tuple[str, str, dict[str, Any]]:
     task_risk_level = str(record.get("task_risk_level") or record.get("risk_level") or "U0")
     trigger_features = nested_dict(step, "trigger_features")
+    if not apply_observation_hard_gates:
+        trigger_features = without_observation_hard_gate_signals(trigger_features)
     risk = nested_dict(trigger_features, "risk")
     execution_state = nested_dict(trigger_features, "execution_state")
     entropy = nested_dict(trigger_features, "entropy")
@@ -138,10 +174,10 @@ def route_step(record: dict[str, Any], step: dict[str, Any]) -> tuple[str, str, 
     if task_risk_level == "U2":
         route = "SKIP_UNSAFE"
         reason = "runner safety gate blocks U2 dry-run routing"
-    elif trace_quality_is_unusable(record):
+    elif apply_observation_hard_gates and trace_quality_is_unusable(record):
         route = "UNUSABLE_TRACE"
         reason = "trace_quality.clean_for_signal_analysis is false"
-    elif (
+    elif apply_observation_hard_gates and (
         execution_state.get("screenshot_capture_failure")
         or execution_state.get("secure_surface_suspected")
         or environment_anomalies.get("screenshot_capture_failure")
@@ -218,8 +254,26 @@ def route_step(record: dict[str, Any], step: dict[str, Any]) -> tuple[str, str, 
     return route, reason, inputs
 
 
-def build_controller_record(record: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+def route_step(record: dict[str, Any], step: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+    return _route_step(record, step, apply_observation_hard_gates=True)
+
+
+def route_step_diagnostics(record: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
     route, reason, inputs = route_step(record, step)
+    raw_route, raw_reason, raw_inputs = _route_step(record, step, apply_observation_hard_gates=False)
+    return {
+        "route": route,
+        "reason": reason,
+        "inputs": inputs,
+        "raw_monitor_route": raw_route,
+        "raw_monitor_reason": raw_reason,
+        "raw_monitor_inputs": raw_inputs,
+        "hard_gate_reason": hard_gate_reason(record, step),
+    }
+
+
+def build_controller_record(record: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = route_step_diagnostics(record, step)
     task_risk_level = str(record.get("task_risk_level") or record.get("risk_level") or "U0")
     output = {
         "schema_version": "phase0_controller_dry_run_v1",
@@ -229,9 +283,7 @@ def build_controller_record(record: dict[str, Any], step: dict[str, Any]) -> dic
         "controller": {
             "enabled": False,
             "dry_run": True,
-            "route": route,
-            "reason": reason,
-            "inputs": inputs,
+            **diagnostics,
         },
     }
     return output

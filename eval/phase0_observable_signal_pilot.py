@@ -27,7 +27,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from phase0_controller_dry_run import route_step
+from phase0_controller_dry_run import route_step_diagnostics
 
 
 VALID_RISK_LEVELS = {"U0", "U1", "U2"}
@@ -1065,14 +1065,11 @@ def attach_shadow_controller(record: dict[str, Any]) -> None:
     for step in steps:
         if not isinstance(step, dict):
             continue
-        route, reason, inputs = route_step(record, step)
         step["controller"] = {
             "enabled": False,
             "shadow_mode": True,
             "dry_run": True,
-            "route": route,
-            "reason": reason,
-            "inputs": inputs,
+            **route_step_diagnostics(record, step),
         }
 
 
