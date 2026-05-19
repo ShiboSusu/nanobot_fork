@@ -56,6 +56,31 @@ TASK4A_UNSAFE_TERMS = (
     "结账",
     "下单",
 )
+TASK4A_LOCAL_SIDE_EFFECT_TERMS = (
+    "alarm",
+    "ringtone",
+    "vibration",
+    "take a photo",
+    "take photo",
+    "selfie",
+    "camera",
+    "brightness",
+    "font size",
+    "icons",
+    "icon size",
+    "wallpaper",
+    "flight mode",
+    "airplane mode",
+    "闹钟",
+    "拍照",
+    "自拍",
+    "相机",
+    "亮度",
+    "字体",
+    "图标",
+    "壁纸",
+    "飞行模式",
+)
 RUNTIME_SIGNAL_INSTRUCTION = (
     "Before the <tool_call> block, output exactly one <runtime_signal>...</runtime_signal> "
     "block as compact JSON. The JSON schema is: "
@@ -266,6 +291,13 @@ def ensure_task4b_safe(task: Phase0Task) -> None:
     if matched:
         raise RuntimeError(
             f"Refusing to run task {task.task_id}: safety guard matched {', '.join(sorted(set(matched)))}"
+        )
+    local_side_effect_matches = [term for term in TASK4A_LOCAL_SIDE_EFFECT_TERMS if term in text]
+    if local_side_effect_matches:
+        raise RuntimeError(
+            "Refusing to run task "
+            f"{task.task_id}: local side effect guard matched "
+            f"{', '.join(sorted(set(local_side_effect_matches)))}"
         )
 
 
