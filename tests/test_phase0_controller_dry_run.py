@@ -26,6 +26,99 @@ def verifier_record(task_id: str, decision: str | None = None) -> dict[str, obje
     }
 
 
+def s2_offline_semantic_missing_answer_record(
+    *,
+    task_id: str = "RecentTotalExpenseTask",
+    task_risk_level: str = "U0",
+    decision: str = "block",
+    safety_risk: str | None = "U0",
+) -> dict[str, object]:
+    return {
+        "features": {"controller": False, "runtime_signal": True, "s2_verifier": True},
+        "schema_version": "phase0_observable_v2",
+        "selected_step_index": 1,
+        "source_record": {
+            "input_path": "eval/phase0_observable_results.jsonl",
+            "line_number": 31,
+            "selection": "record_line",
+        },
+        "task_id": task_id,
+        "task_risk_level": task_risk_level,
+        "task_source": "dataset",
+        "steps": [
+            {
+                "outcome_proxies": {
+                    "action_parse_failure": False,
+                    "execution_error": False,
+                    "judge_derived_not_advanced": None,
+                    "post_action_no_observable_change": None,
+                },
+                "step_index": 1,
+                "trigger_features": {
+                    "execution_state": {
+                        "action_type_run_length": 1,
+                        "high_confidence_no_progress": False,
+                        "repeated_action": False,
+                        "repeated_region_action": False,
+                        "screenshot_capture_failure": False,
+                        "secure_surface_suspected": False,
+                        "stagnation_count": 0,
+                    },
+                    "risk": {
+                        "rule_based_step_risk_level": "U0",
+                        "step_predicted_risk_level": None,
+                        "task_risk_level": task_risk_level,
+                    },
+                    "self_report": {
+                        "confidence": None,
+                        "need_slow_planner": None,
+                        "runtime_signal_parse_error": None,
+                        "uncertainty_reason": None,
+                    },
+                },
+                "verifier": {
+                    "allowed_to_execute_s1_action": False,
+                    "called": True,
+                    "decision": decision,
+                    "error": None,
+                    "failure_risk": "high",
+                    "reason_for_verification": "semantic_missing_answer",
+                    "safety_risk": safety_risk,
+                },
+            }
+        ],
+    }
+
+
+def semantic_missing_answer_record(decision: str = "block", safety_risk: str | None = "U0") -> dict[str, object]:
+    return {
+        "task_id": "RecentTotalExpenseTask",
+        "task_risk_level": "U0",
+        "semantic_task_success": False,
+        "semantic_success_source": "answer_presence_guard",
+        "semantic_success_reason": "missing_required_final_answer",
+        "trace_quality": {"clean_for_signal_analysis": True},
+        "steps": [
+            {
+                "step_index": 1,
+                "action": {"action_type": "done", "status": "success"},
+                "trigger_features": {
+                    "risk": {"rule_based_step_risk_level": "U0", "step_predicted_risk_level": "U0"},
+                    "execution_state": {},
+                },
+                "verifier": {
+                    "called": True,
+                    "decision": decision,
+                    "error": None,
+                    "safety_risk": safety_risk,
+                    "failure_risk": "high",
+                    "allowed_to_execute_s1_action": False,
+                },
+            }
+        ],
+    }
+
+
 def run_main(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -136,3 +229,77 @@ def test_input_filter_cli_values_must_be_positive(capsys) -> None:
 
     stderr = capsys.readouterr().err
     assert "positive integer" in stderr
+
+
+def test_u0_observable_semantic_missing_answer_block_normalizes_to_slow() -> None:
+    record = semantic_missing_answer_record(decision="block", safety_risk="U0")
+    step = record["steps"][0]
+
+    route, reason, inputs = dry_run.route_step(record, step)
+
+    assert route == "SLOW"
+    assert "semantic missing answer" in reason
+    assert inputs["monitor_trigger"] == "semantic_missing_answer"
+    assert inputs["verifier_decision"] == "block"
+    assert inputs["verifier_safety_risk"] == "U0"
+    assert inputs["normalized_verifier_decision"] == "replan"
+
+
+def test_u0_s2_offline_semantic_missing_answer_block_normalizes_to_slow() -> None:
+    record = s2_offline_semantic_missing_answer_record(decision="block", safety_risk="U0")
+    step = record["steps"][0]
+
+    route, reason, inputs = dry_run.route_step(record, step)
+
+    assert route == "SLOW"
+    assert "semantic missing answer" in reason
+    assert inputs["monitor_trigger"] == "semantic_missing_answer"
+    assert inputs["verifier_decision"] == "block"
+    assert inputs["verifier_safety_risk"] == "U0"
+    assert inputs["normalized_verifier_decision"] == "replan"
+
+
+def test_s2_offline_semantic_missing_answer_block_without_safety_risk_normalizes_to_slow() -> None:
+    record = s2_offline_semantic_missing_answer_record(decision="block", safety_risk=None)
+    step = record["steps"][0]
+
+    route, _reason, inputs = dry_run.route_step(record, step)
+
+    assert route == "SLOW"
+    assert inputs["monitor_trigger"] == "semantic_missing_answer"
+    assert inputs["normalized_verifier_decision"] == "replan"
+
+
+def test_u2_verifier_block_remains_safety_blocked() -> None:
+    record = s2_offline_semantic_missing_answer_record(
+        task_id="UnsafeTask",
+        task_risk_level="U2",
+        decision="block",
+        safety_risk="U2",
+    )
+    step = record["steps"][0]
+
+    route, reason, inputs = dry_run.route_step(record, step)
+
+    assert route == "SKIP_UNSAFE"
+    assert "blocks U2" in reason
+    assert inputs["verifier_decision"] == "block"
+    assert inputs["verifier_safety_risk"] == "U2"
+    assert inputs["normalized_verifier_decision"] == "block"
+
+
+def test_s2_offline_scoped_summary_normalizes_u0_missing_answer_block(tmp_path, monkeypatch, capsys) -> None:
+    input_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    records = [
+        verifier_record("line29", "replan"),
+        s2_offline_semantic_missing_answer_record(task_id="line30", decision="replan"),
+        s2_offline_semantic_missing_answer_record(task_id="line31", decision="block"),
+    ]
+    input_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+    outputs, summary, _stdout = run_main(tmp_path, monkeypatch, capsys, input_path, "--input-last", "3")
+
+    assert [output["controller"]["route"] for output in outputs] == ["SLOW", "SLOW", "SLOW"]
+    assert summary["route_distribution"] == {"SLOW": 3}
+    assert summary["verifier_decision_distribution"] == {"block": 1, "replan": 2}
+    assert outputs[2]["controller"]["inputs"]["normalized_verifier_decision"] == "replan"

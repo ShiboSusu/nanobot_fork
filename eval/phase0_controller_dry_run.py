@@ -182,6 +182,10 @@ def has_monitor_severity(trigger_features: dict[str, Any]) -> bool:
 
 
 def semantic_missing_answer_trigger(record: dict[str, Any], step: dict[str, Any]) -> bool:
+    verifier = verifier_from_step(step)
+    if verifier.get("reason_for_verification") == "semantic_missing_answer":
+        return True
+
     action = step.get("action")
     if not isinstance(action, dict):
         return False
@@ -206,11 +210,20 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
     verifier = verifier_from_step(step)
     verifier_decision = verifier.get("decision") or verifier.get("verifier_decision")
     verifier_error = verifier.get("error") or verifier.get("verifier_error")
+    verifier_safety_risk = verifier.get("safety_risk")
     step_predicted_risk = risk.get("step_predicted_risk_level")
     rule_based_risk = risk.get("rule_based_step_risk_level")
     trigger = monitor_trigger(trigger_features)
     if semantic_missing_answer_trigger(record, step):
         trigger = "semantic_missing_answer"
+    normalized_verifier_decision = verifier_decision
+    if (
+        verifier_decision == "block"
+        and trigger == "semantic_missing_answer"
+        and task_risk_level == "U0"
+        and verifier_safety_risk in {None, "U0"}
+    ):
+        normalized_verifier_decision = "replan"
     environment_anomalies = record.get("environment_anomalies") if isinstance(record.get("environment_anomalies"), dict) else {}
 
     if task_risk_level == "U2":
@@ -240,18 +253,21 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
         else:
             route = "FAST"
             reason = "verifier error on low-risk step without monitor severity"
-    elif verifier_decision == "block":
+    elif normalized_verifier_decision == "block":
         route = "BLOCK"
         reason = "verifier decision is block"
-    elif verifier_decision == "ask_user":
+    elif normalized_verifier_decision == "ask_user":
         route = "ASK_USER"
         reason = "verifier decision is ask_user"
-    elif verifier_decision == "recover":
+    elif normalized_verifier_decision == "recover":
         route = "RECOVER"
         reason = "verifier decision is recover"
-    elif verifier_decision == "replan":
+    elif normalized_verifier_decision == "replan":
         route = "SLOW"
-        reason = "verifier decision is replan"
+        if verifier_decision == "block" and trigger == "semantic_missing_answer":
+            reason = "verifier block normalized to slow route for U0 semantic missing answer"
+        else:
+            reason = "verifier decision is replan"
     elif execution_state.get("repeated_region_action"):
         route = "RECOVER"
         reason = "execution state indicates repeated region action"
@@ -293,6 +309,8 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
     inputs = {
         "monitor_trigger": trigger,
         "verifier_decision": verifier_decision,
+        "verifier_safety_risk": verifier_safety_risk,
+        "normalized_verifier_decision": normalized_verifier_decision,
         "verifier_error": verifier_error,
         "runner_safety_gate": runner_safety_gate,
     }
