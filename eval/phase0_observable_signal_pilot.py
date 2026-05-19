@@ -521,6 +521,127 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
     return aligned_steps, stats, quality
 
 
+def enrich_monitor_features(steps: list[dict[str, Any]], max_steps: int | None = None) -> None:
+    previous_action_type: str | None = None
+    action_type_run_length = 0
+    coordinate_counts: Counter[tuple[str | None, str | None]] = Counter()
+    region_counts: Counter[tuple[str | None, str | None]] = Counter()
+
+    for position, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        action = step.get("action") if isinstance(step.get("action"), dict) else {}
+        action_type = string_or_none(action.get("action_type"))
+        if action_type and action_type == previous_action_type:
+            action_type_run_length += 1
+        else:
+            action_type_run_length = 1 if action_type else 0
+        previous_action_type = action_type
+
+        bucket = coordinate_bucket(action)
+        region = screen_region(action)
+        coordinate_key = (action_type, bucket)
+        region_key = (action_type, region)
+        if bucket is not None:
+            coordinate_counts[coordinate_key] += 1
+        if region is not None:
+            region_counts[region_key] += 1
+        coordinate_bucket_repeat = bool(bucket is not None and coordinate_counts[coordinate_key] >= 2)
+        screen_region_repeat = bool(region is not None and region_counts[region_key] >= 2)
+        repeated_region_action = coordinate_bucket_repeat or screen_region_repeat
+
+        step_index_value = step.get("step_index")
+        step_number = step_index_value if isinstance(step_index_value, int) else position
+        max_steps_remaining = max(0, max_steps - step_number - 1) if isinstance(max_steps, int) else None
+        max_steps_near_limit = bool(max_steps_remaining is not None and max_steps_remaining <= 1)
+
+        trigger_features = step.setdefault("trigger_features", {})
+        if not isinstance(trigger_features, dict):
+            trigger_features = {}
+            step["trigger_features"] = trigger_features
+        self_report = trigger_features.get("self_report") if isinstance(trigger_features.get("self_report"), dict) else {}
+        execution_state = trigger_features.setdefault("execution_state", {})
+        if not isinstance(execution_state, dict):
+            execution_state = {}
+            trigger_features["execution_state"] = execution_state
+
+        confidence = self_report.get("confidence")
+        high_confidence = isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and confidence >= 0.9
+        high_confidence_no_progress = bool(
+            high_confidence and (repeated_region_action or action_type_run_length >= 3)
+        )
+
+        execution_state.update(
+            {
+                "action_type_run_length": action_type_run_length,
+                "coordinate_bucket": bucket,
+                "coordinate_bucket_repeat": coordinate_bucket_repeat,
+                "screen_region": region,
+                "screen_region_repeat": screen_region_repeat,
+                "repeated_region_action": repeated_region_action,
+                "max_steps_remaining": max_steps_remaining,
+                "max_steps_near_limit": max_steps_near_limit,
+                "high_confidence_no_progress": high_confidence_no_progress,
+                "screenshot_capture_failure": bool(execution_state.get("screenshot_capture_failure", False)),
+                "secure_surface_suspected": bool(execution_state.get("secure_surface_suspected", False)),
+            }
+        )
+
+
+def coordinate_bucket(action: dict[str, Any]) -> str | None:
+    x = float_or_none(action.get("x"))
+    y = float_or_none(action.get("y"))
+    if x is None or y is None:
+        return None
+    if action.get("relative") is True:
+        return region_name(x, y, width=1000.0, height=1000.0)
+    return region_name(x, y, width=1500.0, height=2400.0)
+
+
+def screen_region(action: dict[str, Any]) -> str | None:
+    y = float_or_none(action.get("y"))
+    if y is None:
+        return None
+    height = 1000.0 if action.get("relative") is True else 2400.0
+    return vertical_region_name(y, height=height)
+
+
+def region_name(x: float, y: float, *, width: float, height: float) -> str:
+    horizontal = "left" if x < width / 3 else "center" if x < (2 * width) / 3 else "right"
+    vertical = vertical_region_name(y, height=height)
+    return f"{vertical}_{horizontal}"
+
+
+def vertical_region_name(y: float, *, height: float) -> str:
+    return "top" if y < height / 3 else "middle" if y < (2 * height) / 3 else "bottom"
+
+
+def detect_screenshot_capture_failure(*texts: Any) -> bool:
+    combined = " ".join(str(text or "") for text in texts).lower()
+    return "screencap" in combined and ("adb" in combined or "failed" in combined)
+
+
+def attach_environment_anomalies(record: dict[str, Any]) -> None:
+    screenshot_failure = detect_screenshot_capture_failure(record.get("runner_error"), record.get("error"))
+    steps = record.get("steps") if isinstance(record.get("steps"), list) else []
+    trace_quality_data = record.get("trace_quality") if isinstance(record.get("trace_quality"), dict) else {}
+    has_valid_model_actions = bool(
+        steps and (trace_quality_data.get("has_any_parsed_action") is True or any(step.get("action") for step in steps if isinstance(step, dict)))
+    )
+    secure_surface_suspected = bool(screenshot_failure and has_valid_model_actions)
+    record["environment_anomalies"] = {
+        "screenshot_capture_failure": screenshot_failure,
+        "secure_surface_suspected": secure_surface_suspected,
+    }
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        trigger_features = step.get("trigger_features") if isinstance(step.get("trigger_features"), dict) else {}
+        execution_state = trigger_features.get("execution_state") if isinstance(trigger_features.get("execution_state"), dict) else {}
+        execution_state["screenshot_capture_failure"] = screenshot_failure
+        execution_state["secure_surface_suspected"] = secure_surface_suspected
+
+
 def alignment_status(outer: dict[str, Any] | None, inner: dict[str, Any] | None) -> str:
     if outer is not None and inner is not None:
         return "aligned"
@@ -800,6 +921,7 @@ async def run_one_task(
 
     trace_paths = find_newest_trace_paths(cfg, before_ts)
     steps, alignment, quality = extract_trace(task, trace_paths)
+    enrich_monitor_features(steps, max_steps=int_or_none(getattr(cfg.gui, "max_steps", None)))
     termination_reason = normalize_termination(
         runner_error=runner_error,
         task_success=task_success,
@@ -849,7 +971,10 @@ async def run_one_task(
         "steps": steps,
     }
     if controller_shadow:
+        attach_environment_anomalies(record)
         attach_shadow_controller(record)
+    else:
+        attach_environment_anomalies(record)
     return record
 
 

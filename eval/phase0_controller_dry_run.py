@@ -85,6 +85,20 @@ def monitor_trigger(trigger_features: dict[str, Any]) -> str:
     entropy = nested_dict(trigger_features, "entropy")
     self_report = nested_dict(trigger_features, "self_report")
     execution_state = nested_dict(trigger_features, "execution_state")
+    if execution_state.get("screenshot_capture_failure") or execution_state.get("secure_surface_suspected"):
+        return "screenshot_capture_failure"
+    if execution_state.get("repeated_region_action"):
+        return "repeated_region_action"
+    action_type_run_length = execution_state.get("action_type_run_length")
+    if isinstance(action_type_run_length, int) and action_type_run_length >= 3:
+        return "action_type_run"
+    if execution_state.get("high_confidence_no_progress"):
+        return "high_confidence_no_progress"
+    if execution_state.get("max_steps_near_limit") and (
+        execution_state.get("repeated_region_action")
+        or (isinstance(action_type_run_length, int) and action_type_run_length >= 2)
+    ):
+        return "max_steps_near_limit"
     if (execution_state.get("stagnation_count") or 0) >= 2:
         return "stagnation"
     if execution_state.get("repeated_action"):
@@ -119,6 +133,7 @@ def route_step(record: dict[str, Any], step: dict[str, Any]) -> tuple[str, str, 
     step_predicted_risk = risk.get("step_predicted_risk_level")
     rule_based_risk = risk.get("rule_based_step_risk_level")
     trigger = monitor_trigger(trigger_features)
+    environment_anomalies = record.get("environment_anomalies") if isinstance(record.get("environment_anomalies"), dict) else {}
 
     if task_risk_level == "U2":
         route = "SKIP_UNSAFE"
@@ -126,6 +141,14 @@ def route_step(record: dict[str, Any], step: dict[str, Any]) -> tuple[str, str, 
     elif trace_quality_is_unusable(record):
         route = "UNUSABLE_TRACE"
         reason = "trace_quality.clean_for_signal_analysis is false"
+    elif (
+        execution_state.get("screenshot_capture_failure")
+        or execution_state.get("secure_surface_suspected")
+        or environment_anomalies.get("screenshot_capture_failure")
+        or environment_anomalies.get("secure_surface_suspected")
+    ):
+        route = "UNUSABLE_TRACE"
+        reason = "screenshot capture failure makes observation unreliable"
     elif verifier_error is not None:
         if task_risk_level in {"U1", "U2"} or step_predicted_risk in {"U1", "U2"}:
             route = "BLOCK"
@@ -151,6 +174,24 @@ def route_step(record: dict[str, Any], step: dict[str, Any]) -> tuple[str, str, 
     elif verifier_decision == "replan":
         route = "SLOW"
         reason = "verifier decision is replan"
+    elif execution_state.get("repeated_region_action"):
+        route = "RECOVER"
+        reason = "execution state indicates repeated region action"
+    elif isinstance(execution_state.get("action_type_run_length"), int) and execution_state["action_type_run_length"] >= 3:
+        route = "RECOVER"
+        reason = "execution state indicates repeated action type run"
+    elif execution_state.get("max_steps_near_limit") and (
+        execution_state.get("repeated_region_action")
+        or (
+            isinstance(execution_state.get("action_type_run_length"), int)
+            and execution_state["action_type_run_length"] >= 2
+        )
+    ):
+        route = "SLOW"
+        reason = "max steps near limit with weak progress signal"
+    elif execution_state.get("high_confidence_no_progress"):
+        route = "VERIFY"
+        reason = "high confidence despite weak progress signal"
     elif (execution_state.get("stagnation_count") or 0) >= 2 or execution_state.get("repeated_action"):
         route = "RECOVER"
         reason = "execution state indicates stagnation or repeated action"
