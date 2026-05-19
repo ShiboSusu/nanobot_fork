@@ -79,6 +79,113 @@ def test_run_offline_smoke_uses_record_line_without_env(tmp_path, monkeypatch, c
     assert '"verifier_error": "missing_env:MA_INTRANET_URL,MA_TOKEN"' in stdout
 
 
+def test_run_offline_smoke_writes_record_line_source_record(tmp_path, monkeypatch) -> None:
+    input_path = tmp_path / "phase0.jsonl"
+    output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"task_id": "line-1", "task_risk_level": "U0"}),
+                json.dumps(
+                    {
+                        "task_id": "line-2",
+                        "task_risk_level": "U1",
+                        "steps": [{"step_index": 0, "action": {"action_type": "done"}}],
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MA_INTRANET_URL", raising=False)
+    monkeypatch.delenv("MA_TOKEN", raising=False)
+    monkeypatch.setattr(s2, "git_ignores_path", lambda path: True)
+
+    exit_code = s2.run_offline_smoke(
+        input_path,
+        latest=False,
+        record_line=2,
+        step_index=None,
+        timeout_s=1.0,
+        write_output=output_path,
+    )
+
+    assert exit_code == 0
+    output_record = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output_record["source_record"] == {
+        "input_path": str(input_path),
+        "line_number": 2,
+        "selection": "record_line",
+    }
+
+
+def test_run_offline_smoke_writes_latest_source_record_line(tmp_path, monkeypatch) -> None:
+    input_path = tmp_path / "phase0.jsonl"
+    output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"task_id": "line-1", "task_risk_level": "U0"}),
+                "{not-json",
+                json.dumps(
+                    {
+                        "task_id": "line-3",
+                        "task_risk_level": "U1",
+                        "steps": [{"step_index": 0, "action": {"action_type": "done"}}],
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MA_INTRANET_URL", raising=False)
+    monkeypatch.delenv("MA_TOKEN", raising=False)
+    monkeypatch.setattr(s2, "git_ignores_path", lambda path: True)
+
+    exit_code = s2.run_offline_smoke(
+        input_path,
+        latest=True,
+        record_line=None,
+        step_index=None,
+        timeout_s=1.0,
+        write_output=output_path,
+    )
+
+    assert exit_code == 0
+    output_record = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output_record["source_record"] == {
+        "input_path": str(input_path),
+        "line_number": 3,
+        "selection": "latest",
+    }
+
+
+def test_run_offline_smoke_writes_synthetic_fallback_source_record(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    monkeypatch.delenv("MA_INTRANET_URL", raising=False)
+    monkeypatch.delenv("MA_TOKEN", raising=False)
+    monkeypatch.setattr(s2, "git_ignores_path", lambda path: True)
+
+    exit_code = s2.run_offline_smoke(
+        None,
+        latest=False,
+        record_line=None,
+        step_index=None,
+        timeout_s=1.0,
+        write_output=output_path,
+    )
+
+    assert exit_code == 0
+    output_record = json.loads(output_path.read_text(encoding="utf-8"))
+    assert output_record["source_record"] == {
+        "input_path": None,
+        "line_number": None,
+        "selection": "synthetic_fallback",
+    }
+
+
 def test_build_request_from_phase0_record_includes_semantic_missing_answer_diagnostics() -> None:
     record = {
         "task_id": "ChromeSearchBeijingWeatherTask",
@@ -308,6 +415,46 @@ def test_main_summarize_output_reports_verifier_distributions(tmp_path, monkeypa
     assert "Allowed-to-execute count: 2" in stdout
     assert "Total latency seconds: 4.0" in stdout
     assert "Total prompt/completion tokens: 35/7" in stdout
+
+
+def test_main_summarize_output_reports_source_record_line_range(tmp_path, monkeypatch, capsys) -> None:
+    output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    records = [
+        verifier_output_record(
+            task_risk_level="U0",
+            called=True,
+            decision="pass",
+            safety_risk="U0",
+            failure_risk="low",
+            reason_for_verification="low_confidence",
+            allowed=True,
+            latency_s=1.0,
+            prompt_tokens=10,
+            completion_tokens=2,
+        ),
+        verifier_output_record(
+            task_risk_level="U1",
+            called=True,
+            decision="block",
+            safety_risk="U2",
+            failure_risk="high",
+            reason_for_verification="stagnation",
+            allowed=False,
+            latency_s=2.0,
+            prompt_tokens=20,
+            completion_tokens=4,
+        ),
+    ]
+    records[0]["source_record"] = {"input_path": "phase0.jsonl", "line_number": 2, "selection": "record_line"}
+    records[1]["source_record"] = {"input_path": "phase0.jsonl", "line_number": 4, "selection": "latest"}
+    output_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["s2_verifier_client.py", "--summarize-output", str(output_path)])
+
+    exit_code = s2.main()
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Source record line range: 2-4" in stdout
 
 
 def test_main_summarize_output_applies_since_line_before_last(tmp_path, monkeypatch, capsys) -> None:

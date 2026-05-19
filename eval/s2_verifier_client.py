@@ -567,6 +567,7 @@ def build_sanitized_offline_record(
     request: S2VerifierRequest,
     selected_step: dict[str, Any],
     metadata: dict[str, Any],
+    source_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     trigger_features = selected_step.get("trigger_features") if isinstance(selected_step.get("trigger_features"), dict) else {}
     outcome_proxies = selected_step.get("outcome_proxies") if isinstance(selected_step.get("outcome_proxies"), dict) else {}
@@ -596,6 +597,8 @@ def build_sanitized_offline_record(
         "steps": [step_record],
         "verifier_summary": build_verifier_summary([step_record]),
     }
+    if source_record is not None:
+        output_record["source_record"] = source_record
     return output_record
 
 
@@ -616,11 +619,16 @@ def append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 
 def load_latest_record(path: Path) -> dict[str, Any] | None:
+    latest = load_latest_record_with_line(path)
+    return latest[1] if latest else None
+
+
+def load_latest_record_with_line(path: Path) -> tuple[int, dict[str, Any]] | None:
     if not path.exists():
         return None
     latest = None
     with path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
+        for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
             try:
@@ -628,7 +636,7 @@ def load_latest_record(path: Path) -> dict[str, Any] | None:
             except json.JSONDecodeError:
                 continue
             if isinstance(record, dict):
-                latest = record
+                latest = (line_number, record)
     return latest
 
 
@@ -709,9 +717,14 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     total_latency_s = 0.0
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    source_line_numbers: list[int] = []
 
     for _, record in records_with_lines:
         count_string(task_risk_counts, record.get("task_risk_level"))
+        source_record = record.get("source_record") if isinstance(record.get("source_record"), dict) else {}
+        source_line_number = source_record.get("line_number")
+        if isinstance(source_line_number, int) and not isinstance(source_line_number, bool):
+            source_line_numbers.append(source_line_number)
         verifier = first_verifier_block(record)
         if verifier.get("called"):
             called_count += 1
@@ -740,6 +753,8 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
         line_range = "none"
     print(f"Summary source line range: {line_range}")
     print(f"Summary filters: since_line={since_line if since_line is not None else 'none'} last={last if last is not None else 'none'}")
+    if source_line_numbers:
+        print(f"Source record line range: {min(source_line_numbers)}-{max(source_line_numbers)}")
     print(f"Total records: {len(records_with_lines)}")
     print_distribution("Task risk distribution", task_risk_counts)
     print(f"Called count: {called_count}")
@@ -791,16 +806,34 @@ def run_offline_smoke(
     if record_line is not None and input_path is None:
         print("ERROR: --record-line requires --input")
         return 2
+    source_record: dict[str, Any] = {
+        "input_path": str(input_path) if input_path else None,
+        "line_number": None,
+        "selection": "synthetic_fallback",
+    }
     try:
         record = load_record_at_line(input_path, record_line) if input_path and record_line is not None else None
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 2
-    if record is None:
-        record = load_latest_record(input_path) if input_path and latest else None
-    source = str(input_path) if record is not None else "synthetic_fallback"
     if record is not None and record_line is not None:
-        source = f"{input_path}:{record_line}"
+        source_record = {
+            "input_path": str(input_path),
+            "line_number": record_line,
+            "selection": "record_line",
+        }
+    if record is None:
+        latest_record = load_latest_record_with_line(input_path) if input_path and latest else None
+        if latest_record is not None:
+            latest_line_number, record = latest_record
+            source_record = {
+                "input_path": str(input_path),
+                "line_number": latest_line_number,
+                "selection": "latest",
+            }
+    source = str(input_path) if record is not None else "synthetic_fallback"
+    if record is not None and source_record.get("line_number") is not None:
+        source = f"{input_path}:{source_record['line_number']}"
     if record is None:
         record = synthetic_phase0_record()
     try:
@@ -833,7 +866,7 @@ def run_offline_smoke(
             if not git_ignores_path(write_output):
                 print(f"ERROR: output path is not gitignored: {write_output}")
                 return 2
-            append_jsonl(write_output, build_sanitized_offline_record(record, request, selected_step, metadata))
+            append_jsonl(write_output, build_sanitized_offline_record(record, request, selected_step, metadata, source_record))
             print(f"wrote_output: {write_output}")
         return 0
 
@@ -844,7 +877,7 @@ def run_offline_smoke(
         if not git_ignores_path(write_output):
             print(f"ERROR: output path is not gitignored: {write_output}")
             return 2
-        append_jsonl(write_output, build_sanitized_offline_record(record, request, selected_step, metadata))
+        append_jsonl(write_output, build_sanitized_offline_record(record, request, selected_step, metadata, source_record))
         print(f"wrote_output: {write_output}")
     return 0 if result.ok else 1
 
