@@ -67,6 +67,23 @@ RUNTIME_SIGNAL_INSTRUCTION = (
     "Do not put runtime_signal inside the tool_call arguments."
 )
 RUNTIME_SIGNAL_RE = re.compile(r"<runtime_signal>\s*(.*?)\s*</runtime_signal>", re.DOTALL)
+ANSWER_REQUIRED_PATTERNS = (
+    re.compile(r"\bonly\s+(?:give|answer|return)\b", re.IGNORECASE),
+    re.compile(r"\banswer\s+(?:with\s+)?(?:an?\s+)?integer\b", re.IGNORECASE),
+    re.compile(r"\bgive\s+(?:an?\s+)?integer\b", re.IGNORECASE),
+    re.compile(r"只回答"),
+    re.compile(r"不要返回任何其他文本"),
+    re.compile(r"只返回"),
+)
+FINAL_ANSWER_FIELDS = (
+    "answer",
+    "final_answer",
+    "result",
+    "text",
+    "content",
+    "response",
+    "summary",
+)
 
 
 @dataclass(frozen=True)
@@ -521,6 +538,65 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
     return aligned_steps, stats, quality
 
 
+def task_requires_final_answer(task: Phase0Task) -> bool:
+    text = f"{task.instruction}\n{task.instruction_ch}"
+    return any(pattern.search(text) for pattern in ANSWER_REQUIRED_PATTERNS)
+
+
+def final_done_action(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        action = step.get("action")
+        if not isinstance(action, dict):
+            continue
+        if action.get("action_type") == "done":
+            return action
+    return None
+
+
+def extract_final_answer(action: dict[str, Any] | None) -> str | None:
+    if not action:
+        return None
+    for field in FINAL_ANSWER_FIELDS:
+        value = action.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(value)
+    return None
+
+
+def infer_semantic_outcome(task: Phase0Task, steps: list[dict[str, Any]]) -> dict[str, Any]:
+    answer_required = task_requires_final_answer(task)
+    answer = extract_final_answer(final_done_action(steps))
+    answer_present = answer is not None
+
+    if answer_required and not answer_present:
+        return {
+            "answer_required": True,
+            "final_answer_present": False,
+            "semantic_task_success": False,
+            "semantic_success_source": "answer_presence_guard",
+            "semantic_success_reason": "missing_required_final_answer",
+        }
+    if answer_required and answer_present:
+        return {
+            "answer_required": True,
+            "final_answer_present": True,
+            "semantic_task_success": None,
+            "semantic_success_source": "none",
+            "semantic_success_reason": "final_answer_present_but_unjudged",
+        }
+    return {
+        "answer_required": False,
+        "final_answer_present": answer_present,
+        "semantic_task_success": None,
+        "semantic_success_source": "none",
+        "semantic_success_reason": "not_evaluated",
+    }
+
+
 def enrich_monitor_features(steps: list[dict[str, Any]], max_steps: int | None = None) -> None:
     previous_action_type: str | None = None
     action_type_run_length = 0
@@ -934,6 +1010,7 @@ async def run_one_task(
         and termination_reason == "completed"
         and quality["clean_for_signal_analysis"] is True
     )
+    semantic_outcome = infer_semantic_outcome(task, steps)
     warning = path_warning(trace_paths.run_dir, trace_paths.outer_trace_path, trace_paths.inner_trace_path)
 
     record = {
@@ -945,7 +1022,10 @@ async def run_one_task(
         "runner_returned": runner_returned,
         "runner_error": runner_error,
         "task_success": task_success,
+        "task_success_source": "gui_runner",
+        "runner_clean_success": clean_success,
         "clean_success": clean_success,
+        **semantic_outcome,
         "termination_reason": termination_reason,
         "success": clean_success,
         "error": runner_error,
@@ -1182,6 +1262,12 @@ def summarize_output(path: Path) -> None:
     risk_distribution = Counter(record.get("task_risk_level") for record in records)
     termination_distribution = Counter(record.get("termination_reason", "missing") for record in records)
     clean_success_count = sum(1 for record in records if record.get("clean_success") is True)
+    runner_clean_success_count = sum(
+        1 for record in records if record.get("runner_clean_success", record.get("clean_success")) is True
+    )
+    semantic_success_count = sum(1 for record in records if record.get("semantic_task_success") is True)
+    semantic_failure_count = sum(1 for record in records if record.get("semantic_task_success") is False)
+    semantic_unlabeled_count = sum(1 for record in records if record.get("semantic_task_success") is None)
     coverage_values = [
         quality["inner_coverage"]
         for record in records
@@ -1204,6 +1290,10 @@ def summarize_output(path: Path) -> None:
     print(f"Total records: {len(records)}")
     print(f"Risk distribution: {dict(risk_distribution)}")
     print(f"Clean success count: {clean_success_count}")
+    print(f"Runner clean success count: {runner_clean_success_count}")
+    print(f"Semantic success count: {semantic_success_count}")
+    print(f"Semantic failure count: {semantic_failure_count}")
+    print(f"Semantic unlabeled count: {semantic_unlabeled_count}")
     print(f"Termination reason distribution: {dict(termination_distribution)}")
     print(f"Average inner coverage: {average_inner_coverage}")
     print(f"Records with quality warnings: {quality_warning_count}")
