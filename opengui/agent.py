@@ -1071,6 +1071,10 @@ class GuiAgent:
                         trace_path=result.trace_path,
                     )
                     if result.success:
+                        last_error = None
+                        last_model_summary = result.model_summary
+                        last_trace_path = result.trace_path or last_trace_path
+                        last_steps_taken = result.steps_taken
                         break
                     last_error = result.error
                     last_model_summary = result.model_summary
@@ -1148,7 +1152,7 @@ class GuiAgent:
                 result,
                 token_usage=total_usage,
                 trace_path=last_trace_path or result.trace_path,
-                error=last_error or result.error,
+                error=result.error if result.success else (last_error or result.error),
             )
 
         # 6. Finish trajectory
