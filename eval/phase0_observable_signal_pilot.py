@@ -1513,6 +1513,11 @@ def summarize_output(path: Path) -> None:
     records = load_output_records(path)
     risk_distribution = Counter(record.get("task_risk_level") for record in records)
     termination_distribution = Counter(record.get("termination_reason", "missing") for record in records)
+    controller_route_distribution: Counter[str] = Counter()
+    raw_monitor_route_distribution: Counter[str] = Counter()
+    hard_gate_reason_distribution: Counter[str] = Counter()
+    monitor_trigger_distribution: Counter[str] = Counter()
+    raw_monitor_trigger_distribution: Counter[str] = Counter()
     clean_success_count = sum(1 for record in records if record.get("clean_success") is True)
     runner_clean_success_count = sum(
         1 for record in records if record.get("runner_clean_success", record.get("clean_success")) is True
@@ -1538,6 +1543,25 @@ def summarize_output(path: Path) -> None:
         if isinstance(record.get("trace_quality"), dict)
         and record["trace_quality"].get("clean_for_signal_analysis") is True
     )
+    for record in records:
+        steps = record.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict) or not isinstance((controller := step.get("controller")), dict):
+                continue
+            if controller.get("route"):
+                controller_route_distribution[controller["route"]] += 1
+            if controller.get("raw_monitor_route"):
+                raw_monitor_route_distribution[controller["raw_monitor_route"]] += 1
+            if controller.get("hard_gate_reason"):
+                hard_gate_reason_distribution[controller["hard_gate_reason"]] += 1
+            inputs = controller.get("inputs")
+            if isinstance(inputs, dict) and inputs.get("monitor_trigger"):
+                monitor_trigger_distribution[inputs["monitor_trigger"]] += 1
+            raw_monitor_inputs = controller.get("raw_monitor_inputs")
+            if isinstance(raw_monitor_inputs, dict) and raw_monitor_inputs.get("monitor_trigger"):
+                raw_monitor_trigger_distribution[raw_monitor_inputs["monitor_trigger"]] += 1
 
     print(f"Total records: {len(records)}")
     print(f"Risk distribution: {dict(risk_distribution)}")
@@ -1550,6 +1574,11 @@ def summarize_output(path: Path) -> None:
     print(f"Average inner coverage: {average_inner_coverage}")
     print(f"Records with quality warnings: {quality_warning_count}")
     print(f"Clean for signal analysis count: {clean_for_signal_count}")
+    print(f"Controller route distribution: {dict(controller_route_distribution)}")
+    print(f"Raw monitor route distribution: {dict(raw_monitor_route_distribution)}")
+    print(f"Hard gate reason distribution: {dict(hard_gate_reason_distribution)}")
+    print(f"Monitor trigger distribution: {dict(monitor_trigger_distribution)}")
+    print(f"Raw monitor trigger distribution: {dict(raw_monitor_trigger_distribution)}")
 
 
 def load_output_records(path: Path) -> list[dict[str, Any]]:
