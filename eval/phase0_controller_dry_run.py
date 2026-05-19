@@ -154,6 +154,19 @@ def has_monitor_severity(trigger_features: dict[str, Any]) -> bool:
     return monitor_trigger(trigger_features) != "none"
 
 
+def semantic_missing_answer_trigger(record: dict[str, Any], step: dict[str, Any]) -> bool:
+    action = step.get("action")
+    if not isinstance(action, dict):
+        return False
+    return (
+        record.get("semantic_task_success") is False
+        and record.get("semantic_success_source") == "answer_presence_guard"
+        and record.get("semantic_success_reason") == "missing_required_final_answer"
+        and action.get("action_type") == "done"
+        and action.get("status") == "success"
+    )
+
+
 def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observation_hard_gates: bool) -> tuple[str, str, dict[str, Any]]:
     task_risk_level = str(record.get("task_risk_level") or record.get("risk_level") or "U0")
     trigger_features = nested_dict(step, "trigger_features")
@@ -169,6 +182,8 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
     step_predicted_risk = risk.get("step_predicted_risk_level")
     rule_based_risk = risk.get("rule_based_step_risk_level")
     trigger = monitor_trigger(trigger_features)
+    if semantic_missing_answer_trigger(record, step):
+        trigger = "semantic_missing_answer"
     environment_anomalies = record.get("environment_anomalies") if isinstance(record.get("environment_anomalies"), dict) else {}
 
     if task_risk_level == "U2":
@@ -240,6 +255,9 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
     elif rule_based_risk in {"U1", "U2"}:
         route = "VERIFY"
         reason = "rule-based step risk is elevated"
+    elif trigger == "semantic_missing_answer":
+        route = "VERIFY"
+        reason = "semantic guard found missing required final answer"
     else:
         route = "FAST"
         reason = "no dry-run controller trigger fired"

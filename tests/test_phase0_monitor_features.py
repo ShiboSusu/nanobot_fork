@@ -145,6 +145,69 @@ def test_shadow_controller_exposes_raw_route_under_low_inner_coverage_gate() -> 
     assert controller["inputs"]["monitor_trigger"] == "repeated_region_action"
 
 
+def test_shadow_controller_verifies_clean_empty_done_semantic_failure() -> None:
+    record = {
+        "task_id": "example",
+        "task_risk_level": "U0",
+        "trace_quality": {"clean_for_signal_analysis": True},
+        "semantic_task_success": False,
+        "semantic_success_source": "answer_presence_guard",
+        "semantic_success_reason": "missing_required_final_answer",
+        "steps": [
+            {
+                "step_index": 0,
+                "action": {"action_type": "done", "status": "success", "answer": ""},
+                "trigger_features": {
+                    "risk": {"rule_based_step_risk_level": "U0", "step_predicted_risk_level": "U0"},
+                    "execution_state": {},
+                },
+            }
+        ],
+    }
+
+    attach_shadow_controller(record)
+
+    controller = record["steps"][0]["controller"]
+    assert controller["route"] == "VERIFY"
+    assert controller["raw_monitor_route"] == "VERIFY"
+    assert controller["hard_gate_reason"] is None
+    assert controller["inputs"]["monitor_trigger"] == "semantic_missing_answer"
+    assert controller["raw_monitor_inputs"]["monitor_trigger"] == "semantic_missing_answer"
+    assert "missing required final answer" in controller["reason"]
+    assert "missing required final answer" in controller["raw_monitor_reason"]
+
+
+def test_shadow_controller_keeps_trace_gate_but_exposes_empty_done_semantic_raw_route() -> None:
+    record = {
+        "task_id": "example",
+        "task_risk_level": "U0",
+        "trace_quality": {"clean_for_signal_analysis": False, "quality_warning": "low_inner_coverage"},
+        "semantic_task_success": False,
+        "semantic_success_source": "answer_presence_guard",
+        "semantic_success_reason": "missing_required_final_answer",
+        "steps": [
+            {
+                "step_index": 0,
+                "action": {"action_type": "done", "status": "success", "answer": ""},
+                "trigger_features": {
+                    "risk": {"rule_based_step_risk_level": "U0", "step_predicted_risk_level": "U0"},
+                    "execution_state": {},
+                },
+            }
+        ],
+    }
+
+    attach_shadow_controller(record)
+
+    controller = record["steps"][0]["controller"]
+    assert controller["route"] == "UNUSABLE_TRACE"
+    assert controller["raw_monitor_route"] == "VERIFY"
+    assert controller["hard_gate_reason"] == "low_inner_coverage"
+    assert controller["inputs"]["monitor_trigger"] == "semantic_missing_answer"
+    assert controller["raw_monitor_inputs"]["monitor_trigger"] == "semantic_missing_answer"
+    assert controller["raw_monitor_reason"] == "semantic guard found missing required final answer"
+
+
 def test_shadow_controller_exposes_raw_route_under_screenshot_gate() -> None:
     record = {
         "task_id": "example",
