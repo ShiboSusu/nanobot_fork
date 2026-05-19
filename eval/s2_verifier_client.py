@@ -595,6 +595,26 @@ def load_latest_record(path: Path) -> dict[str, Any] | None:
     return latest
 
 
+def load_record_at_line(path: Path, line_number: int) -> dict[str, Any]:
+    if not path.exists():
+        raise ValueError(f"input JSONL does not exist: {path}")
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for current_line_number, line in enumerate(handle, start=1):
+            if current_line_number != line_number:
+                continue
+            stripped = line.strip()
+            if not stripped:
+                raise ValueError(f"blank physical line {line_number}")
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSON on physical line {line_number}") from exc
+            if not isinstance(record, dict):
+                raise ValueError(f"JSON object required on physical line {line_number}")
+            return record
+    raise ValueError(f"missing physical line {line_number}")
+
+
 def synthetic_phase0_record() -> dict[str, Any]:
     return {
         "task_id": "__synthetic_s2_offline__",
@@ -624,12 +644,24 @@ def synthetic_phase0_record() -> dict[str, Any]:
 def run_offline_smoke(
     input_path: Path | None,
     latest: bool,
+    record_line: int | None,
     step_index: int | None,
     timeout_s: float,
     write_output: Path | None,
 ) -> int:
-    record = load_latest_record(input_path) if input_path and latest else None
+    if record_line is not None and input_path is None:
+        print("ERROR: --record-line requires --input")
+        return 2
+    try:
+        record = load_record_at_line(input_path, record_line) if input_path and record_line is not None else None
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+    if record is None:
+        record = load_latest_record(input_path) if input_path and latest else None
     source = str(input_path) if record is not None else "synthetic_fallback"
+    if record is not None and record_line is not None:
+        source = f"{input_path}:{record_line}"
     if record is None:
         record = synthetic_phase0_record()
     try:
@@ -749,13 +781,22 @@ def run_smoke_text(timeout_s: float) -> int:
     return 0 if result.ok else 1
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("positive integer required")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true", help="Run local validation tests without network calls")
     parser.add_argument("--smoke", choices=["text"], help="Run a safe text-only S2 verifier smoke")
     parser.add_argument("--offline-smoke", action="store_true", help="Build request from Phase 0 JSONL and optionally call S2")
     parser.add_argument("--input", type=Path, help="Phase 0 observable JSONL input for offline smoke")
-    parser.add_argument("--latest", action="store_true", help="Use latest record from --input")
+    record_selection = parser.add_mutually_exclusive_group()
+    record_selection.add_argument("--latest", action="store_true", help="Use latest record from --input")
+    record_selection.add_argument("--record-line", type=positive_int, help="Use valid JSON object on this 1-based physical --input line")
     parser.add_argument("--step-index", type=int, help="Optional step index for offline smoke")
     parser.add_argument("--timeout-s", type=float, default=60.0, help="Verifier request timeout")
     parser.add_argument("--write-output", type=Path, help="Append sanitized offline verifier JSONL output")
@@ -769,7 +810,7 @@ def main() -> int:
     if args.smoke == "text":
         return run_smoke_text(args.timeout_s)
     if args.offline_smoke:
-        return run_offline_smoke(args.input, args.latest, args.step_index, args.timeout_s, args.write_output)
+        return run_offline_smoke(args.input, args.latest, args.record_line, args.step_index, args.timeout_s, args.write_output)
     build_parser().print_help()
     return 0
 
