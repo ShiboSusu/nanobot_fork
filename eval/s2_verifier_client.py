@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import socket
@@ -651,6 +652,108 @@ def load_record_at_line(path: Path, line_number: int) -> dict[str, Any]:
     raise ValueError(f"missing physical line {line_number}")
 
 
+def load_jsonl_object_records_with_lines(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    if not path.exists():
+        raise ValueError(f"input JSONL does not exist: {path}")
+    records: list[tuple[int, dict[str, Any]]] = []
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append((line_number, record))
+    return records
+
+
+def first_verifier_block(record: dict[str, Any]) -> dict[str, Any]:
+    steps = record.get("steps") if isinstance(record.get("steps"), list) else []
+    first_step = steps[0] if steps and isinstance(steps[0], dict) else {}
+    verifier = first_step.get("verifier") if isinstance(first_step.get("verifier"), dict) else {}
+    return verifier
+
+
+def count_string(counter: Counter[str], value: Any) -> None:
+    if isinstance(value, str):
+        counter[value] += 1
+
+
+def print_distribution(label: str, counter: Counter[str]) -> None:
+    print(f"{label}: {json.dumps(dict(sorted(counter.items())), ensure_ascii=False)}")
+
+
+def summarize_offline_output(path: Path, *, since_line: int | None = None, last: int | None = None) -> int:
+    try:
+        records_with_lines = load_jsonl_object_records_with_lines(path)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+
+    if since_line is not None:
+        records_with_lines = [(line_number, record) for line_number, record in records_with_lines if line_number >= since_line]
+    if last is not None:
+        records_with_lines = records_with_lines[-last:]
+
+    task_risk_counts: Counter[str] = Counter()
+    decision_counts: Counter[str] = Counter()
+    safety_risk_counts: Counter[str] = Counter()
+    failure_risk_counts: Counter[str] = Counter()
+    reason_counts: Counter[str] = Counter()
+    called_count = 0
+    error_count = 0
+    allowed_count = 0
+    total_latency_s = 0.0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+
+    for _, record in records_with_lines:
+        count_string(task_risk_counts, record.get("task_risk_level"))
+        verifier = first_verifier_block(record)
+        if verifier.get("called"):
+            called_count += 1
+        if verifier.get("error"):
+            error_count += 1
+        count_string(decision_counts, verifier.get("decision"))
+        count_string(safety_risk_counts, verifier.get("safety_risk"))
+        count_string(failure_risk_counts, verifier.get("failure_risk"))
+        count_string(reason_counts, verifier.get("reason_for_verification"))
+        if verifier.get("allowed_to_execute_s1_action"):
+            allowed_count += 1
+        latency_s = verifier.get("latency_s")
+        if isinstance(latency_s, (int, float)) and not isinstance(latency_s, bool):
+            total_latency_s += float(latency_s)
+        token_usage = verifier.get("token_usage") if isinstance(verifier.get("token_usage"), dict) else {}
+        prompt_tokens = token_usage.get("prompt_tokens")
+        completion_tokens = token_usage.get("completion_tokens")
+        if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+            total_prompt_tokens += prompt_tokens
+        if isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool):
+            total_completion_tokens += completion_tokens
+
+    if records_with_lines:
+        line_range = f"{records_with_lines[0][0]}-{records_with_lines[-1][0]}"
+    else:
+        line_range = "none"
+    print(f"Summary source line range: {line_range}")
+    print(f"Summary filters: since_line={since_line if since_line is not None else 'none'} last={last if last is not None else 'none'}")
+    print(f"Total records: {len(records_with_lines)}")
+    print_distribution("Task risk distribution", task_risk_counts)
+    print(f"Called count: {called_count}")
+    print(f"Error count: {error_count}")
+    print_distribution("Decision distribution", decision_counts)
+    print_distribution("Safety risk distribution", safety_risk_counts)
+    print_distribution("Failure risk distribution", failure_risk_counts)
+    print_distribution("Reason-for-verification distribution", reason_counts)
+    print(f"Allowed-to-execute count: {allowed_count}")
+    print(f"Total latency seconds: {round(total_latency_s, 3)}")
+    print(f"Total prompt/completion tokens: {total_prompt_tokens}/{total_completion_tokens}")
+    return 0
+
+
 def synthetic_phase0_record() -> dict[str, Any]:
     return {
         "task_id": "__synthetic_s2_offline__",
@@ -836,11 +939,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-index", type=int, help="Optional step index for offline smoke")
     parser.add_argument("--timeout-s", type=float, default=60.0, help="Verifier request timeout")
     parser.add_argument("--write-output", type=Path, help="Append sanitized offline verifier JSONL output")
+    parser.add_argument("--summarize-output", type=Path, help="Summarize sanitized offline verifier JSONL output")
+    parser.add_argument("--summarize-last", type=positive_int, help="Summarize only the last N valid records after other filters")
+    parser.add_argument("--summarize-since-line", type=positive_int, help="Summarize valid records from this physical JSONL line onward")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.summarize_output:
+        return summarize_offline_output(args.summarize_output, since_line=args.summarize_since_line, last=args.summarize_last)
     if args.self_test:
         return run_self_test()
     if args.smoke == "text":

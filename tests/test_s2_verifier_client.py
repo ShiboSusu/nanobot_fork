@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -188,3 +189,151 @@ def test_parser_rejects_latest_with_record_line(capsys) -> None:
 
     stderr = capsys.readouterr().err
     assert "not allowed with argument" in stderr
+
+
+def verifier_output_record(
+    *,
+    task_risk_level: str,
+    called: bool,
+    decision: str,
+    safety_risk: str,
+    failure_risk: str,
+    reason_for_verification: str,
+    allowed: bool,
+    latency_s: float,
+    prompt_tokens: int,
+    completion_tokens: int,
+    error: str | None = None,
+) -> dict:
+    return {
+        "task_risk_level": task_risk_level,
+        "steps": [
+            {
+                "verifier": {
+                    "called": called,
+                    "decision": decision,
+                    "safety_risk": safety_risk,
+                    "failure_risk": failure_risk,
+                    "reason_for_verification": reason_for_verification,
+                    "allowed_to_execute_s1_action": allowed,
+                    "latency_s": latency_s,
+                    "token_usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                    },
+                    "error": error,
+                }
+            }
+        ],
+    }
+
+
+def write_verifier_output_jsonl(path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    verifier_output_record(
+                        task_risk_level="U0",
+                        called=True,
+                        decision="pass",
+                        safety_risk="U0",
+                        failure_risk="low",
+                        reason_for_verification="low_confidence",
+                        allowed=True,
+                        latency_s=1.25,
+                        prompt_tokens=10,
+                        completion_tokens=2,
+                    )
+                ),
+                "{not-json",
+                json.dumps(
+                    verifier_output_record(
+                        task_risk_level="U1",
+                        called=True,
+                        decision="block",
+                        safety_risk="U2",
+                        failure_risk="high",
+                        reason_for_verification="stagnation",
+                        allowed=False,
+                        latency_s=2.5,
+                        prompt_tokens=20,
+                        completion_tokens=4,
+                        error="auth_error",
+                    )
+                ),
+                json.dumps(
+                    verifier_output_record(
+                        task_risk_level="U0",
+                        called=True,
+                        decision="pass",
+                        safety_risk="U0",
+                        failure_risk="medium",
+                        reason_for_verification="semantic_missing_answer",
+                        allowed=True,
+                        latency_s=0.25,
+                        prompt_tokens=5,
+                        completion_tokens=1,
+                    )
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_main_summarize_output_reports_verifier_distributions(tmp_path, monkeypatch, capsys) -> None:
+    output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    write_verifier_output_jsonl(output_path)
+    monkeypatch.setattr(sys, "argv", ["s2_verifier_client.py", "--summarize-output", str(output_path)])
+
+    exit_code = s2.main()
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Summary source line range: 1-4" in stdout
+    assert "Summary filters: since_line=none last=none" in stdout
+    assert "Total records: 3" in stdout
+    assert 'Task risk distribution: {"U0": 2, "U1": 1}' in stdout
+    assert "Called count: 3" in stdout
+    assert "Error count: 1" in stdout
+    assert 'Decision distribution: {"block": 1, "pass": 2}' in stdout
+    assert 'Safety risk distribution: {"U0": 2, "U2": 1}' in stdout
+    assert 'Failure risk distribution: {"high": 1, "low": 1, "medium": 1}' in stdout
+    assert (
+        'Reason-for-verification distribution: {"low_confidence": 1, '
+        '"semantic_missing_answer": 1, "stagnation": 1}'
+    ) in stdout
+    assert "Allowed-to-execute count: 2" in stdout
+    assert "Total latency seconds: 4.0" in stdout
+    assert "Total prompt/completion tokens: 35/7" in stdout
+
+
+def test_main_summarize_output_applies_since_line_before_last(tmp_path, monkeypatch, capsys) -> None:
+    output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    write_verifier_output_jsonl(output_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "s2_verifier_client.py",
+            "--summarize-output",
+            str(output_path),
+            "--summarize-since-line",
+            "3",
+            "--summarize-last",
+            "1",
+        ],
+    )
+
+    exit_code = s2.main()
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Summary source line range: 4-4" in stdout
+    assert "Summary filters: since_line=3 last=1" in stdout
+    assert "Total records: 1" in stdout
+    assert 'Task risk distribution: {"U0": 1}' in stdout
+    assert 'Decision distribution: {"pass": 1}' in stdout
+    assert "Total prompt/completion tokens: 5/1" in stdout
