@@ -118,6 +118,12 @@ class TracePaths:
     selected_inner_trace_score: int | None = None
 
 
+@dataclass(frozen=True)
+class OutputRecordEntry:
+    line_number: int
+    record: dict[str, Any]
+
+
 def parse_risk_levels(values: list[str] | None) -> set[str]:
     if not values:
         return set(DEFAULT_RISK_LEVELS)
@@ -1363,7 +1369,11 @@ def normalize_termination(
 
 async def run(args: argparse.Namespace) -> int:
     if args.summarize_output:
-        summarize_output(Path(args.summarize_output))
+        summarize_output(
+            Path(args.summarize_output),
+            summarize_last=args.summarize_last,
+            summarize_since_line=args.summarize_since_line,
+        )
         return 0
 
     if not args.dataset:
@@ -1519,8 +1529,14 @@ def preview(text: str, limit: int = 96) -> str:
     return normalized[: limit - 3] + "..."
 
 
-def summarize_output(path: Path) -> None:
-    records = load_output_records(path)
+def summarize_output(path: Path, *, summarize_last: int | None = None, summarize_since_line: int | None = None) -> None:
+    entries = load_output_record_entries(path)
+    if summarize_since_line is not None:
+        entries = [entry for entry in entries if entry.line_number >= summarize_since_line]
+    if summarize_last is not None:
+        entries = entries[-summarize_last:]
+    records = [entry.record for entry in entries]
+    line_range = f"{entries[0].line_number}-{entries[-1].line_number}" if entries else "none"
     risk_distribution = Counter(record.get("task_risk_level") for record in records)
     termination_distribution = Counter(record.get("termination_reason", "missing") for record in records)
     controller_route_distribution: Counter[str] = Counter()
@@ -1608,6 +1624,12 @@ def summarize_output(path: Path) -> None:
         if execution_monitor_feature_distribution[feature]
     }
 
+    print(f"Summary source line range: {line_range}")
+    print(
+        "Summary filters: "
+        f"since_line={summarize_since_line if summarize_since_line is not None else 'none'} "
+        f"last={summarize_last if summarize_last is not None else 'none'}"
+    )
     print(f"Total records: {len(records)}")
     print(f"Risk distribution: {dict(risk_distribution)}")
     print(f"Clean success count: {clean_success_count}")
@@ -1630,11 +1652,15 @@ def summarize_output(path: Path) -> None:
 
 
 def load_output_records(path: Path) -> list[dict[str, Any]]:
+    return [entry.record for entry in load_output_record_entries(path)]
+
+
+def load_output_record_entries(path: Path) -> list[OutputRecordEntry]:
     if not path.exists():
         raise SystemExit(f"ERROR: Output JSONL does not exist: {path}")
-    records: list[dict[str, Any]] = []
+    entries: list[OutputRecordEntry] = []
     with path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
+        for line_number, line in enumerate(handle, start=1):
             line = line.strip()
             if not line:
                 continue
@@ -1643,8 +1669,15 @@ def load_output_records(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(record, dict):
-                records.append(record)
-    return records
+                entries.append(OutputRecordEntry(line_number=line_number, record=record))
+    return entries
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("positive integer required")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1653,6 +1686,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", help="Path to phase0 validation CSV")
     parser.add_argument("--output", help="Append-only JSONL output path")
     parser.add_argument("--summarize-output", help="Summarize an existing output JSONL without running GUI")
+    parser.add_argument("--summarize-last", type=positive_int, help="Summarize only the last N valid JSONL records")
+    parser.add_argument(
+        "--summarize-since-line",
+        type=positive_int,
+        help="Summarize only valid JSONL records at or after this 1-based physical line",
+    )
     parser.add_argument("--max-tasks", type=int, help="Maximum number of selected tasks to run")
     parser.add_argument("--max-steps", type=int, help="Temporary GUI max_steps override for this run")
     parser.add_argument("--task-id", action="append", help="Task ID to select; may be repeated or comma-separated")

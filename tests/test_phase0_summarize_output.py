@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 
-from eval.phase0_observable_signal_pilot import summarize_output
+import pytest
+
+from eval.phase0_observable_signal_pilot import build_parser, summarize_output
 
 
 def test_summarize_output_prints_controller_shadow_step_distributions(tmp_path, capsys) -> None:
@@ -113,3 +115,78 @@ def test_summarize_output_prints_monitor_feature_distributions(tmp_path, capsys)
     ) in stdout
     assert "High confidence failed record count: 1" in stdout
     assert "Screenshot failure record count: 1" in stdout
+
+
+def test_summarize_output_filters_by_physical_since_line(tmp_path, capsys) -> None:
+    output_path = tmp_path / "phase0.jsonl"
+    records = [
+        {"task_risk_level": "U0", "termination_reason": "completed", "clean_success": True},
+        {"task_risk_level": "U1", "termination_reason": "runner_error", "clean_success": False},
+        {"task_risk_level": "U1", "termination_reason": "completed", "clean_success": True},
+    ]
+    output_path.write_text(
+        "\n".join(
+            [
+                json.dumps(records[0]),
+                "{not-json",
+                json.dumps(records[1]),
+                json.dumps(records[2]),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summarize_output(output_path, summarize_since_line=3)
+
+    stdout = capsys.readouterr().out
+    assert "Total records: 2" in stdout
+    assert "Summary source line range: 3-4" in stdout
+    assert "Summary filters: since_line=3 last=none" in stdout
+    assert "Risk distribution: {'U1': 2}" in stdout
+
+
+def test_summarize_output_filters_to_last_valid_records(tmp_path, capsys) -> None:
+    output_path = tmp_path / "phase0.jsonl"
+    records = [
+        {"task_risk_level": "U0", "termination_reason": "completed", "clean_success": True},
+        {"task_risk_level": "U1", "termination_reason": "runner_error", "clean_success": False},
+        {"task_risk_level": "U2", "termination_reason": "completed", "clean_success": True},
+    ]
+    output_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+    summarize_output(output_path, summarize_last=1)
+
+    stdout = capsys.readouterr().out
+    assert "Total records: 1" in stdout
+    assert "Summary source line range: 3-3" in stdout
+    assert "Summary filters: since_line=none last=1" in stdout
+    assert "Risk distribution: {'U2': 1}" in stdout
+
+
+def test_summarize_output_applies_since_line_before_last(tmp_path, capsys) -> None:
+    output_path = tmp_path / "phase0.jsonl"
+    records = [
+        {"task_risk_level": "U0", "termination_reason": "completed", "clean_success": True},
+        {"task_risk_level": "U1", "termination_reason": "runner_error", "clean_success": False},
+        {"task_risk_level": "U2", "termination_reason": "completed", "clean_success": True},
+    ]
+    output_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+
+    summarize_output(output_path, summarize_since_line=1, summarize_last=1)
+
+    stdout = capsys.readouterr().out
+    assert "Total records: 1" in stdout
+    assert "Summary source line range: 3-3" in stdout
+    assert "Summary filters: since_line=1 last=1" in stdout
+    assert "Risk distribution: {'U2': 1}" in stdout
+
+
+def test_summarize_filter_cli_values_must_be_positive(capsys) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--summarize-output", "phase0.jsonl", "--summarize-last", "0"])
+
+    stderr = capsys.readouterr().err
+    assert "positive integer" in stderr
