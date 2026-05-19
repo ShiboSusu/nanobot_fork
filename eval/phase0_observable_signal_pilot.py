@@ -361,7 +361,7 @@ def candidate_phase0_roots(cfg: Any) -> list[Path]:
 
 
 def find_newest_trace_paths(cfg: Any, after_ts: float) -> TracePaths:
-    run_dirs: list[Path] = []
+    run_dirs: list[tuple[float, Path]] = []
     for root in candidate_phase0_roots(cfg):
         if not root.exists():
             continue
@@ -371,14 +371,15 @@ def find_newest_trace_paths(cfg: Any, after_ts: float) -> TracePaths:
             continue
         for candidate in candidates:
             try:
-                if candidate.stat().st_mtime >= after_ts - 1:
-                    run_dirs.append(candidate)
+                mtime = candidate.stat().st_mtime
+                if mtime >= after_ts - 1:
+                    run_dirs.append((mtime, candidate))
             except OSError:
                 continue
     if not run_dirs:
         return TracePaths(run_dir=None, outer_trace_path=None, inner_trace_path=None)
 
-    run_dir = max(run_dirs, key=lambda p: p.stat().st_mtime)
+    _, run_dir = max(run_dirs, key=lambda item: item[0])
     outer = newest_path(run_dir.glob("trace_*.jsonl"))
     inner, candidate_count, score = best_inner_trace(run_dir)
     return TracePaths(
@@ -391,10 +392,20 @@ def find_newest_trace_paths(cfg: Any, after_ts: float) -> TracePaths:
 
 
 def best_inner_trace(run_dir: Path) -> tuple[Path | None, int, int | None]:
-    candidates = [path for path in run_dir.rglob("trace.jsonl") if path.is_file()]
+    try:
+        candidates = [path for path in run_dir.rglob("trace.jsonl") if path.is_file()]
+    except OSError:
+        return None, 0, None
     if not candidates:
         return None, 0, None
-    scored = [(inner_trace_score(path), path.stat().st_mtime, path) for path in candidates]
+    scored = []
+    for path in candidates:
+        try:
+            scored.append((inner_trace_score(path), path.stat().st_mtime, path))
+        except OSError:
+            continue
+    if not scored:
+        return None, len(candidates), None
     score, _, path = max(scored, key=lambda item: (item[0], item[1]))
     return path, len(candidates), score
 
@@ -434,32 +445,58 @@ def path_warning(*paths: Path | str | None) -> str | None:
 
 
 def newest_path(paths: Any) -> Path | None:
-    candidates = [p for p in paths if p.is_file()]
+    candidates: list[tuple[float, Path]] = []
+    for path in paths:
+        try:
+            if path.is_file():
+                candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
     if not candidates:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def load_jsonl(path: Path | None) -> list[dict[str, Any]]:
-    if path is None or not path.exists():
+    try:
+        if path is None or not path.exists():
+            return []
+    except OSError:
         return []
     events: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                events.append(event)
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+    except OSError:
+        return []
     return events
 
 
 def step_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [event for event in events if event.get("type") == "step" or event.get("event") == "step"]
+
+
+def event_kind(event: dict[str, Any]) -> str | None:
+    value = event.get("type", event.get("event"))
+    return value if isinstance(value, str) else None
+
+
+def event_attempt_index(event: dict[str, Any]) -> int | None:
+    value = event.get("attempt", event.get("attempt_index"))
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def step_index(event: dict[str, Any], fallback: int) -> int:
@@ -471,9 +508,201 @@ def step_index(event: dict[str, Any], fallback: int) -> int:
     return fallback
 
 
-def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
-    outer_steps = step_events(load_jsonl(trace_paths.outer_trace_path))
-    inner_steps = step_events(load_jsonl(trace_paths.inner_trace_path))
+def segment_outer_attempts(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    saw_attempt_boundary = False
+
+    def find_or_create(index: int) -> dict[str, Any]:
+        for segment in segments:
+            if segment["attempt_index"] == index:
+                return segment
+        segment = {"attempt_index": index, "steps": [], "result": None}
+        segments.append(segment)
+        return segment
+
+    def start_segment(index: int) -> dict[str, Any]:
+        segment = {"attempt_index": index, "steps": [], "result": None}
+        segments.append(segment)
+        return segment
+
+    for event in events:
+        kind = event_kind(event)
+        attempt_index = event_attempt_index(event)
+        if kind == "attempt_start":
+            saw_attempt_boundary = True
+            current = start_segment(attempt_index if attempt_index is not None else len(segments))
+            continue
+        if kind in {"attempt_result", "attempt_exception"}:
+            saw_attempt_boundary = True
+            if current is None or (attempt_index is not None and current["attempt_index"] != attempt_index):
+                current = find_or_create(attempt_index if attempt_index is not None else len(segments))
+            current["result"] = event
+            current = None
+            continue
+        if kind != "step":
+            continue
+
+        if current is None:
+            if attempt_index is not None:
+                current = find_or_create(attempt_index)
+            else:
+                current = find_or_create(len(segments) if saw_attempt_boundary else 0)
+        elif attempt_index is not None and current["attempt_index"] != attempt_index:
+            current = find_or_create(attempt_index)
+        current["steps"].append(event)
+
+    return [segment for segment in segments if segment["steps"] or segment["result"]]
+
+
+def selected_outer_attempt(segments: list[dict[str, Any]]) -> dict[str, Any]:
+    for segment in reversed(segments):
+        if segment.get("steps") or segment.get("result"):
+            return segment
+    return {"attempt_index": 0, "steps": [], "result": None}
+
+
+def inner_attempt_index_from_path(path: Path) -> int | None:
+    match = re.search(r"_(\d+)$", path.parent.name)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def result_field(result: dict[str, Any] | None, key: str) -> Any:
+    if not isinstance(result, dict):
+        return None
+    if key in result:
+        return result.get(key)
+    if key == "error":
+        error_type = result.get("error_type")
+        error_message = result.get("error_message")
+        if isinstance(error_type, str) and isinstance(error_message, str):
+            return f"{error_type}: {error_message}"
+        if isinstance(error_message, str):
+            return error_message
+        if isinstance(error_type, str):
+            return error_type
+    nested = result.get("result")
+    if isinstance(nested, dict):
+        return nested.get(key)
+    return None
+
+
+def inner_trace_candidates(run_dir: Path | None) -> list[dict[str, Any]]:
+    if run_dir is None:
+        return []
+    try:
+        candidates = [path for path in run_dir.rglob("trace.jsonl") if path.is_file()]
+    except OSError:
+        return []
+    infos: list[dict[str, Any]] = []
+    for path in candidates:
+        try:
+            score = inner_trace_score(path)
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        infos.append(
+            {
+                "path": path,
+                "attempt_index": inner_attempt_index_from_path(path),
+                "score": score,
+                "mtime": mtime,
+            }
+        )
+    return infos
+
+
+def select_inner_trace_for_attempt(
+    trace_paths: TracePaths,
+    attempts: list[dict[str, Any]],
+    selected_attempt: dict[str, Any],
+) -> tuple[Path | None, int, int | None, list[dict[str, Any]]]:
+    candidates = inner_trace_candidates(trace_paths.run_dir)
+    if not candidates and trace_paths.inner_trace_path is not None:
+        try:
+            candidates = [
+                {
+                    "path": trace_paths.inner_trace_path,
+                    "attempt_index": inner_attempt_index_from_path(trace_paths.inner_trace_path),
+                    "score": trace_paths.selected_inner_trace_score,
+                    "mtime": trace_paths.inner_trace_path.stat().st_mtime,
+                }
+            ]
+        except OSError:
+            candidates = []
+    if not candidates:
+        return None, 0, None, []
+
+    selected_index = selected_attempt["attempt_index"]
+    by_attempt: dict[int, dict[str, Any]] = {}
+    for candidate in candidates:
+        attempt_index = candidate["attempt_index"]
+        if attempt_index is None:
+            continue
+        existing = by_attempt.get(attempt_index)
+        candidate_score = candidate["score"] if candidate["score"] is not None else -1
+        existing_score = existing["score"] if existing and existing["score"] is not None else -1
+        if existing is None or (candidate_score, candidate["mtime"]) > (existing_score, existing["mtime"]):
+            by_attempt[attempt_index] = candidate
+
+    ordered_candidates = sorted(candidates, key=lambda item: (item["mtime"], str(item["path"])))
+    selected_position = attempts.index(selected_attempt) if selected_attempt in attempts else max(len(attempts) - 1, 0)
+    explicitly_mapped_paths = {candidate["path"] for candidate in by_attempt.values()}
+    unmapped_candidates = [
+        candidate for candidate in ordered_candidates if candidate["path"] not in explicitly_mapped_paths
+    ]
+    unmapped_attempt_positions = [
+        position
+        for position, attempt in enumerate(attempts)
+        if attempt["attempt_index"] not in by_attempt
+    ]
+    chronological_by_position = dict(zip(unmapped_attempt_positions, unmapped_candidates, strict=False))
+    attempt_summaries: list[dict[str, Any]] = []
+    for position, attempt in enumerate(attempts):
+        mapped = by_attempt.get(attempt["attempt_index"])
+        if mapped is None:
+            mapped = chronological_by_position.get(position)
+        result = attempt.get("result")
+        attempt_summaries.append(
+            {
+                "attempt_index": attempt["attempt_index"],
+                "outer_step_count": len(attempt.get("steps") or []),
+                "result_success": result_field(result, "success"),
+                "result_error": result_field(result, "error"),
+                "result_steps_taken": result_field(result, "steps_taken"),
+                "selected_inner_path_display": display_path(mapped["path"]) if mapped else None,
+                "selected_inner_trace_score": mapped.get("score") if mapped else None,
+            }
+        )
+
+    selected = by_attempt.get(selected_index)
+    if selected is None:
+        selected = chronological_by_position.get(selected_position)
+    if selected is None and len(attempts) <= 1:
+        selected = max(
+            candidates,
+            key=lambda item: (item["score"] if item["score"] is not None else -1, item["mtime"]),
+        )
+
+    return (
+        selected["path"] if selected else None,
+        len(candidates),
+        selected.get("score") if selected else None,
+        attempt_summaries,
+    )
+
+
+def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    outer_events = load_jsonl(trace_paths.outer_trace_path)
+    attempts = segment_outer_attempts(outer_events)
+    selected_attempt = selected_outer_attempt(attempts)
+    outer_steps = list(selected_attempt.get("steps") or [])
+    selected_inner_path, candidate_count, selected_score, attempt_summaries = select_inner_trace_for_attempt(
+        trace_paths, attempts, selected_attempt
+    )
+    inner_steps = step_events(load_jsonl(selected_inner_path))
     pairs = align_step_events(outer_steps, inner_steps)
     aligned_steps: list[dict[str, Any]] = []
     previous_action_key: str | None = None
@@ -528,6 +757,16 @@ def extract_trace(task: Phase0Task, trace_paths: TracePaths) -> tuple[list[dict[
         )
 
     stats = {
+        "analysis_scope": "final_attempt",
+        "selected_attempt_index": selected_attempt["attempt_index"],
+        "outer_attempt_count": len(attempts),
+        "selected_attempt_outer_step_count": len(outer_steps),
+        "selected_attempt_inner_step_count": len(inner_steps),
+        "inner_trace_candidates_count": candidate_count,
+        "selected_inner_trace_score": selected_score,
+        "selected_inner_trace_path": str(selected_inner_path) if selected_inner_path else None,
+        "selected_inner_trace_path_display": display_path(selected_inner_path),
+        "attempts": attempt_summaries,
         "outer_step_count": len(outer_steps),
         "inner_step_count": len(inner_steps),
         "aligned_step_count": len(pairs),
@@ -729,7 +968,7 @@ def alignment_status(outer: dict[str, Any] | None, inner: dict[str, Any] | None)
 def trace_quality(
     outer_steps: list[dict[str, Any]],
     inner_steps: list[dict[str, Any]],
-    stats: dict[str, int],
+    stats: dict[str, Any],
 ) -> dict[str, Any]:
     outer_count = stats["outer_step_count"]
     inner_count = stats["inner_step_count"]
@@ -749,6 +988,16 @@ def trace_quality(
         quality_warning = "missing_parsed_action"
 
     return {
+        "analysis_scope": stats.get("analysis_scope"),
+        "selected_attempt_index": stats.get("selected_attempt_index"),
+        "outer_attempt_count": stats.get("outer_attempt_count"),
+        "selected_attempt_outer_step_count": stats.get("selected_attempt_outer_step_count"),
+        "selected_attempt_inner_step_count": stats.get("selected_attempt_inner_step_count"),
+        "inner_trace_candidates_count": stats.get("inner_trace_candidates_count"),
+        "selected_inner_trace_score": stats.get("selected_inner_trace_score"),
+        "selected_inner_trace_path": stats.get("selected_inner_trace_path"),
+        "selected_inner_trace_path_display": stats.get("selected_inner_trace_path_display"),
+        "attempts": stats.get("attempts", []),
         "outer_step_count": outer_count,
         "inner_step_count": inner_count,
         "outer_decision_step_count": None,
@@ -1039,11 +1288,17 @@ async def run_one_task(
             "run_dir_display": display_path(trace_paths.run_dir),
             "outer_trace_path": str(trace_paths.outer_trace_path) if trace_paths.outer_trace_path else None,
             "outer_trace_path_display": display_path(trace_paths.outer_trace_path),
-            "inner_trace_path": str(trace_paths.inner_trace_path) if trace_paths.inner_trace_path else None,
-            "inner_trace_path_display": display_path(trace_paths.inner_trace_path),
-            "inner_trace_candidates_count": trace_paths.inner_trace_candidates_count,
-            "selected_inner_trace_score": trace_paths.selected_inner_trace_score,
-            "selected_inner_trace_path_display": display_path(trace_paths.inner_trace_path),
+            "inner_trace_path": alignment.get("selected_inner_trace_path"),
+            "inner_trace_path_display": alignment.get("selected_inner_trace_path_display"),
+            "inner_trace_candidates_count": alignment.get("inner_trace_candidates_count"),
+            "selected_inner_trace_score": alignment.get("selected_inner_trace_score"),
+            "selected_inner_trace_path_display": alignment.get("selected_inner_trace_path_display"),
+            "analysis_scope": alignment.get("analysis_scope"),
+            "selected_attempt_index": alignment.get("selected_attempt_index"),
+            "outer_attempt_count": alignment.get("outer_attempt_count"),
+            "selected_attempt_outer_step_count": alignment.get("selected_attempt_outer_step_count"),
+            "selected_attempt_inner_step_count": alignment.get("selected_attempt_inner_step_count"),
+            "attempts": alignment.get("attempts", []),
         },
         "alignment": alignment,
         "trace_quality": quality,
