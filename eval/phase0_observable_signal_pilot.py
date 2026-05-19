@@ -87,6 +87,8 @@ class TracePaths:
     run_dir: Path | None
     outer_trace_path: Path | None
     inner_trace_path: Path | None
+    inner_trace_candidates_count: int = 0
+    selected_inner_trace_score: int | None = None
 
 
 def parse_risk_levels(values: list[str] | None) -> set[str]:
@@ -361,8 +363,40 @@ def find_newest_trace_paths(cfg: Any, after_ts: float) -> TracePaths:
 
     run_dir = max(run_dirs, key=lambda p: p.stat().st_mtime)
     outer = newest_path(run_dir.glob("trace_*.jsonl"))
-    inner = newest_path(run_dir.rglob("trace.jsonl"))
-    return TracePaths(run_dir=run_dir, outer_trace_path=outer, inner_trace_path=inner)
+    inner, candidate_count, score = best_inner_trace(run_dir)
+    return TracePaths(
+        run_dir=run_dir,
+        outer_trace_path=outer,
+        inner_trace_path=inner,
+        inner_trace_candidates_count=candidate_count,
+        selected_inner_trace_score=score,
+    )
+
+
+def best_inner_trace(run_dir: Path) -> tuple[Path | None, int, int | None]:
+    candidates = [path for path in run_dir.rglob("trace.jsonl") if path.is_file()]
+    if not candidates:
+        return None, 0, None
+    scored = [(inner_trace_score(path), path.stat().st_mtime, path) for path in candidates]
+    score, _, path = max(scored, key=lambda item: (item[0], item[1]))
+    return path, len(candidates), score
+
+
+def inner_trace_score(path: Path) -> int:
+    events = load_jsonl(path)
+    score = 0
+    for event in step_events(events):
+        score += 1
+        model_output = inner_model_output(event)
+        if model_output.get("raw_content") is not None:
+            score += 3
+        if model_output.get("tool_calls") is not None:
+            score += 2
+        if model_output.get("parsed_action") is not None:
+            score += 3
+        if model_output.get("assistant_message") is not None:
+            score += 1
+    return score
 
 
 def display_path(path: Path | str | None) -> str | None:
@@ -805,6 +839,9 @@ async def run_one_task(
             "outer_trace_path_display": display_path(trace_paths.outer_trace_path),
             "inner_trace_path": str(trace_paths.inner_trace_path) if trace_paths.inner_trace_path else None,
             "inner_trace_path_display": display_path(trace_paths.inner_trace_path),
+            "inner_trace_candidates_count": trace_paths.inner_trace_candidates_count,
+            "selected_inner_trace_score": trace_paths.selected_inner_trace_score,
+            "selected_inner_trace_path_display": display_path(trace_paths.inner_trace_path),
         },
         "alignment": alignment,
         "trace_quality": quality,
