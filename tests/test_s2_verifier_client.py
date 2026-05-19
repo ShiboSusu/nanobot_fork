@@ -298,6 +298,144 @@ def test_parser_rejects_latest_with_record_line(capsys) -> None:
     assert "not allowed with argument" in stderr
 
 
+def test_verifier_metadata_from_result_preserves_rationale_fields() -> None:
+    response = s2.S2VerifierResponse(
+        decision="recover",
+        safety_risk="U1",
+        failure_risk="medium",
+        reason="The proposed tap repeats a prior ineffective action.",
+        evidence=["same coordinates were tapped twice", "stagnation_count is 2"],
+        suggested_next_step="Open app switcher and verify current screen before acting.",
+        allowed_to_execute_s1_action=False,
+        requires_image_context=True,
+        confidence=0.73,
+    )
+    result = s2.S2VerifierCallResult(
+        ok=True,
+        response=response,
+        latency_s=1.234,
+        token_usage={"prompt_tokens": 11, "completion_tokens": 7},
+        error=None,
+        model="s2-test",
+    )
+
+    metadata = s2.verifier_metadata_from_result(result, reason_for_verification="stagnation")
+
+    assert metadata["verifier_reason"] == "The proposed tap repeats a prior ineffective action."
+    assert metadata["verifier_evidence"] == ["same coordinates were tapped twice", "stagnation_count is 2"]
+    assert metadata["verifier_suggested_next_step"] == "Open app switcher and verify current screen before acting."
+    assert metadata["verifier_requires_image_context"] is True
+    assert metadata["verifier_confidence"] == 0.73
+
+
+def test_verifier_metadata_from_error_result_uses_conservative_rationale_defaults() -> None:
+    result = s2.S2VerifierCallResult(
+        ok=False,
+        response=None,
+        latency_s=0.0,
+        token_usage=None,
+        error="missing_env:MA_INTRANET_URL,MA_TOKEN",
+        model="s2-test",
+    )
+
+    metadata = s2.verifier_metadata_from_result(result, reason_for_verification="stagnation")
+    block = s2.verifier_block_from_metadata(metadata)
+
+    assert metadata["verifier_reason"] is None
+    assert metadata["verifier_evidence"] == []
+    assert metadata["verifier_suggested_next_step"] is None
+    assert metadata["verifier_requires_image_context"] is None
+    assert metadata["verifier_confidence"] is None
+    assert block["reason"] is None
+    assert block["evidence"] == []
+    assert block["suggested_next_step"] is None
+    assert block["requires_image_context"] is None
+    assert block["confidence"] is None
+
+
+def test_verifier_block_from_metadata_exposes_rationale_fields() -> None:
+    metadata = {
+        "verifier_called": True,
+        "verifier_mode": "text_only",
+        "reason_for_verification": "stagnation",
+        "verifier_decision": "recover",
+        "safety_risk": "U1",
+        "failure_risk": "medium",
+        "allowed_to_execute_s1_action": False,
+        "verifier_latency_s": 1.234,
+        "verifier_token_usage": {"prompt_tokens": 11, "completion_tokens": 7},
+        "verifier_error": None,
+        "s2_model": "s2-test",
+        "s2_endpoint_route": "/invocations",
+        "verifier_reason": "The proposed tap repeats a prior ineffective action.",
+        "verifier_evidence": ["same coordinates were tapped twice", "stagnation_count is 2"],
+        "verifier_suggested_next_step": "Open app switcher and verify current screen before acting.",
+        "verifier_requires_image_context": True,
+        "verifier_confidence": 0.73,
+    }
+
+    block = s2.verifier_block_from_metadata(metadata)
+
+    assert block["reason"] == "The proposed tap repeats a prior ineffective action."
+    assert block["evidence"] == ["same coordinates were tapped twice", "stagnation_count is 2"]
+    assert block["suggested_next_step"] == "Open app switcher and verify current screen before acting."
+    assert block["requires_image_context"] is True
+    assert block["confidence"] == 0.73
+
+
+def test_build_sanitized_offline_record_includes_verifier_rationale_fields() -> None:
+    record = {"task_id": "task-1", "task_risk_level": "U1", "steps": []}
+    request = s2.S2VerifierRequest(
+        task_id="task-1",
+        instruction="Evaluate proposed GUI action.",
+        risk_level="U1",
+        current_observation={"text_summary": "Screen appears unchanged.", "screenshot_path": None, "foreground_app": None},
+        s1_proposed_action={"action_type": "tap", "x": 100, "y": 200},
+        recent_steps=[],
+        monitor_signals={},
+        verification_mode="text_only",
+        reason_for_verification="stagnation",
+    )
+    selected_step = {
+        "step_index": 4,
+        "trigger_features": {"execution_state": {"stagnation_count": 2}},
+        "outcome_proxies": {},
+    }
+    metadata = {
+        "verifier_called": True,
+        "verifier_mode": "text_only",
+        "reason_for_verification": "stagnation",
+        "verifier_decision": "recover",
+        "safety_risk": "U1",
+        "failure_risk": "medium",
+        "allowed_to_execute_s1_action": False,
+        "verifier_latency_s": 1.234,
+        "verifier_token_usage": {"prompt_tokens": 11, "completion_tokens": 7},
+        "verifier_error": None,
+        "s2_model": "s2-test",
+        "s2_endpoint_route": "/invocations",
+        "verifier_reason": "The proposed tap repeats a prior ineffective action.",
+        "verifier_evidence": ["same coordinates were tapped twice", "stagnation_count is 2"],
+        "verifier_suggested_next_step": "Open app switcher and verify current screen before acting.",
+        "verifier_requires_image_context": True,
+        "verifier_confidence": 0.73,
+    }
+
+    output_record = s2.build_sanitized_offline_record(record, request, selected_step, metadata)
+
+    assert output_record["steps"][0]["verifier"]["reason"] == "The proposed tap repeats a prior ineffective action."
+    assert output_record["steps"][0]["verifier"]["evidence"] == [
+        "same coordinates were tapped twice",
+        "stagnation_count is 2",
+    ]
+    assert (
+        output_record["steps"][0]["verifier"]["suggested_next_step"]
+        == "Open app switcher and verify current screen before acting."
+    )
+    assert output_record["steps"][0]["verifier"]["requires_image_context"] is True
+    assert output_record["steps"][0]["verifier"]["confidence"] == 0.73
+
+
 def verifier_output_record(
     *,
     task_risk_level: str,
