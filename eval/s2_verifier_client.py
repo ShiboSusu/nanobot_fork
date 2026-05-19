@@ -350,6 +350,8 @@ def build_request_from_phase0_record(record: dict[str, Any], *, step_index: int 
             "risk": trigger_features.get("risk") or {"task_risk_level": risk_level},
             "execution_state": trigger_features.get("execution_state") or {},
             "trace_quality": record.get("trace_quality") or {},
+            "semantic_outcome": compact_semantic_outcome(record),
+            "controller": compact_controller_signals(selected_step),
         },
         verification_mode="text_only",
         reason_for_verification=infer_reason_for_verification(record, trigger_features),
@@ -384,6 +386,11 @@ def compact_observation_summary(step: dict[str, Any], record: dict[str, Any]) ->
     termination = record.get("termination_reason")
     if termination:
         parts.append(f"termination_reason: {termination}")
+    semantic_reason = record.get("semantic_success_reason")
+    if semantic_reason:
+        parts.append(f"semantic_success_reason: {semantic_reason}")
+    if "final_answer_present" in record:
+        parts.append(f"final_answer_present: {record.get('final_answer_present')}")
     return " | ".join(parts) if parts else "No detailed observation summary available."
 
 
@@ -425,12 +432,41 @@ def default_entropy_signals() -> dict[str, Any]:
     }
 
 
+def compact_semantic_outcome(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "answer_required": record.get("answer_required"),
+        "final_answer_present": record.get("final_answer_present"),
+        "semantic_task_success": record.get("semantic_task_success"),
+        "semantic_success_source": record.get("semantic_success_source"),
+        "semantic_success_reason": record.get("semantic_success_reason"),
+    }
+
+
+def compact_controller_signals(step: dict[str, Any]) -> dict[str, Any]:
+    controller = step.get("controller") if isinstance(step.get("controller"), dict) else {}
+    inputs = controller.get("inputs") if isinstance(controller.get("inputs"), dict) else {}
+    raw_inputs = controller.get("raw_monitor_inputs") if isinstance(controller.get("raw_monitor_inputs"), dict) else {}
+    return {
+        "route": controller.get("route"),
+        "raw_monitor_route": controller.get("raw_monitor_route"),
+        "monitor_trigger": inputs.get("monitor_trigger"),
+        "raw_monitor_trigger": raw_inputs.get("monitor_trigger"),
+        "hard_gate_reason": controller.get("hard_gate_reason"),
+        "reason": controller.get("reason"),
+    }
+
+
 def infer_reason_for_verification(record: dict[str, Any], trigger_features: dict[str, Any]) -> str:
     execution_state = trigger_features.get("execution_state") if isinstance(trigger_features.get("execution_state"), dict) else {}
     entropy = trigger_features.get("entropy") if isinstance(trigger_features.get("entropy"), dict) else {}
     self_report = trigger_features.get("self_report") if isinstance(trigger_features.get("self_report"), dict) else {}
     if record.get("termination_reason") == "stagnation_detected" or (execution_state.get("stagnation_count") or 0) > 0:
         return "stagnation"
+    if (
+        record.get("semantic_task_success") is False
+        and record.get("semantic_success_reason") == "missing_required_final_answer"
+    ):
+        return "semantic_missing_answer"
     disagreement = entropy.get("sample_disagreement")
     if isinstance(disagreement, (int, float)) and disagreement >= 0.66:
         return "high_disagreement"

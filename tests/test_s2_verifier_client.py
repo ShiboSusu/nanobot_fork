@@ -78,6 +78,108 @@ def test_run_offline_smoke_uses_record_line_without_env(tmp_path, monkeypatch, c
     assert '"verifier_error": "missing_env:MA_INTRANET_URL,MA_TOKEN"' in stdout
 
 
+def test_build_request_from_phase0_record_includes_semantic_missing_answer_diagnostics() -> None:
+    record = {
+        "task_id": "ChromeSearchBeijingWeatherTask",
+        "instruction": "Use Chrome to search for Beijing highest temperature today. ONLY give a integer number.",
+        "task_risk_level": "U0",
+        "clean_success": False,
+        "answer_required": True,
+        "final_answer_present": False,
+        "semantic_task_success": False,
+        "semantic_success_source": "answer_presence_guard",
+        "semantic_success_reason": "missing_required_final_answer",
+        "trace_quality": {"clean_for_signal_analysis": True},
+        "steps": [
+            {
+                "step_index": 5,
+                "model_output": "Done.",
+                "action": {"action_type": "done", "status": "success", "answer": ""},
+                "trigger_features": {
+                    "self_report": {"confidence": 0.95},
+                    "risk": {"task_risk_level": "U0", "rule_based_step_risk_level": "U0"},
+                    "execution_state": {"stagnation_count": 0},
+                },
+                "controller": {
+                    "route": "VERIFY",
+                    "reason": "semantic guard found missing required final answer",
+                    "inputs": {"monitor_trigger": "semantic_missing_answer"},
+                    "raw_monitor_route": "VERIFY",
+                    "raw_monitor_inputs": {"monitor_trigger": "semantic_missing_answer"},
+                    "hard_gate_reason": None,
+                },
+            }
+        ],
+    }
+
+    request = s2.build_request_from_phase0_record(record)
+
+    assert request.reason_for_verification == "semantic_missing_answer"
+    assert request.monitor_signals["semantic_outcome"] == {
+        "answer_required": True,
+        "final_answer_present": False,
+        "semantic_task_success": False,
+        "semantic_success_source": "answer_presence_guard",
+        "semantic_success_reason": "missing_required_final_answer",
+    }
+    assert request.monitor_signals["controller"] == {
+        "route": "VERIFY",
+        "raw_monitor_route": "VERIFY",
+        "monitor_trigger": "semantic_missing_answer",
+        "raw_monitor_trigger": "semantic_missing_answer",
+        "hard_gate_reason": None,
+        "reason": "semantic guard found missing required final answer",
+    }
+    assert "missing_required_final_answer" in request.current_observation["text_summary"]
+    assert "final_answer_present: False" in request.current_observation["text_summary"]
+
+
+def test_build_request_from_phase0_record_keeps_stagnation_reason_and_controller_diagnostics() -> None:
+    record = {
+        "task_id": "AdjustBrightnessMaximumTask",
+        "instruction": "Set brightness to maximum.",
+        "task_risk_level": "U1",
+        "clean_success": False,
+        "answer_required": False,
+        "final_answer_present": False,
+        "semantic_task_success": None,
+        "semantic_success_source": "none",
+        "semantic_success_reason": "not_evaluated",
+        "termination_reason": "stagnation_detected",
+        "steps": [
+            {
+                "step_index": 14,
+                "action": {"action_type": "tap", "x": 164.0, "y": 476.0},
+                "trigger_features": {
+                    "self_report": {"confidence": 0.95},
+                    "risk": {"task_risk_level": "U1", "rule_based_step_risk_level": "U1"},
+                    "execution_state": {"stagnation_count": 4},
+                },
+                "controller": {
+                    "route": "RECOVER",
+                    "reason": "execution state indicates repeated region action",
+                    "inputs": {"monitor_trigger": "repeated_region_action"},
+                    "raw_monitor_route": "RECOVER",
+                    "raw_monitor_inputs": {"monitor_trigger": "repeated_region_action"},
+                    "hard_gate_reason": None,
+                },
+            }
+        ],
+    }
+
+    request = s2.build_request_from_phase0_record(record)
+
+    assert request.reason_for_verification == "stagnation"
+    assert request.monitor_signals["controller"] == {
+        "route": "RECOVER",
+        "raw_monitor_route": "RECOVER",
+        "monitor_trigger": "repeated_region_action",
+        "raw_monitor_trigger": "repeated_region_action",
+        "hard_gate_reason": None,
+        "reason": "execution state indicates repeated region action",
+    }
+
+
 def test_parser_rejects_latest_with_record_line(capsys) -> None:
     parser = s2.build_parser()
 
