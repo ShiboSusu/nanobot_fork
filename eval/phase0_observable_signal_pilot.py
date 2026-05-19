@@ -84,6 +84,16 @@ FINAL_ANSWER_FIELDS = (
     "response",
     "summary",
 )
+EXECUTION_STATE_SUMMARY_FEATURES = (
+    "repeated_action",
+    "repeated_region_action",
+    "high_confidence_no_progress",
+    "screenshot_capture_failure",
+    "secure_surface_suspected",
+    "max_steps_near_limit",
+    "coordinate_bucket_repeat",
+    "screen_region_repeat",
+)
 
 
 @dataclass(frozen=True)
@@ -1518,6 +1528,9 @@ def summarize_output(path: Path) -> None:
     hard_gate_reason_distribution: Counter[str] = Counter()
     monitor_trigger_distribution: Counter[str] = Counter()
     raw_monitor_trigger_distribution: Counter[str] = Counter()
+    execution_monitor_feature_distribution: Counter[str] = Counter()
+    high_confidence_failed_record_count = 0
+    screenshot_failure_record_count = 0
     clean_success_count = sum(1 for record in records if record.get("clean_success") is True)
     runner_clean_success_count = sum(
         1 for record in records if record.get("runner_clean_success", record.get("clean_success")) is True
@@ -1544,24 +1557,56 @@ def summarize_output(path: Path) -> None:
         and record["trace_quality"].get("clean_for_signal_analysis") is True
     )
     for record in records:
+        failed_record = record.get("clean_success") is not True or record.get("semantic_task_success") is False
+        record_has_high_confidence_step = False
+        environment_anomalies = record.get("environment_anomalies")
+        record_has_screenshot_failure = bool(
+            isinstance(environment_anomalies, dict)
+            and environment_anomalies.get("screenshot_capture_failure") is True
+        )
         steps = record.get("steps")
-        if not isinstance(steps, list):
-            continue
-        for step in steps:
-            if not isinstance(step, dict) or not isinstance((controller := step.get("controller")), dict):
+        for step in steps if isinstance(steps, list) else []:
+            if not isinstance(step, dict):
                 continue
-            if controller.get("route"):
-                controller_route_distribution[controller["route"]] += 1
-            if controller.get("raw_monitor_route"):
-                raw_monitor_route_distribution[controller["raw_monitor_route"]] += 1
-            if controller.get("hard_gate_reason"):
-                hard_gate_reason_distribution[controller["hard_gate_reason"]] += 1
-            inputs = controller.get("inputs")
-            if isinstance(inputs, dict) and inputs.get("monitor_trigger"):
-                monitor_trigger_distribution[inputs["monitor_trigger"]] += 1
-            raw_monitor_inputs = controller.get("raw_monitor_inputs")
-            if isinstance(raw_monitor_inputs, dict) and raw_monitor_inputs.get("monitor_trigger"):
-                raw_monitor_trigger_distribution[raw_monitor_inputs["monitor_trigger"]] += 1
+            trigger_features = step.get("trigger_features")
+            if isinstance(trigger_features, dict):
+                self_report = trigger_features.get("self_report")
+                if isinstance(self_report, dict):
+                    confidence = self_report.get("confidence")
+                    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and confidence >= 0.9:
+                        record_has_high_confidence_step = True
+                execution_state = trigger_features.get("execution_state")
+                if isinstance(execution_state, dict):
+                    for feature in EXECUTION_STATE_SUMMARY_FEATURES:
+                        if execution_state.get(feature) is True:
+                            execution_monitor_feature_distribution[feature] += 1
+                    if execution_state.get("screenshot_capture_failure") is True:
+                        record_has_screenshot_failure = True
+
+            controller = step.get("controller")
+            if isinstance(controller, dict):
+                if controller.get("route"):
+                    controller_route_distribution[controller["route"]] += 1
+                if controller.get("raw_monitor_route"):
+                    raw_monitor_route_distribution[controller["raw_monitor_route"]] += 1
+                if controller.get("hard_gate_reason"):
+                    hard_gate_reason_distribution[controller["hard_gate_reason"]] += 1
+                inputs = controller.get("inputs")
+                if isinstance(inputs, dict) and inputs.get("monitor_trigger"):
+                    monitor_trigger_distribution[inputs["monitor_trigger"]] += 1
+                raw_monitor_inputs = controller.get("raw_monitor_inputs")
+                if isinstance(raw_monitor_inputs, dict) and raw_monitor_inputs.get("monitor_trigger"):
+                    raw_monitor_trigger_distribution[raw_monitor_inputs["monitor_trigger"]] += 1
+        if failed_record and record_has_high_confidence_step:
+            high_confidence_failed_record_count += 1
+        if record_has_screenshot_failure:
+            screenshot_failure_record_count += 1
+
+    execution_monitor_feature_summary = {
+        feature: execution_monitor_feature_distribution[feature]
+        for feature in EXECUTION_STATE_SUMMARY_FEATURES
+        if execution_monitor_feature_distribution[feature]
+    }
 
     print(f"Total records: {len(records)}")
     print(f"Risk distribution: {dict(risk_distribution)}")
@@ -1579,6 +1624,9 @@ def summarize_output(path: Path) -> None:
     print(f"Hard gate reason distribution: {dict(hard_gate_reason_distribution)}")
     print(f"Monitor trigger distribution: {dict(monitor_trigger_distribution)}")
     print(f"Raw monitor trigger distribution: {dict(raw_monitor_trigger_distribution)}")
+    print(f"Execution monitor feature distribution: {execution_monitor_feature_summary}")
+    print(f"High confidence failed record count: {high_confidence_failed_record_count}")
+    print(f"Screenshot failure record count: {screenshot_failure_record_count}")
 
 
 def load_output_records(path: Path) -> list[dict[str, Any]]:
