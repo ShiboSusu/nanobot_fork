@@ -191,6 +191,7 @@ def test_request_audit_summarizes_screenshot_availability_without_s2(tmp_path, m
     assert "Request-build-error count: 1" in stdout
     assert "Request screenshot-path count: 2" in stdout
     assert "Request screenshot-existing count: 1" in stdout
+    assert "Request replay-ready count: 1" in stdout
     assert 'Request reason distribution: {"high_failure_risk": 1, "semantic_missing_answer": 1}' in stdout
     assert (
         'Request audit details: [{"build_error": null, "buildable": true, "line": 1, '

@@ -250,3 +250,15 @@ line 31 / RecentTotalExpenseTask:
 ```
 
 This makes the next offline replay target explicit: all three source records are buildable and have local screenshots, so the missing screenshot gate is specific to old S2 output metadata rather than current observable artifacts.
+
+## 8AV Replay-Ready Count
+
+Task 8AV added `Request replay-ready count` to request-audit summaries.
+
+For source lines 29-31:
+
+```text
+Request replay-ready count: 3
+```
+
+This means all three source records can be rebuilt for offline S2 replay with existing local screenshot artifacts. It does not mean they are recovery-ready or safe for live intervention; it only means the next S2 replay does not require rerunning GUI tasks.

@@ -876,6 +876,7 @@ def summarize_phase0_requests(path: Path, *, since_line: int | None = None, last
     build_error_count = 0
     screenshot_path_count = 0
     screenshot_existing_count = 0
+    replay_ready_count = 0
     reason_counts: Counter[str] = Counter()
     details: list[dict[str, Any]] = []
 
@@ -902,6 +903,7 @@ def summarize_phase0_requests(path: Path, *, since_line: int | None = None, last
             screenshot_path_count += 1
         if summary.get("screenshot_path_exists") is True:
             screenshot_existing_count += 1
+            replay_ready_count += 1
         count_string(reason_counts, summary.get("reason_for_verification"))
         details.append(
             {
@@ -926,6 +928,7 @@ def summarize_phase0_requests(path: Path, *, since_line: int | None = None, last
     print(f"Request-build-error count: {build_error_count}")
     print(f"Request screenshot-path count: {screenshot_path_count}")
     print(f"Request screenshot-existing count: {screenshot_existing_count}")
+    print(f"Request replay-ready count: {replay_ready_count}")
     print_distribution("Request reason distribution", reason_counts)
     print("Request audit details: " + json.dumps(details, ensure_ascii=False, sort_keys=True))
     return 0
