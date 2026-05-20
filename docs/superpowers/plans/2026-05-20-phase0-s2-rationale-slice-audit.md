@@ -208,3 +208,25 @@ Task 8AS added a request-only mode for S2 offline smoke:
 ```
 
 This mode builds the verifier request and prints `request_summary`, including screenshot availability, then exits before constructing an S2 client. It is useful when checking whether a Phase 0 observable record has enough local visual context for future image-grounded audit, without requiring S2 credentials or making any S2 call.
+
+## 8AT Request Audit Summary
+
+Task 8AT added a request-audit summary mode:
+
+```text
+--request-audit --input <phase0_observable.jsonl>
+```
+
+It builds verifier requests for a filtered Phase 0 observable slice, without calling S2, and reports request-build and screenshot-availability counts.
+
+For source lines 29-31:
+
+```text
+Request-buildable count: 3
+Request-build-error count: 0
+Request screenshot-path count: 3
+Request screenshot-existing count: 3
+Request reason distribution: {"semantic_missing_answer": 2, "stagnation": 1}
+```
+
+This clarifies the current gate: the old S2 output lines 18-20 lack screenshot metadata, but the underlying observable source records still have local screenshots. The next S2 replay can be offline-only and does not require rerunning the phone.

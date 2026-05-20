@@ -860,6 +860,53 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     return 0
 
 
+def summarize_phase0_requests(path: Path, *, since_line: int | None = None, last: int | None = None) -> int:
+    try:
+        records_with_lines = load_jsonl_object_records_with_lines(path)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+
+    if since_line is not None:
+        records_with_lines = [(line_number, record) for line_number, record in records_with_lines if line_number >= since_line]
+    if last is not None:
+        records_with_lines = records_with_lines[-last:]
+
+    buildable_count = 0
+    build_error_count = 0
+    screenshot_path_count = 0
+    screenshot_existing_count = 0
+    reason_counts: Counter[str] = Counter()
+
+    for _line_number, record in records_with_lines:
+        try:
+            request = build_request_from_phase0_record(record)
+        except ValueError:
+            build_error_count += 1
+            continue
+        summary = request_summary(request)
+        buildable_count += 1
+        if summary.get("screenshot_path_present") is True:
+            screenshot_path_count += 1
+        if summary.get("screenshot_path_exists") is True:
+            screenshot_existing_count += 1
+        count_string(reason_counts, summary.get("reason_for_verification"))
+
+    if records_with_lines:
+        line_range = f"{records_with_lines[0][0]}-{records_with_lines[-1][0]}"
+    else:
+        line_range = "none"
+    print(f"Request audit source line range: {line_range}")
+    print(f"Request audit filters: since_line={since_line if since_line is not None else 'none'} last={last if last is not None else 'none'}")
+    print(f"Total source records: {len(records_with_lines)}")
+    print(f"Request-buildable count: {buildable_count}")
+    print(f"Request-build-error count: {build_error_count}")
+    print(f"Request screenshot-path count: {screenshot_path_count}")
+    print(f"Request screenshot-existing count: {screenshot_existing_count}")
+    print_distribution("Request reason distribution", reason_counts)
+    return 0
+
+
 def synthetic_phase0_record() -> dict[str, Any]:
     return {
         "task_id": "__synthetic_s2_offline__",
@@ -1062,6 +1109,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--self-test", action="store_true", help="Run local validation tests without network calls")
     parser.add_argument("--smoke", choices=["text"], help="Run a safe text-only S2 verifier smoke")
     parser.add_argument("--offline-smoke", action="store_true", help="Build request from Phase 0 JSONL and optionally call S2")
+    parser.add_argument("--request-audit", action="store_true", help="Summarize Phase 0 verifier request metadata without calling S2")
     parser.add_argument("--input", type=Path, help="Phase 0 observable JSONL input for offline smoke")
     record_selection = parser.add_mutually_exclusive_group()
     record_selection.add_argument("--latest", action="store_true", help="Use latest record from --input")
@@ -1080,6 +1128,11 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.summarize_output:
         return summarize_offline_output(args.summarize_output, since_line=args.summarize_since_line, last=args.summarize_last)
+    if args.request_audit:
+        if args.input is None:
+            print("ERROR: --request-audit requires --input")
+            return 2
+        return summarize_phase0_requests(args.input, since_line=args.summarize_since_line, last=args.summarize_last)
     if args.self_test:
         return run_self_test()
     if args.smoke == "text":

@@ -130,6 +130,70 @@ def test_offline_smoke_request_only_skips_s2_call(tmp_path, monkeypatch, capsys)
     assert "verifier_metadata:" not in stdout
 
 
+def test_request_audit_summarizes_screenshot_availability_without_s2(tmp_path, monkeypatch, capsys) -> None:
+    input_path = tmp_path / "phase0.jsonl"
+    screenshot_path = tmp_path / "step_000.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    input_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "task_id": "with-image",
+                        "task_risk_level": "U0",
+                        "steps": [
+                            {
+                                "step_index": 0,
+                                "action": {"action_type": "tap"},
+                                "observation": {"screenshot_path": str(screenshot_path)},
+                            }
+                        ],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "task_id": "missing-image",
+                        "task_risk_level": "U0",
+                        "semantic_task_success": False,
+                        "semantic_success_reason": "missing_required_final_answer",
+                        "steps": [
+                            {
+                                "step_index": 0,
+                                "action": {"action_type": "done", "status": "success"},
+                                "observation": {"screenshot_path": str(tmp_path / "missing.png")},
+                            }
+                        ],
+                    }
+                ),
+                json.dumps({"task_id": "unsafe", "task_risk_level": "U2"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        s2.S2VerifierClient,
+        "from_env",
+        classmethod(lambda cls, **_kwargs: pytest.fail("request audit must not call S2")),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["s2_verifier_client.py", "--request-audit", "--input", str(input_path)],
+    )
+
+    exit_code = s2.main()
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Request audit source line range: 1-3" in stdout
+    assert "Request-buildable count: 2" in stdout
+    assert "Request-build-error count: 1" in stdout
+    assert "Request screenshot-path count: 2" in stdout
+    assert "Request screenshot-existing count: 1" in stdout
+    assert 'Request reason distribution: {"high_failure_risk": 1, "semantic_missing_answer": 1}' in stdout
+
+
 def test_run_offline_smoke_writes_record_line_source_record(tmp_path, monkeypatch) -> None:
     input_path = tmp_path / "phase0.jsonl"
     output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
