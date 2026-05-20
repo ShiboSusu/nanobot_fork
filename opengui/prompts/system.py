@@ -61,6 +61,7 @@ def build_system_prompt(
         "- Use the latest screenshot as the source of truth.",
         "- Click the center of the intended UI element unless the task clearly requires an edge.",
         "- When opening apps from home screen, do not rely on icon color alone; prefer exact text labels or app search.",
+        "- On a Huawei/HarmonyOS launcher, swipe down from the middle of the home screen to open app search, then search by app name. Do not randomly tap or swipe around the home screen.",
         "- After opening an app, verify the foreground page belongs to the target app before continuing.",
         "- If the foreground app does not match the target app named by the task, prefer the `open` action for that target app, or return home and use app search. Do not repeatedly tap inside the wrong foreground app.",
         "- Treat user constraints as tiered constraints: key constraints (date/time/location/price cap/model) must be exact.",

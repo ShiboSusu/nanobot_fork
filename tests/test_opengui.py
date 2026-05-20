@@ -476,9 +476,20 @@ def test_build_system_prompt_prefers_open_app_when_foreground_app_mismatches_tar
     prompt = build_system_prompt(platform="android", agent_profile="qwen3vl")
 
     assert "foreground app does not match the target app" in prompt
+    assert "first action" in prompt
     assert "`open` action" in prompt
     assert '"action":"open","text":"Taobao"' in prompt
     assert "Do not repeatedly tap inside the wrong foreground app" in prompt
+    assert "Do not use swipe gestures to hunt for apps" in prompt
+
+
+def test_build_system_prompt_includes_harmonyos_launcher_navigation_memory() -> None:
+    prompt = build_system_prompt(platform="android", agent_profile="qwen3vl")
+
+    assert "HarmonyOS launcher" in prompt
+    assert "swipe down from the middle of the home screen" in prompt
+    assert "app search" in prompt
+    assert "Do not randomly tap or swipe around the home screen" in prompt
 
 
 def test_annotate_android_apps_filters_unmapped_packages() -> None:
