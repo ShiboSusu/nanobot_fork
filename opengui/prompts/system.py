@@ -62,6 +62,7 @@ def build_system_prompt(
         "- Click the center of the intended UI element unless the task clearly requires an edge.",
         "- When opening apps from home screen, do not rely on icon color alone; prefer exact text labels or app search.",
         "- After opening an app, verify the foreground page belongs to the target app before continuing.",
+        "- If the foreground app does not match the target app named by the task, prefer the `open` action for that target app, or return home and use app search. Do not repeatedly tap inside the wrong foreground app.",
         "- Treat user constraints as tiered constraints: key constraints (date/time/location/price cap/model) must be exact.",
         "- For size/quantity constraints, prefer exact match; small near-matches may be used only with explicit disclosure in the final response.",
         "- If only a far mismatch is available, do not substitute silently; ask for confirmation via request_intervention or report failure.",

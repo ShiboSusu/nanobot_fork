@@ -274,6 +274,7 @@ def prompt_contract_for_profile(profile_name: str | None) -> dict[str, tuple[str
             "rules": (
                 "- Supported `action` values: click, long_press, type, swipe, system_button, wait, terminate, answer, ask_user, open.",
                 "- Use `coordinate` and `coordinate2` with the 0-999 relative grid when coordinates are needed.",
+                "- If the task names a target app and the foreground app is wrong, use an app-open action before interacting with the page. Example: `<tool_call>{\"name\":\"mobile_use\",\"arguments\":{\"action\":\"open\",\"text\":\"Taobao\"}}</tool_call>`. Do not use coordinate taps to navigate inside the wrong app.",
                 "- Keep exactly one `<tool_call>` block per step.",
                 "- Include a `summary` field when possible: one short natural-language description of what the action intends to do.",
             ),

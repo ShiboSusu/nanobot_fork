@@ -391,6 +391,15 @@ def test_build_system_prompt_supports_general_e2e_profile() -> None:
     assert "Do not use native tool calling" in prompt
 
 
+def test_build_system_prompt_prefers_open_app_when_foreground_app_mismatches_target() -> None:
+    prompt = build_system_prompt(platform="android", agent_profile="qwen3vl")
+
+    assert "foreground app does not match the target app" in prompt
+    assert "`open` action" in prompt
+    assert '"action":"open","text":"Taobao"' in prompt
+    assert "Do not repeatedly tap inside the wrong foreground app" in prompt
+
+
 def test_annotate_android_apps_filters_unmapped_packages() -> None:
     from opengui.skills.normalization import annotate_android_apps
 
