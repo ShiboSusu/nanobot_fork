@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from eval.phase0_controller_dry_run import build_controller_record, route_step
 from eval.phase0_observable_signal_pilot import (
     attach_shadow_controller,
@@ -72,6 +74,54 @@ def test_max_steps_near_limit_alone_does_not_trigger_high_confidence_no_progress
     assert execution_state["repeated_region_action"] is False
     assert execution_state["action_type_run_length"] == 1
     assert execution_state["high_confidence_no_progress"] is False
+
+
+def test_enrich_monitor_features_computes_action_sample_entropy() -> None:
+    steps = [
+        {
+            "step_index": 0,
+            "action": {"action_type": "tap", "x": 500.0, "y": 500.0, "relative": True},
+            "trigger_features": {
+                "self_report": {"confidence": 0.95},
+                "entropy": {
+                    "samples": [
+                        {"action_type": "tap", "x": 500.0, "y": 500.0, "relative": True},
+                        {"action_type": "tap", "x": 500.0, "y": 500.0, "relative": True},
+                        {"action_type": "swipe", "x": 500.0, "y": 800.0, "x2": 500.0, "y2": 200.0, "relative": True},
+                    ]
+                },
+                "execution_state": {},
+            },
+        }
+    ]
+
+    enrich_monitor_features(steps, max_steps=5)
+
+    entropy = steps[0]["trigger_features"]["entropy"]
+    assert entropy["entropy_method"] == "parsed_action_disagreement"
+    assert entropy["sample_count"] == 3
+    assert entropy["modal_action_count"] == 2
+    assert entropy["sample_disagreement"] == pytest.approx(1 / 3)
+    assert round(entropy["action_entropy"], 3) == 0.918
+    assert entropy["action_type_disagreement"] == pytest.approx(1 / 3)
+    assert entropy["modal_action"]["action_type"] == "tap"
+
+
+def test_route_step_verifies_on_high_action_disagreement() -> None:
+    record = {"task_id": "example", "task_risk_level": "U0", "trace_quality": {"clean_for_signal_analysis": True}}
+    step = {
+        "trigger_features": {
+            "risk": {"rule_based_step_risk_level": "U0", "step_predicted_risk_level": "U0"},
+            "entropy": {"sample_disagreement": 0.67},
+            "execution_state": {},
+        }
+    }
+
+    route, reason, inputs = route_step(record, step)
+
+    assert route == "VERIFY"
+    assert "sample_disagreement" in reason
+    assert inputs["monitor_trigger"] == "high_disagreement"
 
 
 def test_detect_screenshot_capture_failure_from_adb_error() -> None:

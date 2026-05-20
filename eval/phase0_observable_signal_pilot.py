@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import csv
 import json
+import math
 import re
 import sys
 import time
@@ -940,6 +941,9 @@ def enrich_monitor_features(steps: list[dict[str, Any]], max_steps: int | None =
         if not isinstance(execution_state, dict):
             execution_state = {}
             trigger_features["execution_state"] = execution_state
+        entropy = trigger_features.get("entropy") if isinstance(trigger_features.get("entropy"), dict) else {}
+        if entropy:
+            trigger_features["entropy"] = enrich_action_entropy(entropy)
 
         confidence = self_report.get("confidence")
         high_confidence = isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and confidence >= 0.9
@@ -962,6 +966,67 @@ def enrich_monitor_features(steps: list[dict[str, Any]], max_steps: int | None =
                 "secure_surface_suspected": bool(execution_state.get("secure_surface_suspected", False)),
             }
         )
+
+
+def enrich_action_entropy(entropy: dict[str, Any]) -> dict[str, Any]:
+    samples = entropy.get("samples")
+    if not isinstance(samples, list) or not samples:
+        return entropy
+
+    sample_keys: list[str] = []
+    key_to_action: dict[str, dict[str, Any] | None] = {}
+    parse_failure_count = 0
+    for sample in samples:
+        if isinstance(sample, dict) and sample.get("action_type"):
+            normalized = normalized_action_sample(sample)
+            key = json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+            key_to_action.setdefault(key, normalized)
+        else:
+            key = "__parse_failure__"
+            key_to_action.setdefault(key, None)
+            parse_failure_count += 1
+        sample_keys.append(key)
+
+    counts = Counter(sample_keys)
+    modal_key, modal_count = counts.most_common(1)[0]
+    sample_count = len(sample_keys)
+    probabilities = [count / sample_count for count in counts.values()]
+    action_entropy = -sum(prob * math.log2(prob) for prob in probabilities if prob > 0)
+
+    type_counts: Counter[str] = Counter()
+    for sample in samples:
+        if isinstance(sample, dict) and sample.get("action_type"):
+            type_counts[str(sample["action_type"])] += 1
+        else:
+            type_counts["__parse_failure__"] += 1
+    action_type_disagreement = 1.0 - (type_counts.most_common(1)[0][1] / sample_count)
+
+    enriched = dict(entropy)
+    enriched.update(
+        {
+            "entropy_method": "parsed_action_disagreement",
+            "sample_count": sample_count,
+            "parse_failure_count": parse_failure_count,
+            "modal_action": key_to_action.get(modal_key),
+            "modal_action_count": modal_count,
+            "sample_disagreement": 1.0 - (modal_count / sample_count),
+            "action_entropy": action_entropy,
+            "action_type_disagreement": action_type_disagreement,
+        }
+    )
+    return enriched
+
+
+def normalized_action_sample(action: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key in ("action_type", "text", "status", "button", "relative"):
+        if key in action:
+            normalized[key] = action[key]
+    for key in ("x", "y", "x2", "y2", "duration_ms"):
+        value = float_or_none(action.get(key))
+        if value is not None:
+            normalized[key] = round(value, 3)
+    return normalized
 
 
 def coordinate_bucket(action: dict[str, Any]) -> str | None:
