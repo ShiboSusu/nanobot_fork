@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import copy
 import csv
 import json
 import math
@@ -18,7 +20,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -126,6 +128,8 @@ EXECUTION_STATE_SUMMARY_FEATURES = (
     "coordinate_bucket_repeat",
     "screen_region_repeat",
 )
+OMITTED_IMAGE_URL = "<omitted:image-data-url>"
+EntropySampleActions = Callable[[list[dict[str, Any]], int], Awaitable[list[dict[str, Any]]]]
 
 
 @dataclass(frozen=True)
@@ -534,6 +538,75 @@ def load_jsonl(path: Path | None) -> list[dict[str, Any]]:
     except OSError:
         return []
     return events
+
+
+def resolve_screenshot_path(raw_path: Any, *, trace_path: Path | None = None) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    raw = Path(raw_path).expanduser()
+    if raw.is_absolute():
+        return raw if raw.exists() else None
+
+    candidates: list[Path] = []
+    if trace_path is not None:
+        candidates.extend([trace_path.parent / raw, trace_path.parent.parent / raw])
+    candidates.extend([Path.cwd() / raw, REPO_ROOT / raw])
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def screenshot_path_for_event(event: dict[str, Any], *, trace_path: Path | None = None) -> Path | None:
+    prompt = event.get("prompt") if isinstance(event.get("prompt"), dict) else {}
+    observation = prompt.get("current_observation") if isinstance(prompt.get("current_observation"), dict) else {}
+    for value in (
+        observation.get("screenshot_path"),
+        event.get("screenshot_path"),
+        event.get("screenshot"),
+    ):
+        resolved = resolve_screenshot_path(value, trace_path=trace_path)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def image_data_url(path: Path) -> str | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def rehydrate_prompt_messages(event: dict[str, Any], *, trace_path: Path | None = None) -> list[dict[str, Any]]:
+    prompt = event.get("prompt") if isinstance(event.get("prompt"), dict) else {}
+    messages = prompt.get("messages")
+    if not isinstance(messages, list):
+        return []
+    copied = copy.deepcopy(messages)
+    screenshot_url: str | None = None
+    for message in copied:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            image = item.get("image_url")
+            if not isinstance(image, dict) or image.get("url") != OMITTED_IMAGE_URL:
+                continue
+            if screenshot_url is None:
+                screenshot = screenshot_path_for_event(event, trace_path=trace_path)
+                screenshot_url = image_data_url(screenshot) if screenshot is not None else None
+            if screenshot_url is not None:
+                image["url"] = screenshot_url
+    return copied
 
 
 def step_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1029,6 +1102,122 @@ def normalized_action_sample(action: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+async def attach_entropy_samples_from_prompt_events(
+    steps: list[dict[str, Any]],
+    prompt_events: list[dict[str, Any]],
+    *,
+    sample_count: int,
+    sample_actions: EntropySampleActions,
+    trace_path: Path | None = None,
+) -> None:
+    if sample_count <= 0:
+        return
+    for position, step in enumerate(steps):
+        if not isinstance(step, dict) or position >= len(prompt_events):
+            continue
+        messages = rehydrate_prompt_messages(prompt_events[position], trace_path=trace_path)
+        if not messages:
+            continue
+        trigger_features = step.setdefault("trigger_features", {})
+        if not isinstance(trigger_features, dict):
+            trigger_features = {}
+            step["trigger_features"] = trigger_features
+        try:
+            samples = await sample_actions(messages, sample_count)
+        except Exception as exc:
+            samples = [{"parse_error": f"{type(exc).__name__}: {exc}"}]
+        trigger_features["entropy"] = {
+            "entropy_method": "parsed_action_disagreement",
+            "sample_requested_count": sample_count,
+            "samples": samples,
+        }
+
+
+async def attach_entropy_samples(
+    cfg: Any,
+    steps: list[dict[str, Any]],
+    alignment: dict[str, Any],
+    *,
+    sample_count: int,
+    temperature: float,
+    max_tokens: int,
+) -> None:
+    if sample_count <= 0:
+        return
+    selected_inner_trace = alignment.get("selected_inner_trace_path")
+    if not isinstance(selected_inner_trace, str) or not selected_inner_trace:
+        return
+    trace_path = Path(selected_inner_trace)
+    prompt_events = step_events(load_jsonl(trace_path))
+    if not prompt_events:
+        return
+
+    async def sample_actions(messages: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+        return await sample_entropy_actions(
+            cfg,
+            messages,
+            sample_count=count,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    await attach_entropy_samples_from_prompt_events(
+        steps,
+        prompt_events,
+        sample_count=sample_count,
+        sample_actions=sample_actions,
+        trace_path=trace_path,
+    )
+
+
+async def sample_entropy_actions(
+    cfg: Any,
+    messages: list[dict[str, Any]],
+    *,
+    sample_count: int,
+    temperature: float,
+    max_tokens: int,
+) -> list[dict[str, Any]]:
+    from nanobot.providers.factory import build_gui_provider_snapshot
+    from opengui.agent_profiles import normalize_profile_response
+    from opengui.interfaces import LLMResponse as OpenGuiLLMResponse
+    from opengui.interfaces import ToolCall
+
+    snapshot = build_gui_provider_snapshot(cfg)
+    if snapshot is None:
+        return [{"parse_error": "gui_provider_unavailable"}]
+    profile = getattr(cfg.gui, "agent_profile", None)
+    samples: list[dict[str, Any]] = []
+    for _ in range(sample_count):
+        try:
+            response = await snapshot.provider.chat_with_retry(
+                messages=messages,
+                model=snapshot.model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            tool_calls = [
+                ToolCall(id=call.id, name=call.name, arguments=call.arguments)
+                for call in (response.tool_calls or [])
+            ] or None
+            normalized = normalize_profile_response(
+                profile,
+                OpenGuiLLMResponse(
+                    content=response.content or "",
+                    tool_calls=tool_calls,
+                    raw=response,
+                    usage=response.usage or {},
+                ),
+            )
+            if not normalized.tool_calls:
+                samples.append({"parse_error": "no_tool_call"})
+                continue
+            samples.append(dict(normalized.tool_calls[0].arguments))
+        except Exception as exc:
+            samples.append({"parse_error": f"{type(exc).__name__}: {exc}"})
+    return samples
+
+
 def coordinate_bucket(action: dict[str, Any]) -> str | None:
     x = float_or_none(action.get("x"))
     y = float_or_none(action.get("y"))
@@ -1350,6 +1539,9 @@ async def run_one_task(
     *,
     runtime_signal_enabled: bool = False,
     controller_shadow: bool = False,
+    entropy_samples: int = 0,
+    entropy_temperature: float = 0.7,
+    entropy_max_tokens: int = 256,
 ) -> dict[str, Any]:
     before_ts = time.time()
     started = time.perf_counter()
@@ -1372,6 +1564,14 @@ async def run_one_task(
 
     trace_paths = find_newest_trace_paths(cfg, before_ts)
     steps, alignment, quality = extract_trace(task, trace_paths)
+    await attach_entropy_samples(
+        cfg,
+        steps,
+        alignment,
+        sample_count=entropy_samples,
+        temperature=entropy_temperature,
+        max_tokens=entropy_max_tokens,
+    )
     enrich_monitor_features(steps, max_steps=int_or_none(getattr(cfg.gui, "max_steps", None)))
     termination_reason = normalize_termination(
         runner_error=runner_error,
@@ -1519,6 +1719,7 @@ async def run(args: argparse.Namespace) -> int:
             max_steps=args.max_steps,
             runtime_signal_enabled=args.runtime_signal,
             controller_shadow=args.controller_shadow,
+            entropy_samples=args.entropy_samples,
         )
         print("Dry-select mode: AgentLoop was not initialized; no GUI task was run; no output JSONL was written.")
         return 0
@@ -1552,6 +1753,7 @@ async def run(args: argparse.Namespace) -> int:
         max_steps=cfg.gui.max_steps,
         runtime_signal_enabled=args.runtime_signal,
         controller_shadow=args.controller_shadow,
+        entropy_samples=args.entropy_samples,
     )
 
     agent = None
@@ -1566,6 +1768,9 @@ async def run(args: argparse.Namespace) -> int:
                     task,
                     runtime_signal_enabled=args.runtime_signal,
                     controller_shadow=args.controller_shadow,
+                    entropy_samples=args.entropy_samples,
+                    entropy_temperature=args.entropy_temperature,
+                    entropy_max_tokens=args.entropy_max_tokens,
                 )
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
                 out.flush()
@@ -1612,6 +1817,7 @@ def print_run_summary(
     max_steps: int | None,
     runtime_signal_enabled: bool,
     controller_shadow: bool,
+    entropy_samples: int,
 ) -> None:
     print(f"Loaded dataset rows: {len(tasks)}")
     print(f"Dataset risk distribution: {dict(Counter(task.risk_level for task in tasks))}")
@@ -1622,6 +1828,7 @@ def print_run_summary(
     print(f"Effective max steps: {max_steps if max_steps is not None else 'config default'}")
     print(f"Runtime signal enabled: {runtime_signal_enabled}")
     print(f"Controller shadow enabled: {controller_shadow}")
+    print(f"Entropy action samples per step: {entropy_samples}")
     if cfg is not None:
         print(f"Backend: {cfg.gui.backend}")
         print(f"Agent profile: {cfg.gui.agent_profile}")
@@ -1790,6 +1997,20 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("non-negative integer required")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("positive float required")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", help="Path to phase0 config JSON")
@@ -1804,6 +2025,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-tasks", type=int, help="Maximum number of selected tasks to run")
     parser.add_argument("--max-steps", type=int, help="Temporary GUI max_steps override for this run")
+    parser.add_argument(
+        "--entropy-samples",
+        type=nonnegative_int,
+        default=0,
+        help="Shadow-only candidate action samples per executed step; 0 disables entropy sampling",
+    )
+    parser.add_argument(
+        "--entropy-temperature",
+        type=positive_float,
+        default=0.7,
+        help="Temperature for shadow-only entropy candidate action sampling",
+    )
+    parser.add_argument(
+        "--entropy-max-tokens",
+        type=positive_int,
+        default=256,
+        help="Max tokens for each shadow-only entropy candidate action sample",
+    )
     parser.add_argument("--task-id", action="append", help="Task ID to select; may be repeated or comma-separated")
     parser.add_argument("--task-text", help="Synthetic smoke-only task text; requires --risk-level U0 and --max-tasks 1")
     parser.add_argument("--runtime-signal", action="store_true", help="Ask qwen3vl text profile to emit a runtime_signal block before tool_call")
