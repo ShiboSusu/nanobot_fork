@@ -623,6 +623,7 @@ def test_main_summarize_output_reports_verifier_distributions(tmp_path, monkeypa
     assert "Requires-image-context count: 1" in stdout
     assert "Request screenshot-path count: 2" in stdout
     assert "Request screenshot-existing count: 1" in stdout
+    assert "Requires-image-without-existing-screenshot count: 1" in stdout
     assert "Recovery-design candidate count: 0" in stdout
     assert "Total latency seconds: 4.0" in stdout
     assert "Total prompt/completion tokens: 35/7" in stdout

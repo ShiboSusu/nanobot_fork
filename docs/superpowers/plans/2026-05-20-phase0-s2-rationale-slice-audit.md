@@ -190,3 +190,11 @@ The S2 summary also reports:
 - `Request screenshot-existing count`
 
 This does not send images to S2 and does not enable live control. It only makes the next image-context gate auditable: when `requires_image_context` appears, we can tell whether the source record had a local screenshot artifact available for future offline image-grounded verification.
+
+## 8AR Missing Screenshot Gate Outcome
+
+Task 8AR added a direct S2 summary count for the image-context evidence gap:
+
+- `Requires-image-without-existing-screenshot count`
+
+This counts records where the verifier says image context is required, but the sanitized request summary does not show an existing local screenshot artifact. A nonzero value means the record is still useful audit evidence, but it is not ready for image-grounded recovery design without replaying or reconstructing the missing visual context.

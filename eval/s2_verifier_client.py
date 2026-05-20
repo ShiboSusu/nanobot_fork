@@ -755,6 +755,7 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     requires_image_context_count = 0
     request_screenshot_path_count = 0
     request_screenshot_existing_count = 0
+    requires_image_without_existing_screenshot_count = 0
     recovery_design_candidate_count = 0
     recovery_design_blocker_counts: Counter[str] = Counter()
     recovery_design_blocker_details: list[dict[str, Any]] = []
@@ -794,6 +795,8 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
             request_screenshot_path_count += 1
         if request.get("screenshot_path_exists") is True:
             request_screenshot_existing_count += 1
+        if verifier.get("requires_image_context") is True and request.get("screenshot_path_exists") is not True:
+            requires_image_without_existing_screenshot_count += 1
         if is_recovery_design_candidate(verifier):
             recovery_design_candidate_count += 1
         else:
@@ -842,6 +845,10 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     print(f"Requires-image-context count: {requires_image_context_count}")
     print(f"Request screenshot-path count: {request_screenshot_path_count}")
     print(f"Request screenshot-existing count: {request_screenshot_existing_count}")
+    print(
+        "Requires-image-without-existing-screenshot count: "
+        f"{requires_image_without_existing_screenshot_count}"
+    )
     print(f"Recovery-design candidate count: {recovery_design_candidate_count}")
     print_distribution("Recovery-design blocker distribution", recovery_design_blocker_counts)
     print(
