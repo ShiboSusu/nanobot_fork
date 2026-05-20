@@ -230,3 +230,23 @@ Request reason distribution: {"semantic_missing_answer": 2, "stagnation": 1}
 ```
 
 This clarifies the current gate: the old S2 output lines 18-20 lack screenshot metadata, but the underlying observable source records still have local screenshots. The next S2 replay can be offline-only and does not require rerunning the phone.
+
+## 8AU Request Audit Details
+
+Task 8AU added per-record `Request audit details` to the request-audit summary.
+
+For source lines 29-31:
+
+```text
+line 29 / ChromeSearchBeijingWeatherTask:
+  reason_for_verification=stagnation
+  screenshot_path_exists=true
+line 30 / CheckPuchasedItem:
+  reason_for_verification=semantic_missing_answer
+  screenshot_path_exists=true
+line 31 / RecentTotalExpenseTask:
+  reason_for_verification=semantic_missing_answer
+  screenshot_path_exists=true
+```
+
+This makes the next offline replay target explicit: all three source records are buildable and have local screenshots, so the missing screenshot gate is specific to old S2 output metadata rather than current observable artifacts.

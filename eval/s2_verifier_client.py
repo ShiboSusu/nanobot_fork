@@ -877,12 +877,24 @@ def summarize_phase0_requests(path: Path, *, since_line: int | None = None, last
     screenshot_path_count = 0
     screenshot_existing_count = 0
     reason_counts: Counter[str] = Counter()
+    details: list[dict[str, Any]] = []
 
-    for _line_number, record in records_with_lines:
+    for line_number, record in records_with_lines:
         try:
             request = build_request_from_phase0_record(record)
-        except ValueError:
+        except ValueError as exc:
             build_error_count += 1
+            details.append(
+                {
+                    "line": line_number,
+                    "task_id": record.get("task_id") if isinstance(record.get("task_id"), str) else None,
+                    "buildable": False,
+                    "build_error": str(exc),
+                    "reason_for_verification": None,
+                    "screenshot_path_present": None,
+                    "screenshot_path_exists": None,
+                }
+            )
             continue
         summary = request_summary(request)
         buildable_count += 1
@@ -891,6 +903,17 @@ def summarize_phase0_requests(path: Path, *, since_line: int | None = None, last
         if summary.get("screenshot_path_exists") is True:
             screenshot_existing_count += 1
         count_string(reason_counts, summary.get("reason_for_verification"))
+        details.append(
+            {
+                "line": line_number,
+                "task_id": request.task_id,
+                "buildable": True,
+                "build_error": None,
+                "reason_for_verification": summary.get("reason_for_verification"),
+                "screenshot_path_present": summary.get("screenshot_path_present"),
+                "screenshot_path_exists": summary.get("screenshot_path_exists"),
+            }
+        )
 
     if records_with_lines:
         line_range = f"{records_with_lines[0][0]}-{records_with_lines[-1][0]}"
@@ -904,6 +927,7 @@ def summarize_phase0_requests(path: Path, *, since_line: int | None = None, last
     print(f"Request screenshot-path count: {screenshot_path_count}")
     print(f"Request screenshot-existing count: {screenshot_existing_count}")
     print_distribution("Request reason distribution", reason_counts)
+    print("Request audit details: " + json.dumps(details, ensure_ascii=False, sort_keys=True))
     return 0
 
 

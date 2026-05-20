@@ -192,6 +192,17 @@ def test_request_audit_summarizes_screenshot_availability_without_s2(tmp_path, m
     assert "Request screenshot-path count: 2" in stdout
     assert "Request screenshot-existing count: 1" in stdout
     assert 'Request reason distribution: {"high_failure_risk": 1, "semantic_missing_answer": 1}' in stdout
+    assert (
+        'Request audit details: [{"build_error": null, "buildable": true, "line": 1, '
+        '"reason_for_verification": "high_failure_risk", "screenshot_path_exists": true, '
+        '"screenshot_path_present": true, "task_id": "with-image"}, '
+        '{"build_error": null, "buildable": true, "line": 2, '
+        '"reason_for_verification": "semantic_missing_answer", "screenshot_path_exists": false, '
+        '"screenshot_path_present": true, "task_id": "missing-image"}, '
+        '{"build_error": "Refusing S2 offline smoke for U2 record", "buildable": false, "line": 3, '
+        '"reason_for_verification": null, "screenshot_path_exists": null, '
+        '"screenshot_path_present": null, "task_id": "unsafe"}]'
+    ) in stdout
 
 
 def test_run_offline_smoke_writes_record_line_source_record(tmp_path, monkeypatch) -> None:
