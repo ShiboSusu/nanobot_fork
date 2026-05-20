@@ -191,3 +191,15 @@ Task 8AI replayed observable record line 31 through the offline S2 verifier afte
 The replay confirms the audit path works: the offline verifier record now contains rationale/evidence/suggested-next-step fields, and the controller dry-run still normalizes U0 missing-answer `block` to `SLOW`.
 
 Human audit conclusion: this is auditable but not yet a live recovery candidate, because the suggested next step is not grounded in visible/current GUI evidence and could require inventing the missing answer.
+
+## 8AJ Slice Replay Outcome
+
+Task 8AJ replayed the full current three-record U0 slice with rationale-preserving S2 offline records:
+
+| S2 output line | source line | task_id | verifier decision | requires image | dry-run route |
+| ---: | ---: | --- | --- | --- | --- |
+| 18 | 31 | `RecentTotalExpenseTask` | `block` | false | `SLOW` |
+| 19 | 29 | `ChromeSearchBeijingWeatherTask` | `replan` | true | `SLOW` |
+| 20 | 30 | `CheckPuchasedItem` | `block` | true | `SLOW` |
+
+All three records are now auditable, but none is a safe live recovery candidate yet. The Chrome and purchased-item records require image context; the expense record lacks grounded evidence for the missing answer. The next gate remains a read-only failure with visible/current-state evidence for a stateful recovery action.
