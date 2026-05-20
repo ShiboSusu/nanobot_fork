@@ -119,6 +119,7 @@ _ANDROID_PACKAGE_DISPLAY_NAMES: dict[str, str] = {
     "com.android.vending": "Play Store",
     "com.android.email": "Email",
     # Huawei/HarmonyOS System
+    "com.huawei.browser": "华为浏览器/Huawei Browser",
     "com.huawei.android.totemweather": "华为天气/Huawei Weather",
     # OPPO/ColorOS System
     "com.coloros.soundrecorder": "录音/Sound Recorder",
@@ -226,6 +227,7 @@ _ANDROID_APP_ALIASES_BASE: dict[str, str] = {
     "play store": "com.android.vending",
     "google play": "com.android.vending",
     "twitter": "com.twitter.android",
+    "huawei browser": "com.huawei.browser",
     "huawei weather": "com.huawei.android.totemweather",
 }
 

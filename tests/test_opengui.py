@@ -434,6 +434,16 @@ def test_android_app_aliases_include_huawei_weather() -> None:
     assert resolve_android_package("华为天气") == "com.huawei.android.totemweather"
 
 
+def test_android_app_aliases_include_huawei_browser() -> None:
+    from opengui.skills.normalization import annotate_android_apps, resolve_android_package
+
+    annotated = annotate_android_apps(["com.huawei.browser"])
+
+    assert annotated == ["华为浏览器/Huawei Browser: com.huawei.browser"]
+    assert resolve_android_package("Huawei Browser") == "com.huawei.browser"
+    assert resolve_android_package("华为浏览器") == "com.huawei.browser"
+
+
 def test_build_system_prompt_android_apps_excludes_unmapped() -> None:
     prompt = build_system_prompt(
         platform="android",
