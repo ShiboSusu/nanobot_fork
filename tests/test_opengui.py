@@ -424,6 +424,16 @@ def test_build_system_prompt_android_apps_shows_display_names_only() -> None:
     assert not any("com.unknown.dropped" in ln for ln in app_list_lines)
 
 
+def test_android_app_aliases_include_huawei_weather() -> None:
+    from opengui.skills.normalization import annotate_android_apps, resolve_android_package
+
+    annotated = annotate_android_apps(["com.huawei.android.totemweather"])
+
+    assert annotated == ["华为天气/Huawei Weather: com.huawei.android.totemweather"]
+    assert resolve_android_package("Huawei Weather") == "com.huawei.android.totemweather"
+    assert resolve_android_package("华为天气") == "com.huawei.android.totemweather"
+
+
 def test_build_system_prompt_android_apps_excludes_unmapped() -> None:
     prompt = build_system_prompt(
         platform="android",

@@ -118,6 +118,8 @@ _ANDROID_PACKAGE_DISPLAY_NAMES: dict[str, str] = {
     "com.android.documentsui": "Files",
     "com.android.vending": "Play Store",
     "com.android.email": "Email",
+    # Huawei/HarmonyOS System
+    "com.huawei.android.totemweather": "华为天气/Huawei Weather",
     # OPPO/ColorOS System
     "com.coloros.soundrecorder": "录音/Sound Recorder",
     "com.coloros.filemanager": "文件管理/File Manager",
@@ -224,6 +226,7 @@ _ANDROID_APP_ALIASES_BASE: dict[str, str] = {
     "play store": "com.android.vending",
     "google play": "com.android.vending",
     "twitter": "com.twitter.android",
+    "huawei weather": "com.huawei.android.totemweather",
 }
 
 
