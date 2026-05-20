@@ -174,3 +174,19 @@ For the current slice:
 - S2 line 20 / source line 30 / `CheckPuchasedItem`: blocked by `non_recover_decision` and `requires_image_context`.
 
 This makes the next gate concrete: a future candidate needs a verifier `recover` decision, and for Chrome/purchased-item-style failures it also needs enough visual/current-state context to avoid the image-context blocker.
+
+## 8AQ Screenshot Availability Outcome
+
+Task 8AQ preserved screenshot availability in offline S2 request construction and sanitized output metadata.
+
+New offline records can now expose:
+
+- `request_summary.screenshot_path_present`
+- `request_summary.screenshot_path_exists`
+
+The S2 summary also reports:
+
+- `Request screenshot-path count`
+- `Request screenshot-existing count`
+
+This does not send images to S2 and does not enable live control. It only makes the next image-context gate auditable: when `requires_image_context` appears, we can tell whether the source record had a local screenshot artifact available for future offline image-grounded verification.

@@ -288,6 +288,38 @@ def test_build_request_from_phase0_record_keeps_stagnation_reason_and_controller
     }
 
 
+def test_build_request_from_phase0_record_preserves_screenshot_availability(tmp_path) -> None:
+    screenshot_path = tmp_path / "step_000.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    record = {
+        "task_id": "ChromeSearchBeijingWeatherTask",
+        "instruction": "Find Beijing weather.",
+        "task_risk_level": "U0",
+        "steps": [
+            {
+                "step_index": 0,
+                "action": {"action_type": "tap", "x": 10, "y": 20},
+                "observation": {
+                    "foreground_app": "com.huawei.android.launcher",
+                    "screenshot_path": str(screenshot_path),
+                },
+                "trigger_features": {
+                    "risk": {"task_risk_level": "U0", "rule_based_step_risk_level": "U0"},
+                    "execution_state": {},
+                },
+            }
+        ],
+    }
+
+    request = s2.build_request_from_phase0_record(record)
+    summary = s2.request_summary(request)
+
+    assert request.current_observation["screenshot_path"] == str(screenshot_path)
+    assert request.current_observation["screenshot_path_exists"] is True
+    assert summary["screenshot_path_present"] is True
+    assert summary["screenshot_path_exists"] is True
+
+
 def test_parser_rejects_latest_with_record_line(capsys) -> None:
     parser = s2.build_parser()
 
@@ -423,6 +455,8 @@ def test_build_sanitized_offline_record_includes_verifier_rationale_fields() -> 
 
     output_record = s2.build_sanitized_offline_record(record, request, selected_step, metadata)
 
+    assert output_record["request_summary"]["screenshot_path_present"] is False
+    assert output_record["request_summary"]["screenshot_path_exists"] is False
     assert output_record["steps"][0]["verifier"]["reason"] == "The proposed tap repeats a prior ineffective action."
     assert output_record["steps"][0]["verifier"]["evidence"] == [
         "same coordinates were tapped twice",
@@ -454,8 +488,10 @@ def verifier_output_record(
     suggested_next_step: str | None = None,
     requires_image_context: bool | None = None,
     confidence: float | None = None,
+    request_screenshot_path_present: bool | None = None,
+    request_screenshot_path_exists: bool | None = None,
 ) -> dict:
-    return {
+    record = {
         "task_risk_level": task_risk_level,
         "steps": [
             {
@@ -481,6 +517,12 @@ def verifier_output_record(
             }
         ],
     }
+    if request_screenshot_path_present is not None or request_screenshot_path_exists is not None:
+        record["request_summary"] = {
+            "screenshot_path_present": request_screenshot_path_present,
+            "screenshot_path_exists": request_screenshot_path_exists,
+        }
+    return record
 
 
 def write_verifier_output_jsonl(path) -> None:
@@ -504,6 +546,8 @@ def write_verifier_output_jsonl(path) -> None:
                         suggested_next_step="Proceed with caution.",
                         requires_image_context=False,
                         confidence=0.7,
+                        request_screenshot_path_present=True,
+                        request_screenshot_path_exists=True,
                     )
                 ),
                 "{not-json",
@@ -539,6 +583,8 @@ def write_verifier_output_jsonl(path) -> None:
                         suggested_next_step="Find the answer before done.",
                         requires_image_context=True,
                         confidence=0.9,
+                        request_screenshot_path_present=True,
+                        request_screenshot_path_exists=False,
                     )
                 ),
             ]
@@ -575,6 +621,8 @@ def test_main_summarize_output_reports_verifier_distributions(tmp_path, monkeypa
     assert "Verifier evidence item count: 3" in stdout
     assert "Verifier suggested-next-step count: 2" in stdout
     assert "Requires-image-context count: 1" in stdout
+    assert "Request screenshot-path count: 2" in stdout
+    assert "Request screenshot-existing count: 1" in stdout
     assert "Recovery-design candidate count: 0" in stdout
     assert "Total latency seconds: 4.0" in stdout
     assert "Total prompt/completion tokens: 35/7" in stdout

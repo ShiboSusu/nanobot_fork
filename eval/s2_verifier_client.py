@@ -333,6 +333,8 @@ def build_request_from_phase0_record(record: dict[str, Any], *, step_index: int 
     trigger_features = trigger_features if isinstance(trigger_features, dict) else {}
     observation = selected_step.get("observation") if isinstance(selected_step, dict) else {}
     observation = observation if isinstance(observation, dict) else {}
+    screenshot_path = observation.get("screenshot_path") if isinstance(observation.get("screenshot_path"), str) else None
+    screenshot_path_exists = bool(screenshot_path and Path(screenshot_path).exists())
 
     request = S2VerifierRequest(
         task_id=str(record.get("task_id") or "__synthetic_s2_offline__"),
@@ -340,7 +342,8 @@ def build_request_from_phase0_record(record: dict[str, Any], *, step_index: int 
         risk_level=risk_level,  # type: ignore[arg-type]
         current_observation={
             "text_summary": compact_observation_summary(selected_step, record),
-            "screenshot_path": None,
+            "screenshot_path": screenshot_path,
+            "screenshot_path_exists": screenshot_path_exists,
             "foreground_app": observation.get("foreground_app"),
         },
         s1_proposed_action=selected_step.get("action") if isinstance(selected_step.get("action"), dict) else {},
@@ -604,6 +607,7 @@ def build_sanitized_offline_record(
             "s2_verifier": True,
             "controller": False,
         },
+        "request_summary": request_summary(request),
         "steps": [step_record],
         "verifier_summary": build_verifier_summary([step_record]),
     }
@@ -749,6 +753,8 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     evidence_item_count = 0
     suggested_next_step_count = 0
     requires_image_context_count = 0
+    request_screenshot_path_count = 0
+    request_screenshot_existing_count = 0
     recovery_design_candidate_count = 0
     recovery_design_blocker_counts: Counter[str] = Counter()
     recovery_design_blocker_details: list[dict[str, Any]] = []
@@ -783,6 +789,11 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
             suggested_next_step_count += 1
         if verifier.get("requires_image_context") is True:
             requires_image_context_count += 1
+        request = record.get("request_summary") if isinstance(record.get("request_summary"), dict) else {}
+        if request.get("screenshot_path_present") is True:
+            request_screenshot_path_count += 1
+        if request.get("screenshot_path_exists") is True:
+            request_screenshot_existing_count += 1
         if is_recovery_design_candidate(verifier):
             recovery_design_candidate_count += 1
         else:
@@ -829,6 +840,8 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     print(f"Verifier evidence item count: {evidence_item_count}")
     print(f"Verifier suggested-next-step count: {suggested_next_step_count}")
     print(f"Requires-image-context count: {requires_image_context_count}")
+    print(f"Request screenshot-path count: {request_screenshot_path_count}")
+    print(f"Request screenshot-existing count: {request_screenshot_existing_count}")
     print(f"Recovery-design candidate count: {recovery_design_candidate_count}")
     print_distribution("Recovery-design blocker distribution", recovery_design_blocker_counts)
     print(
@@ -954,12 +967,15 @@ def run_offline_smoke(
 
 
 def request_summary(request: S2VerifierRequest) -> dict[str, Any]:
+    screenshot_path = request.current_observation.get("screenshot_path")
     return {
         "task_id": request.task_id,
         "risk_level": request.risk_level,
         "verification_mode": request.verification_mode,
         "reason_for_verification": request.reason_for_verification,
         "foreground_app": request.current_observation.get("foreground_app"),
+        "screenshot_path_present": isinstance(screenshot_path, str) and bool(screenshot_path),
+        "screenshot_path_exists": request.current_observation.get("screenshot_path_exists") is True,
         "text_summary_chars": len(request.current_observation.get("text_summary") or ""),
         "s1_action": request.s1_proposed_action,
         "recent_step_count": len(request.recent_steps),
