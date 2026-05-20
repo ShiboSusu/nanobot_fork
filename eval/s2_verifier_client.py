@@ -893,6 +893,7 @@ def run_offline_smoke(
     step_index: int | None,
     timeout_s: float,
     write_output: Path | None,
+    request_only: bool = False,
 ) -> int:
     if record_line is not None and input_path is None:
         print("ERROR: --record-line requires --input")
@@ -939,6 +940,8 @@ def run_offline_smoke(
     print("selected_step_index:", selected_step.get("step_index"))
     print("reason_for_verification:", request.reason_for_verification)
     print("request_summary:", json.dumps(request_summary(request), ensure_ascii=False, sort_keys=True))
+    if request_only:
+        return 0
 
     try:
         client = S2VerifierClient.from_env(timeout_s=timeout_s)
@@ -1065,6 +1068,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_selection.add_argument("--record-line", type=positive_int, help="Use valid JSON object on this 1-based physical --input line")
     parser.add_argument("--step-index", type=int, help="Optional step index for offline smoke")
     parser.add_argument("--timeout-s", type=float, default=60.0, help="Verifier request timeout")
+    parser.add_argument("--request-only", action="store_true", help="Only build and print the verifier request summary")
     parser.add_argument("--write-output", type=Path, help="Append sanitized offline verifier JSONL output")
     parser.add_argument("--summarize-output", type=Path, help="Summarize sanitized offline verifier JSONL output")
     parser.add_argument("--summarize-last", type=positive_int, help="Summarize only the last N valid records after other filters")
@@ -1081,7 +1085,15 @@ def main() -> int:
     if args.smoke == "text":
         return run_smoke_text(args.timeout_s)
     if args.offline_smoke:
-        return run_offline_smoke(args.input, args.latest, args.record_line, args.step_index, args.timeout_s, args.write_output)
+        return run_offline_smoke(
+            args.input,
+            args.latest,
+            args.record_line,
+            args.step_index,
+            args.timeout_s,
+            args.write_output,
+            request_only=args.request_only,
+        )
     build_parser().print_help()
     return 0
 

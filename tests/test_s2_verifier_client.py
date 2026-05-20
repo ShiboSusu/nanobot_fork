@@ -79,6 +79,57 @@ def test_run_offline_smoke_uses_record_line_without_env(tmp_path, monkeypatch, c
     assert '"verifier_error": "missing_env:MA_INTRANET_URL,MA_TOKEN"' in stdout
 
 
+def test_offline_smoke_request_only_skips_s2_call(tmp_path, monkeypatch, capsys) -> None:
+    input_path = tmp_path / "phase0.jsonl"
+    screenshot_path = tmp_path / "step_000.png"
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    input_path.write_text(
+        json.dumps(
+            {
+                "task_id": "line-1",
+                "task_risk_level": "U0",
+                "steps": [
+                    {
+                        "step_index": 0,
+                        "action": {"action_type": "tap", "x": 10, "y": 20},
+                        "observation": {"screenshot_path": str(screenshot_path)},
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MA_INTRANET_URL", "http://example.invalid")
+    monkeypatch.setenv("MA_TOKEN", "dummy-token")
+    monkeypatch.setattr(
+        s2.S2VerifierClient,
+        "from_env",
+        classmethod(lambda cls, **_kwargs: pytest.fail("request-only mode must not call S2")),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "s2_verifier_client.py",
+            "--offline-smoke",
+            "--input",
+            str(input_path),
+            "--record-line",
+            "1",
+            "--request-only",
+        ],
+    )
+
+    exit_code = s2.main()
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "selected_task_id: line-1" in stdout
+    assert '"screenshot_path_exists": true' in stdout
+    assert "verifier_metadata:" not in stdout
+
+
 def test_run_offline_smoke_writes_record_line_source_record(tmp_path, monkeypatch) -> None:
     input_path = tmp_path / "phase0.jsonl"
     output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"

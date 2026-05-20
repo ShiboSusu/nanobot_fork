@@ -198,3 +198,13 @@ Task 8AR added a direct S2 summary count for the image-context evidence gap:
 - `Requires-image-without-existing-screenshot count`
 
 This counts records where the verifier says image context is required, but the sanitized request summary does not show an existing local screenshot artifact. A nonzero value means the record is still useful audit evidence, but it is not ready for image-grounded recovery design without replaying or reconstructing the missing visual context.
+
+## 8AS Request-Only Offline Audit
+
+Task 8AS added a request-only mode for S2 offline smoke:
+
+```text
+--offline-smoke --request-only
+```
+
+This mode builds the verifier request and prints `request_summary`, including screenshot availability, then exits before constructing an S2 client. It is useful when checking whether a Phase 0 observable record has enough local visual context for future image-grounded audit, without requiring S2 credentials or making any S2 call.
