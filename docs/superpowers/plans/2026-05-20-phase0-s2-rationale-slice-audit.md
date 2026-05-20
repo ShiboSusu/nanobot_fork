@@ -32,6 +32,13 @@ verifier_suggested_next_step_count: 3
 requires_image_context_count: 2
 recovery_design_candidate_count: 0
 recovery_design_blocker_distribution: {"non_recover_decision": 3, "requires_image_context": 2}
+recovery_design_blocker_details:
+  line 18 / source 31 / RecentTotalExpenseTask:
+    ["non_recover_decision"]
+  line 19 / source 29 / ChromeSearchBeijingWeatherTask:
+    ["non_recover_decision", "requires_image_context"]
+  line 20 / source 30 / CheckPuchasedItem:
+    ["non_recover_decision", "requires_image_context"]
 ```
 
 Scoped controller dry-run summary:
@@ -155,3 +162,15 @@ For the latest three-record slice, the blockers are:
 - `requires_image_context: 2` because two suggestions need visual grounding before any recovery action could be considered.
 
 This makes the negative gate actionable: the next useful sample should either produce a true `recover` decision, or include enough image/current-state context to remove the visual-grounding blocker.
+
+## 8AN Recovery Blocker Detail Outcome
+
+Task 8AN added per-record `Recovery-design blocker details` to the S2 offline summary.
+
+For the current slice:
+
+- S2 line 18 / source line 31 / `RecentTotalExpenseTask`: blocked by `non_recover_decision`.
+- S2 line 19 / source line 29 / `ChromeSearchBeijingWeatherTask`: blocked by `non_recover_decision` and `requires_image_context`.
+- S2 line 20 / source line 30 / `CheckPuchasedItem`: blocked by `non_recover_decision` and `requires_image_context`.
+
+This makes the next gate concrete: a future candidate needs a verifier `recover` decision, and for Chrome/purchased-item-style failures it also needs enough visual/current-state context to avoid the image-context blocker.

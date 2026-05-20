@@ -644,6 +644,11 @@ def test_main_summarize_output_reports_recovery_design_candidates(tmp_path, monk
     assert exit_code == 0
     assert "Recovery-design candidate count: 1" in stdout
     assert 'Recovery-design blocker distribution: {"non_recover_decision": 1, "requires_image_context": 1}' in stdout
+    assert (
+        'Recovery-design blocker details: [{"blockers": ["requires_image_context"], '
+        '"line": 2, "source_line": null, "task_id": null}, '
+        '{"blockers": ["non_recover_decision"], "line": 3, "source_line": null, "task_id": null}]'
+    ) in stdout
     assert "Requires-image-context count: 1" in stdout
 
 

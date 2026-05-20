@@ -751,12 +751,13 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     requires_image_context_count = 0
     recovery_design_candidate_count = 0
     recovery_design_blocker_counts: Counter[str] = Counter()
+    recovery_design_blocker_details: list[dict[str, Any]] = []
     total_latency_s = 0.0
     total_prompt_tokens = 0
     total_completion_tokens = 0
     source_line_numbers: list[int] = []
 
-    for _, record in records_with_lines:
+    for line_number, record in records_with_lines:
         count_string(task_risk_counts, record.get("task_risk_level"))
         source_record = record.get("source_record") if isinstance(record.get("source_record"), dict) else {}
         source_line_number = source_record.get("line_number")
@@ -785,8 +786,17 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
         if is_recovery_design_candidate(verifier):
             recovery_design_candidate_count += 1
         else:
-            for blocker in recovery_design_candidate_blockers(verifier):
+            blockers = recovery_design_candidate_blockers(verifier)
+            for blocker in blockers:
                 recovery_design_blocker_counts[blocker] += 1
+            recovery_design_blocker_details.append(
+                {
+                    "line": line_number,
+                    "source_line": source_line_number if isinstance(source_line_number, int) else None,
+                    "task_id": record.get("task_id") if isinstance(record.get("task_id"), str) else None,
+                    "blockers": blockers,
+                }
+            )
         latency_s = verifier.get("latency_s")
         if isinstance(latency_s, (int, float)) and not isinstance(latency_s, bool):
             total_latency_s += float(latency_s)
@@ -821,6 +831,10 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     print(f"Requires-image-context count: {requires_image_context_count}")
     print(f"Recovery-design candidate count: {recovery_design_candidate_count}")
     print_distribution("Recovery-design blocker distribution", recovery_design_blocker_counts)
+    print(
+        "Recovery-design blocker details: "
+        + json.dumps(recovery_design_blocker_details, ensure_ascii=False, sort_keys=True)
+    )
     print(f"Total latency seconds: {round(total_latency_s, 3)}")
     print(f"Total prompt/completion tokens: {total_prompt_tokens}/{total_completion_tokens}")
     return 0
