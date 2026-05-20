@@ -1000,9 +1000,7 @@ def enrich_monitor_features(steps: list[dict[str, Any]], max_steps: int | None =
         screen_region_repeat = bool(region is not None and region_counts[region_key] >= 2)
         repeated_region_action = coordinate_bucket_repeat or screen_region_repeat
 
-        step_index_value = step.get("step_index")
-        step_number = step_index_value if isinstance(step_index_value, int) else position
-        max_steps_remaining = max(0, max_steps - step_number - 1) if isinstance(max_steps, int) else None
+        max_steps_remaining = max(0, max_steps - position - 1) if isinstance(max_steps, int) else None
         max_steps_near_limit = bool(max_steps_remaining is not None and max_steps_remaining <= 1)
 
         trigger_features = step.setdefault("trigger_features", {})

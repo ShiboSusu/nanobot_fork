@@ -76,6 +76,49 @@ def test_max_steps_near_limit_alone_does_not_trigger_high_confidence_no_progress
     assert execution_state["high_confidence_no_progress"] is False
 
 
+def test_max_steps_near_limit_uses_attempt_local_position_not_global_step_index() -> None:
+    steps = [
+        {
+            "step_index": 10,
+            "action": {"action_type": "tap", "x": 100.0, "y": 100.0, "relative": True},
+            "trigger_features": {"self_report": {"confidence": None}, "execution_state": {}},
+        },
+        {
+            "step_index": 11,
+            "action": {"action_type": "tap", "x": 200.0, "y": 200.0, "relative": True},
+            "trigger_features": {"self_report": {"confidence": None}, "execution_state": {}},
+        },
+        {
+            "step_index": 12,
+            "action": {"action_type": "tap", "x": 300.0, "y": 300.0, "relative": True},
+            "trigger_features": {"self_report": {"confidence": None}, "execution_state": {}},
+        },
+        {
+            "step_index": 13,
+            "action": {"action_type": "tap", "x": 400.0, "y": 400.0, "relative": True},
+            "trigger_features": {"self_report": {"confidence": None}, "execution_state": {}},
+        },
+        {
+            "step_index": 14,
+            "action": {"action_type": "tap", "x": 500.0, "y": 500.0, "relative": True},
+            "trigger_features": {"self_report": {"confidence": None}, "execution_state": {}},
+        },
+    ]
+
+    enrich_monitor_features(steps, max_steps=5)
+
+    remaining = [
+        step["trigger_features"]["execution_state"]["max_steps_remaining"]
+        for step in steps
+    ]
+    near_limit = [
+        step["trigger_features"]["execution_state"]["max_steps_near_limit"]
+        for step in steps
+    ]
+    assert remaining == [4, 3, 2, 1, 0]
+    assert near_limit == [False, False, False, True, True]
+
+
 def test_enrich_monitor_features_computes_action_sample_entropy() -> None:
     steps = [
         {
