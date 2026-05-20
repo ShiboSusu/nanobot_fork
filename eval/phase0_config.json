@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "workspace": "~/.nanobot/workspace",
-      "model": "qwen3-vl-8b",
+      "model": "qwen3.5-9b",
       "provider": "custom",
       "maxTokens": 1024,
       "temperature": 0,
@@ -28,7 +28,7 @@
     }
   },
   "gui": {
-    "model": "qwen3-vl-8b",
+    "model": "qwen3.5-9b",
     "provider": "custom",
     "backend": "adb",
     "maxSteps": 15,
