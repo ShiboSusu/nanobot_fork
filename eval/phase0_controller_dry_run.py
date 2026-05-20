@@ -211,6 +211,7 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
     verifier_decision = verifier.get("decision") or verifier.get("verifier_decision")
     verifier_error = verifier.get("error") or verifier.get("verifier_error")
     verifier_safety_risk = verifier.get("safety_risk")
+    verifier_requires_image_context = verifier.get("requires_image_context")
     step_predicted_risk = risk.get("step_predicted_risk_level")
     rule_based_risk = risk.get("rule_based_step_risk_level")
     trigger = monitor_trigger(trigger_features)
@@ -259,6 +260,9 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
     elif normalized_verifier_decision == "ask_user":
         route = "ASK_USER"
         reason = "verifier decision is ask_user"
+    elif normalized_verifier_decision == "recover" and verifier_requires_image_context is True:
+        route = "SLOW"
+        reason = "verifier recover requires image context before executable recovery"
     elif normalized_verifier_decision == "recover":
         route = "RECOVER"
         reason = "verifier decision is recover"
@@ -310,6 +314,7 @@ def _route_step(record: dict[str, Any], step: dict[str, Any], *, apply_observati
         "monitor_trigger": trigger,
         "verifier_decision": verifier_decision,
         "verifier_safety_risk": verifier_safety_risk,
+        "verifier_requires_image_context": verifier_requires_image_context,
         "normalized_verifier_decision": normalized_verifier_decision,
         "verifier_error": verifier_error,
         "runner_safety_gate": runner_safety_gate,

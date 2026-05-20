@@ -203,3 +203,13 @@ Task 8AJ replayed the full current three-record U0 slice with rationale-preservi
 | 20 | 30 | `CheckPuchasedItem` | `block` | true | `SLOW` |
 
 All three records are now auditable, but none is a safe live recovery candidate yet. The Chrome and purchased-item records require image context; the expense record lacks grounded evidence for the missing answer. The next gate remains a read-only failure with visible/current-state evidence for a stateful recovery action.
+
+## 8AO Image-Context Recovery Guard
+
+Task 8AO added an offline controller dry-run guard for visually ungrounded recovery suggestions:
+
+- `verifier.decision == "recover"` still does not imply an executable recovery candidate.
+- If `verifier.requires_image_context == true`, the dry-run route remains `SLOW`.
+- The controller inputs preserve `verifier_requires_image_context` so future audits can distinguish a grounded recovery from a recovery that still needs visual/current-state evidence.
+
+This keeps the live-intervention gate aligned with the Phase 0 rule: S2 may provide offline rationale, but it cannot drive phone actions until the recovery is grounded in the current GUI state and human-audited.

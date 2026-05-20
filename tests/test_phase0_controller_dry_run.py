@@ -303,3 +303,17 @@ def test_s2_offline_scoped_summary_normalizes_u0_missing_answer_block(tmp_path, 
     assert summary["route_distribution"] == {"SLOW": 3}
     assert summary["verifier_decision_distribution"] == {"block": 1, "replan": 2}
     assert outputs[2]["controller"]["inputs"]["normalized_verifier_decision"] == "replan"
+
+
+def test_recover_requiring_image_context_stays_non_executable() -> None:
+    record = verifier_record("visual_recover", "recover")
+    step = record["steps"][0]
+    step["verifier"]["safety_risk"] = "U0"
+    step["verifier"]["requires_image_context"] = True
+
+    route, reason, inputs = dry_run.route_step(record, step)
+
+    assert route == "SLOW"
+    assert "image context" in reason
+    assert inputs["verifier_decision"] == "recover"
+    assert inputs["verifier_requires_image_context"] is True
