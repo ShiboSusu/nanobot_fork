@@ -317,3 +317,16 @@ def test_recover_requiring_image_context_stays_non_executable() -> None:
     assert "image context" in reason
     assert inputs["verifier_decision"] == "recover"
     assert inputs["verifier_requires_image_context"] is True
+
+
+def test_summary_reports_image_context_recovery_guard(tmp_path, monkeypatch, capsys) -> None:
+    input_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    record = verifier_record("visual_recover", "recover")
+    record["steps"][0]["verifier"]["safety_risk"] = "U0"
+    record["steps"][0]["verifier"]["requires_image_context"] = True
+    input_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    _outputs, summary, _stdout = run_main(tmp_path, monkeypatch, capsys, input_path)
+
+    assert summary["route_distribution"] == {"SLOW": 1}
+    assert summary["image_context_recovery_guard_count"] == 1

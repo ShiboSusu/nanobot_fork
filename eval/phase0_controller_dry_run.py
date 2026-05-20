@@ -373,6 +373,16 @@ def print_summary(
     input_filters: dict[str, int | None],
 ) -> None:
     routes = Counter(output.get("controller", {}).get("route") for output in outputs)
+    image_context_recovery_guard_count = 0
+    for output in outputs:
+        controller = output.get("controller") if isinstance(output.get("controller"), dict) else {}
+        inputs = controller.get("inputs") if isinstance(controller.get("inputs"), dict) else {}
+        if (
+            controller.get("route") == "SLOW"
+            and inputs.get("verifier_decision") == "recover"
+            and inputs.get("verifier_requires_image_context") is True
+        ):
+            image_context_recovery_guard_count += 1
     verifier_decisions: Counter[str] = Counter()
     verifier_error_count = 0
     for record in source_records:
@@ -390,6 +400,7 @@ def print_summary(
         "route_distribution": dict(sorted(routes.items())),
         "skipped_unsafe_count": routes.get("SKIP_UNSAFE", 0),
         "unusable_trace_count": routes.get("UNUSABLE_TRACE", 0),
+        "image_context_recovery_guard_count": image_context_recovery_guard_count,
         "verifier_decision_distribution": dict(sorted(verifier_decisions.items())),
         "verifier_error_count": verifier_error_count,
         "input_line_range": input_line_range,

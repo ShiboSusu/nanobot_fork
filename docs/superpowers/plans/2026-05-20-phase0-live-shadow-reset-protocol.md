@@ -213,3 +213,11 @@ Task 8AO added an offline controller dry-run guard for visually ungrounded recov
 - The controller inputs preserve `verifier_requires_image_context` so future audits can distinguish a grounded recovery from a recovery that still needs visual/current-state evidence.
 
 This keeps the live-intervention gate aligned with the Phase 0 rule: S2 may provide offline rationale, but it cannot drive phone actions until the recovery is grounded in the current GUI state and human-audited.
+
+## 8AP Image-Context Guard Summary
+
+Task 8AP made the 8AO guard visible in controller dry-run summaries:
+
+- `image_context_recovery_guard_count` counts steps where S2 returned `recover`, but the controller kept the route at `SLOW` because `requires_image_context == true`.
+- This avoids collapsing guarded visual recoveries into ordinary `SLOW` routes during offline audits.
+- A nonzero count means the next action is still evidence collection or image-grounded audit, not live recovery execution.
