@@ -2098,21 +2098,28 @@ class GuiAgent:
         prompt. Only the current screenshot is attached — no history screenshots
         or raw tool-call parameters are replayed into the context.
         """
+        task_for_prompt, runtime_signal_requirement = self._split_runtime_signal_requirement(task)
+        system_content = build_system_prompt(
+            platform=self.backend.platform,
+            coordinate_mode=self._coordinate_mode(),
+            tool_definition=profile_tool_definition(self.agent_profile),
+            memory_context=memory_context,
+            skill_context=skill_context,
+            installed_apps=self._installed_apps,
+            agent_profile=self.agent_profile,
+        )
+        if runtime_signal_requirement:
+            system_content = (
+                f"{system_content}\n\n# Runtime Signal\n\n"
+                f"{runtime_signal_requirement}"
+            )
         messages: list[dict[str, Any]] = [{
             "role": "system",
-            "content": build_system_prompt(
-                platform=self.backend.platform,
-                coordinate_mode=self._coordinate_mode(),
-                tool_definition=profile_tool_definition(self.agent_profile),
-                memory_context=memory_context,
-                skill_context=skill_context,
-                installed_apps=self._installed_apps,
-                agent_profile=self.agent_profile,
-            ),
+            "content": system_content,
         }]
 
         prompt_text = self._build_instruction_prompt(
-            task=task,
+            task=task_for_prompt,
             current_observation=current_observation,
             history=history,
             app_hint=app_hint,
@@ -2121,7 +2128,7 @@ class GuiAgent:
         messages.append(
             self._current_user_message(
                 current_observation,
-                task=task,
+                task=task_for_prompt,
                 step_index=len(history),
                 app_hint=app_hint,
                 prompt_text=prompt_text,
@@ -2129,6 +2136,14 @@ class GuiAgent:
         )
 
         return messages
+
+    @staticmethod
+    def _split_runtime_signal_requirement(task: str) -> tuple[str, str | None]:
+        marker = "\n\nRuntime signal output requirement:\n"
+        if marker not in task:
+            return task, None
+        task_text, requirement = task.split(marker, 1)
+        return task_text.strip(), requirement.strip() or None
 
     def _build_instruction_prompt(
         self,

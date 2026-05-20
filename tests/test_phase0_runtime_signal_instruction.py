@@ -13,6 +13,7 @@ def test_runtime_signal_instruction_preserves_task_as_primary_instruction() -> N
 
     instruction = instruction_for_run(task, runtime_signal_enabled=True)
 
-    assert instruction.startswith("Task:\nOpen Huawei Weather")
-    assert "Before the <tool_call> block" in instruction
-    assert instruction.index("Task:\nOpen Huawei Weather") < instruction.index("Before the <tool_call> block")
+    assert instruction.startswith("Open Huawei Weather")
+    assert "Every response is invalid unless it contains exactly one" in instruction
+    assert instruction.index("Open Huawei Weather") < instruction.index("Every response is invalid")
+    assert "Instruction: Task:" not in f"Instruction: {instruction}"

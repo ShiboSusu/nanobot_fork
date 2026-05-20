@@ -258,6 +258,45 @@ def test_instruction_prompt_labels_known_foreground_package(tmp_path: Path) -> N
     assert "Foreground app hint: 华为浏览器/Huawei Browser (com.huawei.browser)" in prompt
 
 
+def test_runtime_signal_requirement_is_lifted_out_of_user_task(tmp_path: Path) -> None:
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "open Taobao"),
+        agent_profile="qwen3vl",
+        include_date_context=False,
+    )
+    observation = Observation(
+        screenshot_path=None,
+        screen_width=1080,
+        screen_height=2340,
+        foreground_app="com.huawei.android.launcher",
+        platform="android",
+    )
+
+    messages = agent._build_messages(
+        task=(
+            "Open Taobao app.\n\n"
+            "Runtime signal output requirement:\n"
+            "Before the <tool_call> block, output exactly one <runtime_signal> block."
+        ),
+        current_observation=observation,
+        history=[],
+        app_hint=None,
+    )
+
+    system_text = messages[0]["content"]
+    user_text = "\n".join(
+        block["text"]
+        for block in messages[1]["content"]
+        if block.get("type") == "text"
+    )
+    assert "# Runtime Signal" in system_text
+    assert "Before the <tool_call> block" in system_text
+    assert "Instruction: Open Taobao app." in user_text
+    assert "Runtime signal output requirement" not in user_text
+
+
 def test_parse_swipe_maps_start_and_end_coordinate_aliases() -> None:
     action = parse_action({
         "action_type": "swipe",

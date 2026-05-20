@@ -82,13 +82,15 @@ TASK4A_LOCAL_SIDE_EFFECT_TERMS = (
     "飞行模式",
 )
 RUNTIME_SIGNAL_INSTRUCTION = (
-    "Before the <tool_call> block, output exactly one <runtime_signal>...</runtime_signal> "
-    "block as compact JSON. The JSON schema is: "
+    "This is an additional response-format requirement, not the user task. "
+    "Every response is invalid unless it contains exactly one "
+    "<runtime_signal>...</runtime_signal> block before the <tool_call> block. "
+    "The runtime_signal block must be compact JSON with schema: "
     '{"confidence": number between 0 and 1, '
     '"step_predicted_risk_level": "U0" | "U1" | "U2", '
     '"need_slow_planner": boolean, '
     '"uncertainty_reason": string}. '
-    "Then output the normal <tool_call> block exactly as required by the qwen3vl action format. "
+    "After runtime_signal, output the normal <tool_call> block exactly as required by the qwen3vl action format. "
     "Do not put runtime_signal inside the tool_call arguments."
 )
 RUNTIME_SIGNAL_RE = re.compile(r"<runtime_signal>\s*(.*?)\s*</runtime_signal>", re.DOTALL)
@@ -284,7 +286,7 @@ def instruction_for_run(task: Phase0Task, runtime_signal_enabled: bool) -> str:
     instruction = task.execution_instruction
     if not runtime_signal_enabled:
         return instruction
-    return f"Task:\n{instruction}\n\n{RUNTIME_SIGNAL_INSTRUCTION}"
+    return f"{instruction}\n\nRuntime signal output requirement:\n{RUNTIME_SIGNAL_INSTRUCTION}"
 
 
 def ensure_task4b_safe(task: Phase0Task) -> None:
