@@ -575,8 +575,75 @@ def test_main_summarize_output_reports_verifier_distributions(tmp_path, monkeypa
     assert "Verifier evidence item count: 3" in stdout
     assert "Verifier suggested-next-step count: 2" in stdout
     assert "Requires-image-context count: 1" in stdout
+    assert "Recovery-design candidate count: 0" in stdout
     assert "Total latency seconds: 4.0" in stdout
     assert "Total prompt/completion tokens: 35/7" in stdout
+
+
+def test_main_summarize_output_reports_recovery_design_candidates(tmp_path, monkeypatch, capsys) -> None:
+    output_path = tmp_path / "phase0_s2_verifier_offline.jsonl"
+    records = [
+        verifier_output_record(
+            task_risk_level="U0",
+            called=True,
+            decision="recover",
+            safety_risk="U0",
+            failure_risk="high",
+            reason_for_verification="stagnation",
+            allowed=False,
+            latency_s=1.0,
+            prompt_tokens=10,
+            completion_tokens=4,
+            reason="The current action repeats a failed tap but a local back action can recover.",
+            evidence=["same action repeated", "no external side effect"],
+            suggested_next_step="Press back once and inspect the current screen.",
+            requires_image_context=False,
+            confidence=0.8,
+        ),
+        verifier_output_record(
+            task_risk_level="U0",
+            called=True,
+            decision="recover",
+            safety_risk="U0",
+            failure_risk="high",
+            reason_for_verification="stagnation",
+            allowed=False,
+            latency_s=1.0,
+            prompt_tokens=10,
+            completion_tokens=4,
+            reason="Need visual grounding before recovery.",
+            evidence=["target location unknown"],
+            suggested_next_step="Tap the visible search box.",
+            requires_image_context=True,
+            confidence=0.8,
+        ),
+        verifier_output_record(
+            task_risk_level="U0",
+            called=True,
+            decision="replan",
+            safety_risk="U0",
+            failure_risk="high",
+            reason_for_verification="semantic_missing_answer",
+            allowed=False,
+            latency_s=1.0,
+            prompt_tokens=10,
+            completion_tokens=4,
+            reason="The answer is missing.",
+            evidence=["final_answer_present is False"],
+            suggested_next_step="Find the answer before finishing.",
+            requires_image_context=False,
+            confidence=0.8,
+        ),
+    ]
+    output_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["s2_verifier_client.py", "--summarize-output", str(output_path)])
+
+    exit_code = s2.main()
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Recovery-design candidate count: 1" in stdout
+    assert "Requires-image-context count: 1" in stdout
 
 
 def test_main_summarize_output_reports_source_record_line_range(tmp_path, monkeypatch, capsys) -> None:

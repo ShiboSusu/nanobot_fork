@@ -695,6 +695,22 @@ def first_verifier_block(record: dict[str, Any]) -> dict[str, Any]:
     return verifier
 
 
+def is_recovery_design_candidate(verifier: dict[str, Any]) -> bool:
+    if verifier.get("error"):
+        return False
+    if verifier.get("decision") != "recover":
+        return False
+    if verifier.get("safety_risk") != "U0":
+        return False
+    if verifier.get("requires_image_context") is True:
+        return False
+    if not (isinstance(verifier.get("reason"), str) and verifier["reason"].strip()):
+        return False
+    if not (isinstance(verifier.get("suggested_next_step"), str) and verifier["suggested_next_step"].strip()):
+        return False
+    return True
+
+
 def count_string(counter: Counter[str], value: Any) -> None:
     if isinstance(value, str):
         counter[value] += 1
@@ -728,6 +744,7 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     evidence_item_count = 0
     suggested_next_step_count = 0
     requires_image_context_count = 0
+    recovery_design_candidate_count = 0
     total_latency_s = 0.0
     total_prompt_tokens = 0
     total_completion_tokens = 0
@@ -759,6 +776,8 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
             suggested_next_step_count += 1
         if verifier.get("requires_image_context") is True:
             requires_image_context_count += 1
+        if is_recovery_design_candidate(verifier):
+            recovery_design_candidate_count += 1
         latency_s = verifier.get("latency_s")
         if isinstance(latency_s, (int, float)) and not isinstance(latency_s, bool):
             total_latency_s += float(latency_s)
@@ -791,6 +810,7 @@ def summarize_offline_output(path: Path, *, since_line: int | None = None, last:
     print(f"Verifier evidence item count: {evidence_item_count}")
     print(f"Verifier suggested-next-step count: {suggested_next_step_count}")
     print(f"Requires-image-context count: {requires_image_context_count}")
+    print(f"Recovery-design candidate count: {recovery_design_candidate_count}")
     print(f"Total latency seconds: {round(total_latency_s, 3)}")
     print(f"Total prompt/completion tokens: {total_prompt_tokens}/{total_completion_tokens}")
     return 0

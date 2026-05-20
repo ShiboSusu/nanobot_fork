@@ -30,6 +30,7 @@ verifier_rationale_count: 3
 verifier_evidence_item_count: 14
 verifier_suggested_next_step_count: 3
 requires_image_context_count: 2
+recovery_design_candidate_count: 0
 ```
 
 Scoped controller dry-run summary:
@@ -120,3 +121,24 @@ Requires-image-context count: 2
 ```
 
 This makes the audit gate visible from the CLI summary instead of requiring manual JSONL inspection.
+
+## 8AL Recovery Candidate Summary Outcome
+
+Task 8AL added a conservative `Recovery-design candidate count` to the S2 offline summary.
+
+A record counts as a recovery-design candidate only when all of these hold:
+
+- verifier decision is `recover`,
+- safety risk is `U0`,
+- verifier has no error,
+- verifier rationale is present,
+- verifier suggested next step is present,
+- verifier does not require image context.
+
+For the latest rationale-preserving three-record slice:
+
+```text
+Recovery-design candidate count: 0
+```
+
+This matches the human audit conclusion: the current slice is auditable, but it does not yet contain a safe stateful recovery-design candidate.
