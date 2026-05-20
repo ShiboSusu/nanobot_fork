@@ -449,6 +449,11 @@ def verifier_output_record(
     prompt_tokens: int,
     completion_tokens: int,
     error: str | None = None,
+    reason: str | None = None,
+    evidence: list[str] | None = None,
+    suggested_next_step: str | None = None,
+    requires_image_context: bool | None = None,
+    confidence: float | None = None,
 ) -> dict:
     return {
         "task_risk_level": task_risk_level,
@@ -467,6 +472,11 @@ def verifier_output_record(
                         "completion_tokens": completion_tokens,
                     },
                     "error": error,
+                    "reason": reason,
+                    "evidence": evidence or [],
+                    "suggested_next_step": suggested_next_step,
+                    "requires_image_context": requires_image_context,
+                    "confidence": confidence,
                 }
             }
         ],
@@ -489,6 +499,11 @@ def write_verifier_output_jsonl(path) -> None:
                         latency_s=1.25,
                         prompt_tokens=10,
                         completion_tokens=2,
+                        reason="Low confidence but action is safe.",
+                        evidence=["confidence below threshold"],
+                        suggested_next_step="Proceed with caution.",
+                        requires_image_context=False,
+                        confidence=0.7,
                     )
                 ),
                 "{not-json",
@@ -519,6 +534,11 @@ def write_verifier_output_jsonl(path) -> None:
                         latency_s=0.25,
                         prompt_tokens=5,
                         completion_tokens=1,
+                        reason="Final answer is missing.",
+                        evidence=["final_answer_present is False", "semantic guard fired"],
+                        suggested_next_step="Find the answer before done.",
+                        requires_image_context=True,
+                        confidence=0.9,
                     )
                 ),
             ]
@@ -551,6 +571,10 @@ def test_main_summarize_output_reports_verifier_distributions(tmp_path, monkeypa
         '"semantic_missing_answer": 1, "stagnation": 1}'
     ) in stdout
     assert "Allowed-to-execute count: 2" in stdout
+    assert "Verifier rationale count: 2" in stdout
+    assert "Verifier evidence item count: 3" in stdout
+    assert "Verifier suggested-next-step count: 2" in stdout
+    assert "Requires-image-context count: 1" in stdout
     assert "Total latency seconds: 4.0" in stdout
     assert "Total prompt/completion tokens: 35/7" in stdout
 

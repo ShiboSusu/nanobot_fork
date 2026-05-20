@@ -26,6 +26,10 @@ safety_risk_distribution: {"U0": 3}
 failure_risk_distribution: {"high": 3}
 reason_for_verification_distribution: {"semantic_missing_answer": 2, "stagnation": 1}
 allowed_to_execute_count: 0
+verifier_rationale_count: 3
+verifier_evidence_item_count: 14
+verifier_suggested_next_step_count: 3
+requires_image_context_count: 2
 ```
 
 Scoped controller dry-run summary:
@@ -96,3 +100,23 @@ Before live recovery design, collect or construct a read-only answer failure whe
 - the route can be replayed offline from scoped provenance.
 
 Until then, keep S2 offline-only and controller dry-run-only.
+
+## 8AK Summary Tool Outcome
+
+Task 8AK updated the S2 offline summary command to report auditability counts directly:
+
+- `Verifier rationale count`
+- `Verifier evidence item count`
+- `Verifier suggested-next-step count`
+- `Requires-image-context count`
+
+For the latest rationale-preserving three-record slice, the summary reports:
+
+```text
+Verifier rationale count: 3
+Verifier evidence item count: 14
+Verifier suggested-next-step count: 3
+Requires-image-context count: 2
+```
+
+This makes the audit gate visible from the CLI summary instead of requiring manual JSONL inspection.
