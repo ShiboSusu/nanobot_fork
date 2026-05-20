@@ -100,6 +100,10 @@ ANSWER_REQUIRED_PATTERNS = (
     re.compile(r"不要返回任何其他文本"),
     re.compile(r"只返回"),
 )
+INTEGER_ANSWER_PATTERNS = (
+    re.compile(r"\binteger\b", re.IGNORECASE),
+    re.compile(r"整数"),
+)
 FINAL_ANSWER_FIELDS = (
     "answer",
     "final_answer",
@@ -830,6 +834,11 @@ def task_requires_final_answer(task: Phase0Task) -> bool:
     return any(pattern.search(text) for pattern in ANSWER_REQUIRED_PATTERNS)
 
 
+def task_requires_integer_answer(task: Phase0Task) -> bool:
+    text = f"{task.instruction}\n{task.instruction_ch}"
+    return any(pattern.search(text) for pattern in INTEGER_ANSWER_PATTERNS)
+
+
 def final_done_action(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
     for step in reversed(steps):
         if not isinstance(step, dict):
@@ -858,6 +867,8 @@ def infer_semantic_outcome(task: Phase0Task, steps: list[dict[str, Any]]) -> dic
     answer_required = task_requires_final_answer(task)
     answer = extract_final_answer(final_done_action(steps))
     answer_present = answer is not None
+    if answer_present and task_requires_integer_answer(task):
+        answer_present = bool(re.fullmatch(r"[+-]?\d+", answer or ""))
 
     if answer_required and not answer_present:
         return {

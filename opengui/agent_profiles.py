@@ -580,7 +580,11 @@ def _normalize_qwen3vl_action(action_json: dict[str, Any]) -> dict[str, Any]:
     if action_type == "terminate":
         return {"action_type": "done", "status": _normalize_done_status(action_json.get("status"))}
     if action_type == "answer":
-        return {"action_type": "done", "status": "success"}
+        payload = {"action_type": "done", "status": "success"}
+        text = action_json.get("text")
+        if text is not None:
+            payload["text"] = str(text)
+        return payload
     if action_type == "ask_user":
         return _request_intervention_payload(str(action_json.get("text", "")).strip() or "Agent requested user input.")
     if action_type == "open":

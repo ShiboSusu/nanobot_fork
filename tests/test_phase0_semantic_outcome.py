@@ -42,6 +42,30 @@ def test_answer_required_task_done_with_answer_remains_unjudged() -> None:
     assert outcome["semantic_success_reason"] == "final_answer_present_but_unjudged"
 
 
+def test_integer_answer_task_done_with_non_integer_text_is_semantic_failure() -> None:
+    task = Phase0Task(
+        task_id="RecentTotalExpenseTask",
+        instruction="ONLY give an integer number.",
+        instruction_ch="",
+        risk_level="U0",
+    )
+    steps = [{
+        "action": {
+            "action_type": "done",
+            "status": "success",
+            "text": "Format error: Expected a `<tool_call>` block in the response.",
+        }
+    }]
+
+    outcome = infer_semantic_outcome(task, steps)
+
+    assert outcome["answer_required"] is True
+    assert outcome["final_answer_present"] is False
+    assert outcome["semantic_task_success"] is False
+    assert outcome["semantic_success_source"] == "answer_presence_guard"
+    assert outcome["semantic_success_reason"] == "missing_required_final_answer"
+
+
 def test_non_answer_task_has_no_semantic_label_without_judge() -> None:
     task = Phase0Task(
         task_id="AdjustBrightnessMaximumTask",
