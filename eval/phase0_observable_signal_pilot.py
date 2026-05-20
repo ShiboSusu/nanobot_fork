@@ -284,7 +284,7 @@ def instruction_for_run(task: Phase0Task, runtime_signal_enabled: bool) -> str:
     instruction = task.execution_instruction
     if not runtime_signal_enabled:
         return instruction
-    return f"{RUNTIME_SIGNAL_INSTRUCTION}\n\nTask:\n{instruction}"
+    return f"Task:\n{instruction}\n\n{RUNTIME_SIGNAL_INSTRUCTION}"
 
 
 def ensure_task4b_safe(task: Phase0Task) -> None:
