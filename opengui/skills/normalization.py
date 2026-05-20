@@ -280,6 +280,16 @@ def annotate_android_apps(packages: list[str]) -> list[str]:
     return result
 
 
+def describe_android_package(package: str | None) -> str | None:
+    """Return a prompt-friendly label for a known Android package."""
+    if not package:
+        return None
+    display = _ANDROID_PACKAGE_DISPLAY_NAMES.get(package)
+    if display:
+        return f"{display} ({package})"
+    return package
+
+
 def resolve_android_package(app_text: str) -> str:
     """Resolve a human-readable app name to its Android package name.
 

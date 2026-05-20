@@ -45,7 +45,10 @@ class Observation:
         coordinate_instruction: str = "Prefer absolute pixel coordinates.",
     ) -> str:
         """Render a structured text block for inclusion in an LLM message."""
-        app_name = app_hint or self.foreground_app or "unknown"
+        app_name = app_hint or _describe_foreground_app(
+            self.platform,
+            self.foreground_app,
+        ) or "unknown"
         use_relative_coordinates = _uses_relative_coordinates(coordinate_instruction)
         lines: list[str] = [
             f"Step {step_index + 1}",
@@ -84,6 +87,14 @@ class Observation:
 def _uses_relative_coordinates(coordinate_instruction: str) -> bool:
     normalized = coordinate_instruction.lower()
     return "relative" in normalized and ("[0, 999]" in normalized or "0-999" in normalized)
+
+
+def _describe_foreground_app(platform: str, foreground_app: str | None) -> str | None:
+    if platform.lower() == "android":
+        from opengui.skills.normalization import describe_android_package
+
+        return describe_android_package(foreground_app)
+    return foreground_app
 
 
 def _extra_with_relative_ui_bounds(extra: dict[str, typing.Any]) -> dict[str, typing.Any]:

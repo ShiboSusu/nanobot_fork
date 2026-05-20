@@ -43,7 +43,7 @@ from opengui.interfaces import (
 )
 from opengui.observation import Observation
 from opengui.prompts.system import build_system_prompt
-from opengui.skills.normalization import normalize_app_identifier
+from opengui.skills.normalization import describe_android_package, normalize_app_identifier
 from opengui.trajectory.recorder import ExecutionPhase, TrajectoryRecorder
 from opengui.trajectory.summarizer import build_state_note, is_state_note
 
@@ -2156,7 +2156,7 @@ class GuiAgent:
         lines.append(f"Instruction: {task}")
         lines.append(f"Platform: {self.backend.platform}")
 
-        app_name = app_hint or current_observation.foreground_app
+        app_name = app_hint or self._describe_app_for_prompt(current_observation)
         if app_name:
             lines.append(f"Foreground app hint: {app_name}")
 
@@ -2263,6 +2263,12 @@ class GuiAgent:
         if observation.platform:
             return observation.platform
         return "Current screen state unavailable."
+
+    @staticmethod
+    def _describe_app_for_prompt(observation: Observation) -> str | None:
+        if observation.platform.lower() == "android":
+            return describe_android_package(observation.foreground_app)
+        return observation.foreground_app
 
     @staticmethod
     def _remaining_hint(*, status: str, error: str | None) -> str:

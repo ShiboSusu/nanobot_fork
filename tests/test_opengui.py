@@ -216,6 +216,48 @@ def test_relative_observation_prompt_normalizes_ui_tree_bounds_without_screen_re
     assert "[258,723][390,768]" not in text
 
 
+def test_android_observation_prompt_labels_known_foreground_package() -> None:
+    observation = Observation(
+        screenshot_path=None,
+        screen_width=1080,
+        screen_height=2340,
+        foreground_app="com.huawei.browser",
+        platform="android",
+    )
+
+    text = observation.to_user_text(
+        "open Huawei Browser",
+        step_index=0,
+        coordinate_instruction="Use relative coordinates in [0, 999] for both x and y, and set relative=true.",
+    )
+
+    assert "Foreground app: 华为浏览器/Huawei Browser (com.huawei.browser)" in text
+
+
+def test_instruction_prompt_labels_known_foreground_package(tmp_path: Path) -> None:
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "open Huawei Browser"),
+    )
+    observation = Observation(
+        screenshot_path=None,
+        screen_width=1080,
+        screen_height=2340,
+        foreground_app="com.huawei.browser",
+        platform="android",
+    )
+
+    prompt = agent._build_instruction_prompt(
+        task="Open the Huawei Browser app.",
+        current_observation=observation,
+        history=[],
+        app_hint=None,
+    )
+
+    assert "Foreground app hint: 华为浏览器/Huawei Browser (com.huawei.browser)" in prompt
+
+
 def test_parse_swipe_maps_start_and_end_coordinate_aliases() -> None:
     action = parse_action({
         "action_type": "swipe",
