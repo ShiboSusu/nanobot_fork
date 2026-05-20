@@ -643,6 +643,7 @@ def test_main_summarize_output_reports_recovery_design_candidates(tmp_path, monk
     stdout = capsys.readouterr().out
     assert exit_code == 0
     assert "Recovery-design candidate count: 1" in stdout
+    assert 'Recovery-design blocker distribution: {"non_recover_decision": 1, "requires_image_context": 1}' in stdout
     assert "Requires-image-context count: 1" in stdout
 
 

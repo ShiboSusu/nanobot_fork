@@ -31,6 +31,7 @@ verifier_evidence_item_count: 14
 verifier_suggested_next_step_count: 3
 requires_image_context_count: 2
 recovery_design_candidate_count: 0
+recovery_design_blocker_distribution: {"non_recover_decision": 3, "requires_image_context": 2}
 ```
 
 Scoped controller dry-run summary:
@@ -139,6 +140,18 @@ For the latest rationale-preserving three-record slice:
 
 ```text
 Recovery-design candidate count: 0
+Recovery-design blocker distribution: {"non_recover_decision": 3, "requires_image_context": 2}
 ```
 
 This matches the human audit conclusion: the current slice is auditable, but it does not yet contain a safe stateful recovery-design candidate.
+
+## 8AM Recovery Blocker Summary Outcome
+
+Task 8AM added `Recovery-design blocker distribution` to the S2 offline summary.
+
+For the latest three-record slice, the blockers are:
+
+- `non_recover_decision: 3` because S2 returned `block` or `replan`, not `recover`.
+- `requires_image_context: 2` because two suggestions need visual grounding before any recovery action could be considered.
+
+This makes the negative gate actionable: the next useful sample should either produce a true `recover` decision, or include enough image/current-state context to remove the visual-grounding blocker.
