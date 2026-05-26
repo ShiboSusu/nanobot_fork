@@ -41,6 +41,12 @@ from opengui.interfaces import (
     ProgressCallback,
     ToolCall,
 )
+from opengui.autonomy import (
+    AutonomyDecision,
+    AutonomyDecisionType,
+    AutonomyMonitor,
+    AutonomySignal,
+)
 from opengui.observation import Observation
 from opengui.policy import PolicyAction, PolicyStore
 from opengui.prompts.system import build_system_prompt
@@ -912,6 +918,7 @@ class GuiAgent:
         agent_profile: str | None = None,
         image_scale_ratio: float = 0.5,
         stagnation_limit: int = 0,
+        autonomy_monitor: AutonomyMonitor | None = None,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -941,6 +948,7 @@ class GuiAgent:
         self._policy_store = policy_store or PolicyStore()
         self._active_retry_summaries: tuple[str, ...] = ()
         self._image_scale_ratio = image_scale_ratio
+        self._autonomy_monitor = autonomy_monitor or AutonomyMonitor()
         try:
             parsed_stagnation_limit = int(stagnation_limit)
         except (TypeError, ValueError):
@@ -1227,7 +1235,9 @@ class GuiAgent:
         history: list[HistoryTurn] = []
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
+        previous_action_signature: tuple[Any, ...] | None = None
         stagnation_streak = 0
+        self._autonomy_monitor.reset()
         if self.stagnation_limit > 0:
             previous_fingerprint = self._build_screen_fingerprint(obs)
 
@@ -1424,6 +1434,21 @@ class GuiAgent:
                     summary_observation = result.next_observation or obs
 
             trace_observation = result.next_observation or obs
+            autonomy_decision: AutonomyDecision | None = None
+            if (
+                not intervention_cancelled
+                and not result.done
+                and not result.intervention_requested
+            ):
+                autonomy_decision = self._evaluate_autonomy_monitor(
+                    task=task,
+                    step_index=step_index,
+                    max_steps=self.max_steps,
+                    result=result,
+                    current_observation=obs,
+                    previous_action_signature=previous_action_signature,
+                )
+                result = self._attach_autonomy_decision(result, autonomy_decision)
 
             # Write trace entry
             await self._write_trace(
@@ -1511,6 +1536,44 @@ class GuiAgent:
                             history=summary_history,
                             current_observation=summary_observation,
                             error="intervention_cancelled",
+                        ),
+                        model_summary=result.state_summary or result.action_summary,
+                        action_summaries=tuple(
+                            list(turn.action_summary for turn in history) + [result.action_summary]
+                        ),
+                    ),
+                    token_usage=total_usage,
+                )
+
+            if (
+                autonomy_decision is not None
+                and self._is_autonomy_blocking_decision(autonomy_decision)
+            ):
+                history_with_current_step = history + [
+                    self._history_turn_from_result(step_index, obs, result)
+                ]
+                monitor_note = f"Autonomy monitor: {autonomy_decision.reason}"
+                return AgentResult(
+                    success=False,
+                    summary=self._build_state_note(
+                        status="blocked",
+                        history=history_with_current_step,
+                        current_observation=result.next_observation or obs,
+                        current_action_summary=monitor_note,
+                        error="autonomy_monitor_intervention",
+                    ),
+                    model_summary=monitor_note,
+                    trace_path=str(run_dir),
+                    steps_taken=steps_taken,
+                    error="autonomy_monitor_intervention",
+                    attempt_summary=self._build_attempt_summary(
+                        failure_reason=monitor_note,
+                        result_summary=self._build_state_note(
+                            status="blocked",
+                            history=history_with_current_step,
+                            current_observation=result.next_observation or obs,
+                            current_action_summary=monitor_note,
+                            error="autonomy_monitor_intervention",
                         ),
                         model_summary=result.state_summary or result.action_summary,
                         action_summaries=tuple(
@@ -1657,36 +1720,11 @@ class GuiAgent:
                         token_usage=total_usage,
                     )
 
-            history.append(
-                HistoryTurn(
-                    step_index=step_index,
-                    observation=obs,
-                    assistant_message=self._scrub_assistant_message_for_log(
-                        result.assistant_message,
-                        result.action,
-                    ),
-                    tool_result_message={
-                        "role": "tool",
-                        "tool_call_id": result.tool_call_id,
-                        "content": self._scrub_text_for_action(result.tool_result, result.action),
-                    },
-                    action_summary=(
-                        self._scrub_text_for_action(result.action_summary, result.action)
-                        or result.action_summary
-                    ),
-                    action_intent=(
-                        self._scrub_text_for_action(result.action_intent, result.action)
-                        or result.action_intent
-                    ),
-                    state_summary=(
-                        self._scrub_text_for_action(result.state_summary, result.action)
-                        or result.state_summary
-                    ),
-                )
-            )
+            history.append(self._history_turn_from_result(step_index, obs, result))
 
             if result.next_observation is not None:
                 obs = result.next_observation
+            previous_action_signature = self._action_signature(result.action)
 
         termination_summary = await self._generate_termination_summary(
             task=task,
@@ -2158,6 +2196,151 @@ class GuiAgent:
             f"({categories}). {decision.reason}"
         ).strip()
         return Action(action_type="request_intervention", text=reason), reason
+
+    def _history_turn_from_result(
+        self,
+        step_index: int,
+        observation: Observation,
+        result: StepResult,
+    ) -> HistoryTurn:
+        return HistoryTurn(
+            step_index=step_index,
+            observation=observation,
+            assistant_message=self._scrub_assistant_message_for_log(
+                result.assistant_message,
+                result.action,
+            ),
+            tool_result_message={
+                "role": "tool",
+                "tool_call_id": result.tool_call_id,
+                "content": self._scrub_text_for_action(
+                    result.tool_result,
+                    result.action,
+                ),
+            },
+            action_summary=(
+                self._scrub_text_for_action(result.action_summary, result.action)
+                or result.action_summary
+            ),
+            action_intent=(
+                self._scrub_text_for_action(result.action_intent, result.action)
+                or result.action_intent
+            ),
+            state_summary=(
+                self._scrub_text_for_action(result.state_summary, result.action)
+                or result.state_summary
+            ),
+        )
+
+    def _evaluate_autonomy_monitor(
+        self,
+        *,
+        task: str,
+        step_index: int,
+        max_steps: int,
+        result: StepResult,
+        current_observation: Observation,
+        previous_action_signature: tuple[Any, ...] | None,
+    ) -> AutonomyDecision:
+        current_fingerprint = self._build_screen_fingerprint(current_observation)
+        next_fingerprint = (
+            self._build_screen_fingerprint(result.next_observation)
+            if result.next_observation is not None
+            else None
+        )
+        screen_unchanged = (
+            current_fingerprint is not None
+            and next_fingerprint is not None
+            and self._is_same_screen(current_fingerprint, next_fingerprint)
+        )
+        progress_observed = (
+            current_fingerprint is not None
+            and next_fingerprint is not None
+            and not screen_unchanged
+        )
+        action_signature = self._action_signature(result.action)
+        repeated_action = (
+            previous_action_signature is not None
+            and previous_action_signature == action_signature
+        )
+        tool_result = str(result.tool_result or "")
+        action_failed = tool_result.startswith("Action failed:")
+        observe_failed = result.next_observation is None
+
+        return self._autonomy_monitor.evaluate(
+            AutonomySignal(
+                task=task,
+                step_index=step_index,
+                max_steps=max_steps,
+                action=result.action,
+                action_failed=action_failed,
+                observe_failed=observe_failed,
+                screen_unchanged=screen_unchanged,
+                repeated_action=repeated_action,
+                progress_observed=progress_observed,
+                metadata={
+                    "current_app": current_observation.foreground_app,
+                    "next_app": (
+                        result.next_observation.foreground_app
+                        if result.next_observation is not None
+                        else None
+                    ),
+                    "action_signature": action_signature,
+                },
+            )
+        )
+
+    def _attach_autonomy_decision(
+        self,
+        result: StepResult,
+        decision: AutonomyDecision,
+    ) -> StepResult:
+        serialized = self._serialize_autonomy_decision(decision)
+        execution_snapshot = dict(result.execution_snapshot or {})
+        execution_snapshot["autonomy_monitor"] = serialized
+        model_snapshot = dict(result.model_snapshot or {})
+        model_snapshot["autonomy_monitor"] = serialized
+        return replace(
+            result,
+            execution_snapshot=execution_snapshot,
+            model_snapshot=model_snapshot,
+        )
+
+    @staticmethod
+    def _is_autonomy_blocking_decision(decision: AutonomyDecision) -> bool:
+        return decision.decision in {
+            AutonomyDecisionType.S2_HINT,
+            AutonomyDecisionType.S2_TAKEOVER,
+            AutonomyDecisionType.HUMAN_CONFIRM,
+            AutonomyDecisionType.HALT,
+        }
+
+    @staticmethod
+    def _serialize_autonomy_decision(decision: AutonomyDecision) -> dict[str, Any]:
+        return {
+            "decision": decision.decision.value,
+            "reason": decision.reason,
+            "risk_score": round(decision.risk_score, 4),
+            "cumulative_risk": round(decision.cumulative_risk, 4),
+            "signals": list(decision.signals),
+            "metadata": decision.metadata,
+        }
+
+    @staticmethod
+    def _action_signature(action: Action) -> tuple[Any, ...]:
+        return (
+            action.action_type,
+            action.x,
+            action.y,
+            action.x2,
+            action.y2,
+            action.text,
+            tuple(action.key or ()),
+            action.pixels,
+            action.duration_ms,
+            action.relative,
+            action.status,
+        )
 
     def _coordinate_mode(self) -> str:
         return coordinate_mode_for_profile(self.agent_profile, self.model)

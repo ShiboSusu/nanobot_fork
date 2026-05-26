@@ -51,6 +51,7 @@ class AutonomySignal:
     observe_failed: bool = False
     screen_unchanged: bool = False
     repeated_action: bool = False
+    progress_observed: bool = False
     policy_decision: PolicyDecision | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -162,7 +163,7 @@ class AutonomyMonitor:
             signals.append("observe_failed")
         if signal.screen_unchanged:
             signals.append("screen_unchanged")
-        if signal.repeated_action:
+        if signal.repeated_action and not signal.progress_observed:
             signals.append("repeated_action")
         if self._step_budget_pressure(signal.step_index, signal.max_steps):
             signals.append("step_budget_pressure")
