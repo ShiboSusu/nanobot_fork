@@ -1,0 +1,15 @@
+{
+  "generated_at": "2026-05-26 22:38:17",
+  "repo": "/Volumes/T9/Mac/Documents/GitHub/nanobot_fork",
+  "branch": "feat/codex-conversation-portability",
+  "commit": "4d4eaebf",
+  "codex_home": "/Volumes/T9/Mac/.codex",
+  "thread_id": "019e5f50-5c13-7240-83c0-7473dd0e9584",
+  "thread_cwd": "/Volumes/T9/Mac/Documents/Codex/2026-05-25/gui-ios-xcode-wda",
+  "thread_rollout_path": "/Volumes/T9/Mac/.codex/sessions/2026/05/25/rollout-2026-05-25T21-26-02-019e5f50-5c13-7240-83c0-7473dd0e9584.jsonl",
+  "thread_model_provider": "openai",
+  "thread_has_user_event": false,
+  "session_path": "/Volumes/T9/Mac/.codex/sessions/2026/05/25/rollout-2026-05-25T21-26-02-019e5f50-5c13-7240-83c0-7473dd0e9584.jsonl",
+  "session_has_user_event": true,
+  "note": "User plans to switch Codex account and needs to continue GUIClaw/iOS WDA work from repo handoff."
+}
