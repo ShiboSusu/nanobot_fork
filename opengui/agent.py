@@ -42,8 +42,9 @@ from opengui.interfaces import (
     ToolCall,
 )
 from opengui.observation import Observation
+from opengui.policy import PolicyAction, PolicyStore
 from opengui.prompts.system import build_system_prompt
-from opengui.skills.normalization import normalize_app_identifier
+from opengui.skills.normalization import normalize_app_identifier, resolve_ios_bundle
 from opengui.trajectory.recorder import ExecutionPhase, TrajectoryRecorder
 from opengui.trajectory.summarizer import build_state_note, is_state_note
 
@@ -906,6 +907,7 @@ class GuiAgent:
         installed_apps: list[str] | None = None,
         intervention_handler: InterventionHandler | None = None,
         policy_context: str | None = None,
+        policy_store: PolicyStore | None = None,
         memory_store: Any = None,
         agent_profile: str | None = None,
         image_scale_ratio: float = 0.5,
@@ -936,6 +938,7 @@ class GuiAgent:
         self._installed_apps = installed_apps
         self._intervention_handler = intervention_handler
         self._memory_store = memory_store
+        self._policy_store = policy_store or PolicyStore()
         self._active_retry_summaries: tuple[str, ...] = ()
         self._image_scale_ratio = image_scale_ratio
         try:
@@ -1213,6 +1216,13 @@ class GuiAgent:
             run_dir / "screenshots" / "step_000.png",
             timeout=self.step_timeout,
         )
+        direct_result = await self._try_direct_system_action(
+            task=task,
+            run_dir=run_dir,
+            current_observation=obs,
+        )
+        if direct_result is not None:
+            return direct_result
 
         history: list[HistoryTurn] = []
         previous_fingerprint: _ScreenFingerprint | None = None
@@ -1245,6 +1255,7 @@ class GuiAgent:
             try:
                 result = await asyncio.wait_for(
                     self._run_step(
+                        task=task,
                         messages=messages,
                         prompt_snapshot=prompt_snapshot,
                         step_index=step_index,
@@ -1708,12 +1719,142 @@ class GuiAgent:
             token_usage=total_usage,
         )
 
+    async def _try_direct_system_action(
+        self,
+        *,
+        task: str,
+        run_dir: Path,
+        current_observation: Observation,
+    ) -> AgentResult | None:
+        action = self._direct_system_action_for_task(task)
+        if action is None:
+            return None
+
+        start = time.monotonic()
+        try:
+            tool_result = await self.backend.execute(action, timeout=self.step_timeout)
+        except Exception as exc:
+            return AgentResult(
+                success=False,
+                summary=self._build_state_note(
+                    status="blocked",
+                    history=[],
+                    current_observation=current_observation,
+                    error=f"Direct system action failed: {exc}",
+                ),
+                model_summary=None,
+                trace_path=str(run_dir),
+                steps_taken=1,
+                error=f"direct_system_action_failed: {exc}",
+            )
+
+        settle_seconds = self._post_action_settle_seconds(action)
+        if settle_seconds > 0:
+            await asyncio.sleep(settle_seconds)
+        next_observation = await self.backend.observe(
+            run_dir / "screenshots" / "step_001.png",
+            timeout=self.step_timeout,
+        )
+        success = (
+            action.action_type == "open_app"
+            and action.text is not None
+            and next_observation.foreground_app == action.text
+        )
+        action_summary = f"Directly opened iOS app {action.text}."
+        model_snapshot = {
+            "raw_content": action_summary,
+            "tool_calls": [{
+                "id": "direct-system-action-0",
+                "name": "computer_use",
+                "arguments": self._serialize_action(action),
+            }],
+            "action_text": f"Action: {describe_action(action)}",
+            "parsed_action": self._serialize_action(action),
+            "action_summary": action_summary,
+            "action_intent": action_summary,
+            "state_summary": action_summary,
+        }
+        execution_snapshot = {
+            "tool_result": tool_result,
+            "next_observation": self._serialize_observation(next_observation),
+            "done": success,
+            "direct_system_action": True,
+        }
+
+        await self._write_trace(
+            run_dir / "trace.jsonl",
+            self._scrub_for_artifact({
+                "event": "step",
+                "step_index": 1,
+                "prompt": {
+                    "task": task,
+                    "step_index": 1,
+                    "direct_system_action": True,
+                    "current_observation": self._serialize_observation(current_observation),
+                },
+                "model_output": model_snapshot,
+                "execution": execution_snapshot,
+                "action": self._serialize_action(action),
+                "action_summary": action_summary,
+                "action_intent": action_summary,
+                "state_summary": action_summary,
+                "screenshot_path": next_observation.screenshot_path,
+                "done": success,
+                "timestamp": time.time(),
+            }),
+        )
+        self._trajectory_recorder.record_step(
+            action=self._scrub_for_artifact(self._serialize_action(action)),
+            model_output=action_summary,
+            screenshot_path=next_observation.screenshot_path,
+            foreground_app=next_observation.foreground_app,
+            screen_width=next_observation.screen_width,
+            screen_height=next_observation.screen_height,
+            platform=next_observation.platform,
+            duration_s=time.monotonic() - start,
+        )
+
+        return AgentResult(
+            success=success,
+            summary=self._build_state_note(
+                status="completed" if success else "blocked",
+                history=[],
+                current_observation=next_observation,
+                current_action_summary=action_summary,
+                error=None if success else "direct_system_action_unverified",
+            ),
+            model_summary=action_summary,
+            trace_path=str(run_dir),
+            steps_taken=1,
+            error=None if success else "direct_system_action_unverified",
+        )
+
+    def _direct_system_action_for_task(self, task: str) -> Action | None:
+        if self.backend.platform != "ios":
+            return None
+        normalized_task = " ".join((task or "").strip().lower().split())
+        if not normalized_task:
+            return None
+        wants_open = any(word in normalized_task for word in ("打开", "开启", "启动", "open", "launch"))
+        if not wants_open:
+            return None
+        target = None
+        if "设置" in normalized_task or "settings" in normalized_task:
+            target = "settings"
+        if target is None:
+            return None
+        bundle_id = resolve_ios_bundle(target)
+        if bundle_id == target:
+            return None
+        return Action(action_type="open_app", text=bundle_id)
+
     # ------------------------------------------------------------------
     # Single step
     # ------------------------------------------------------------------
 
     async def _run_step(
         self,
+        task: str,
         messages: list[dict[str, Any]],
         prompt_snapshot: dict[str, Any] | None,
         step_index: int,
@@ -1838,6 +1979,48 @@ class GuiAgent:
                 state_summary=state_summary,
             )
 
+            policy_intervention = self._policy_intervention_for_action(
+                task=task,
+                action=action,
+                current_observation=current_observation,
+                action_summary=action_summary,
+                state_summary=state_summary,
+            )
+            if policy_intervention is not None:
+                policy_action, policy_reason = policy_intervention
+                return StepResult(
+                    action=policy_action,
+                    tool_call_id=tool_call.id,
+                    tool_result="intervention_requested",
+                    assistant_message=assistant_message,
+                    action_summary=action_summary,
+                    action_intent=action_summary,
+                    state_summary=state_summary,
+                    prompt_snapshot=prompt_snapshot,
+                    model_snapshot={
+                        **(model_snapshot or {}),
+                        "policy_gate": {
+                            "intervention_requested": True,
+                            "reason": policy_reason,
+                            "original_action": self._serialize_action(action),
+                        },
+                    },
+                    execution_snapshot={
+                        "tool_result": "intervention_requested",
+                        "next_observation": None,
+                        "done": False,
+                        "policy_gate": {
+                            "intervention_requested": True,
+                            "reason": policy_reason,
+                        },
+                    },
+                    intervention_requested=True,
+                    step_usage=step_usage,
+                    duration_s=time.monotonic() - _step_start,
+                    chat_latency_s=step_chat_latency_s or None,
+                    ttft_s=step_ttft_s,
+                )
+
             # Handle terminal action (done)
             if action.action_type == "done":
                 done_status = self._resolve_done_status(action)
@@ -1946,6 +2129,35 @@ class GuiAgent:
             )
 
         raise RuntimeError("GUI model did not return a valid computer_use call after retries.")
+
+    def _policy_intervention_for_action(
+        self,
+        *,
+        task: str,
+        action: Action,
+        current_observation: Observation,
+        action_summary: str | None,
+        state_summary: str | None,
+    ) -> tuple[Action, str] | None:
+        if action.action_type in {"done", "wait", "request_intervention"}:
+            return None
+
+        decision = self._policy_store.match_action(
+            task=task,
+            action=action,
+            observation=current_observation,
+            action_summary=action_summary,
+            state_summary=state_summary,
+        )
+        if decision.action == PolicyAction.ALLOW:
+            return None
+
+        categories = ", ".join(decision.categories) or "sensitive_action"
+        reason = (
+            "Policy gate requires human confirmation before action "
+            f"({categories}). {decision.reason}"
+        ).strip()
+        return Action(action_type="request_intervention", text=reason), reason
 
     def _coordinate_mode(self) -> str:
         return coordinate_mode_for_profile(self.agent_profile, self.model)

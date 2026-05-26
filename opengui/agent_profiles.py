@@ -443,10 +443,16 @@ def _extract_action_json(content: str) -> dict[str, Any]:
 
 
 def _extract_tool_call_json(content: str) -> dict[str, Any]:
-    match = re.search(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL)
-    if not match:
+    matches = list(re.finditer(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL))
+    if not matches:
         raise ValueError("Expected a `<tool_call>` block in the response.")
-    return _load_json(match.group(1).strip())
+    last_error: ValueError | None = None
+    for match in matches:
+        try:
+            return _load_json(match.group(1).strip())
+        except ValueError as exc:
+            last_error = exc
+    raise last_error or ValueError("Expected a JSON object.")
 
 
 def _extract_mai_ui_tool_call(content: str) -> dict[str, Any]:

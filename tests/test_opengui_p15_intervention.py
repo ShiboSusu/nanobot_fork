@@ -13,6 +13,7 @@ from opengui.agent import GuiAgent, _COMPUTER_USE_TOOL
 from opengui.backends.dry_run import DryRunBackend
 from opengui.interfaces import LLMResponse, ToolCall
 from opengui.observation import Observation
+from opengui.policy import PolicyStore
 from opengui.prompts.system import build_system_prompt
 from opengui.trajectory.recorder import TrajectoryRecorder
 
@@ -281,6 +282,54 @@ async def test_resume_uses_fresh_observation_after_intervention(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_policy_gate_requests_intervention_before_sensitive_action(tmp_path: Path) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="Action: tap payment confirmation",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 500,
+                    "y": 640,
+                    "intent": "tap the 确认支付 button",
+                    "summary": "payment confirmation screen is visible",
+                },
+            )],
+        ),
+    ])
+    backend = _BackendDouble([
+        {"foreground_app": "Payment"},
+    ])
+    handler = SimpleNamespace(
+        request_intervention=AsyncMock(return_value=SimpleNamespace(
+            resume_confirmed=False,
+            note="human approval required",
+        ))
+    )
+
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "payment gate"),
+        intervention_handler=handler,
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        include_date_context=False,
+    )
+
+    result = await agent.run("检查订单状态", max_retries=1)
+
+    assert result.success is False
+    assert result.error == "intervention_cancelled: human approval required"
+    backend.execute.assert_not_awaited()
+    handler.request_intervention.assert_awaited_once()
+    request = handler.request_intervention.await_args.args[0]
+    assert request.reason.startswith("Policy gate requires human confirmation")
+
+
+@pytest.mark.asyncio
 @pytest.mark.scrub_sensitive_trace_fields
 async def test_trace_and_trajectory_scrub_sensitive_intervention_fields(tmp_path: Path) -> None:
     reason = "Need the user to enter OTP 123456 for the payroll login."
@@ -366,6 +415,7 @@ async def test_input_text_is_preserved_in_trace_artifacts(tmp_path: Path) -> Non
         artifacts_root=tmp_path / "runs",
         max_steps=2,
         include_date_context=False,
+        policy_store=PolicyStore(rules=()),
     )
 
     result = await agent.run("Enter the temporary code", max_retries=1)

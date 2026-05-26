@@ -94,6 +94,59 @@ class _SkillTestBackend:
         return []
 
 
+class _RecordingIosBackend:
+    platform = "ios"
+
+    def __init__(self) -> None:
+        self.executed_actions: list[Action] = []
+        self.foreground_app = "com.apple.springboard"
+
+    async def execute(self, action: Action, timeout: float = 5.0) -> str:
+        del timeout
+        self.executed_actions.append(action)
+        if action.action_type == "open_app" and action.text:
+            self.foreground_app = action.text
+        return f"executed:{action.action_type}:{action.text or ''}"
+
+    async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+        del timeout
+        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+        screenshot_path.write_bytes(b"png")
+        return Observation(
+            screenshot_path=str(screenshot_path),
+            screen_width=402,
+            screen_height=874,
+            foreground_app=self.foreground_app,
+            platform=self.platform,
+        )
+
+    async def preflight(self) -> None:
+        return None
+
+    async def list_apps(self) -> list[str]:
+        return ["com.apple.Preferences"]
+
+
+@pytest.mark.asyncio
+async def test_ios_settings_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-settings"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+    )
+
+    result = await agent.run("打开手机的设置应用", max_retries=1)
+
+    assert result.success is True
+    assert result.steps_taken == 1
+    assert backend.executed_actions == [
+        Action(action_type="open_app", text="com.apple.Preferences")
+    ]
+
+
 def test_parse_scroll_allows_center_default() -> None:
     action = parse_action({
         "action_type": "scroll",
@@ -884,6 +937,28 @@ def test_qwen3vl_profile_normalizes_content_only_response() -> None:
         "action_type": "tap",
         "x": 500,
         "y": 250,
+        "relative": True,
+    }
+
+
+def test_qwen3vl_profile_ignores_inline_tool_call_example() -> None:
+    response = LLMResponse(
+        content=(
+            "Thought: I should follow the `<tool_call>...</tool_call>` format.\n"
+            "Action: Tap the target.\n"
+            '<tool_call>{"name":"mobile_use","arguments":{"action":"click","coordinate":[499,514]}}</tool_call>'
+        ),
+        tool_calls=None,
+    )
+
+    normalized = normalize_profile_response("qwen3vl", response)
+
+    assert normalized.tool_calls is not None
+    assert normalized.tool_calls[0].name == "computer_use"
+    assert normalized.tool_calls[0].arguments == {
+        "action_type": "tap",
+        "x": 499,
+        "y": 514,
         "relative": True,
     }
 

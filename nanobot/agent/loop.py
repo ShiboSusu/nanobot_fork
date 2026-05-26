@@ -15,6 +15,12 @@ from loguru import logger
 
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.cost_aware_router import (
+    CostAwareProblemRouter,
+    NoopSkillLibrary,
+    RouteDecision,
+    RouteKind,
+)
 from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
@@ -306,6 +312,7 @@ class AgentLoop:
             provider=provider,
             model=self.model,
         )
+        self._problem_router = CostAwareProblemRouter(skill_library=NoopSkillLibrary())
         self._register_default_tools()
         if _tc.my.enable:
             self.tools.register(MyTool(loop=self, modify_allowed=_tc.my.allow_set))
@@ -476,6 +483,74 @@ class AgentLoop:
         from nanobot.utils.tool_hints import format_tool_hints
 
         return format_tool_hints(tool_calls)
+
+    def _classify_problem_route(self, content: str) -> RouteDecision:
+        return self._problem_router.classify(
+            content,
+            available_tools=set(self.tools.tool_names),
+        )
+
+    @staticmethod
+    def _policy_confirmation_message(decision: RouteDecision) -> str:
+        categories = ", ".join(decision.policy.categories) or "sensitive_action"
+        return (
+            "这个任务涉及敏感操作，需要你确认或接管后我才能继续。\n\n"
+            f"Policy categories: {categories}\n"
+            "我不会自动执行登录、验证码、支付、删除、授权、隐私读取或对外发送/提交等动作。"
+        )
+
+    async def _execute_system_action_route(self, decision: RouteDecision) -> str:
+        task = (decision.system_action or {}).get("task")
+        if not isinstance(task, str) or not task.strip():
+            return "系统动作路由缺少可执行任务。"
+        tool = self.tools.get("gui_task")
+        if tool is None:
+            return "GUI/system action tool is not available."
+        result = await tool.execute(task=task)
+        return self._format_router_tool_result(result)
+
+    @staticmethod
+    def _format_router_tool_result(result: Any) -> str:
+        if not isinstance(result, str):
+            return str(result)
+        try:
+            payload = json.loads(result)
+        except json.JSONDecodeError:
+            return result
+        if not isinstance(payload, dict):
+            return result
+        summary = payload.get("summary")
+        success = payload.get("success")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+        if success is True:
+            return "系统动作已完成。"
+        if payload.get("error"):
+            return f"系统动作未完成：{payload['error']}"
+        return result
+
+    @staticmethod
+    def _apply_route_hint(content: str, decision: RouteDecision | None) -> str:
+        if decision is None or decision.route != RouteKind.TOOL_CALL:
+            return content
+        tools = ", ".join(decision.suggested_tools)
+        tool_pair = "/".join(decision.suggested_tools)
+        return (
+            "[Cost-Aware Router]\n"
+            "Recommended route: tool_call\n"
+            f"Prefer {tool_pair} for this information/query task. "
+            f"Available suggested tools: {tools}. "
+            "Do not call gui_task unless the answer genuinely depends on the current device/app state.\n"
+            "[/Cost-Aware Router]\n\n"
+            f"{content}"
+        )
+
+    def _save_direct_router_turn(self, session: Session, user_content: str, assistant_content: str) -> None:
+        session.add_message("user", user_content)
+        session.add_message("assistant", assistant_content)
+        session.enforce_file_cap(on_archive=self.context.memory.raw_archive)
+        self._clear_runtime_checkpoint(session)
+        self.sessions.save(session)
 
     async def _dispatch_command_inline(
         self,
@@ -1012,6 +1087,28 @@ class AgentLoop:
         history = session.get_history(**_hist_kwargs)
 
         pending_ask_id = pending_ask_user_id(history)
+        route_decision: RouteDecision | None = None
+        if not pending_ask_id:
+            route_decision = self._classify_problem_route(msg.content)
+            if route_decision.route == RouteKind.HUMAN_CONFIRM:
+                content = self._policy_confirmation_message(route_decision)
+                self._save_direct_router_turn(session, msg.content, content)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                    metadata=dict(msg.metadata or {}),
+                )
+            if route_decision.route == RouteKind.SYSTEM_ACTION:
+                content = await self._execute_system_action_route(route_decision)
+                self._save_direct_router_turn(session, msg.content, content)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                    metadata=dict(msg.metadata or {}),
+                )
+
         if pending_ask_id:
             initial_messages = ask_user_tool_result_messages(
                 self.context.build_system_prompt(channel=msg.channel),
@@ -1022,7 +1119,7 @@ class AgentLoop:
         else:
             initial_messages = self.context.build_messages(
                 history=history,
-                current_message=msg.content,
+                current_message=self._apply_route_hint(msg.content, route_decision),
                 session_summary=pending,
                 media=msg.media if msg.media else None,
                 channel=msg.channel,
