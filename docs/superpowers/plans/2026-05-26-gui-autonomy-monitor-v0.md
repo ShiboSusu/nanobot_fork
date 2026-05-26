@@ -107,7 +107,33 @@ Run:
 
 Expected: pass.
 
-### Task 3: Preserve Shared CLI/Telegram Route
+### Task 3: Per-Stage iOS Smoke Checks
+
+**Files:**
+- No code changes unless failures reveal bugs.
+
+- [ ] **Step 1: Smoke after monitor unit tests**
+
+Run:
+
+```bash
+/Volumes/T9/Mac/bin/nanobot-ios-start status
+/Volumes/T9/Mac/bin/nanobot-ios-start agent -m "帮我用手机打开设置"
+```
+
+Expected: WDA is ready and iOS Settings opens through the direct system-action path.
+
+- [ ] **Step 2: Smoke after GuiAgent wiring**
+
+Run:
+
+```bash
+/Volumes/T9/Mac/bin/nanobot-ios-start agent -m "帮我用手机打开设置"
+```
+
+Expected: same result as Step 1. If this breaks, the monitor wiring affected a simple real-device route and must be fixed before continuing.
+
+### Task 4: Preserve Shared CLI/Telegram Route
 
 **Files:**
 - Modify only if needed: `nanobot/agent/loop.py`
@@ -123,7 +149,7 @@ Run:
 
 Expected: pass without changes. Do not move routing out of `AgentLoop`.
 
-### Task 4: Runtime Smoke Tests
+### Task 5: Final Runtime Smoke Matrix
 
 **Files:**
 - No code changes unless failures reveal bugs.
@@ -168,7 +194,7 @@ Run:
 
 Expected: uses tool-call route hint and does not call GUI unless device state is needed.
 
-### Task 5: Commit And Handoff
+### Task 6: Commit And Handoff
 
 **Files:**
 - Modify: `docs/cost-aware-router-v0-handoff.md` or create a new monitor handoff doc.
