@@ -63,6 +63,14 @@ class CostAwareProblemRouter:
     _APP_LOOKUP_TERMS = ("查找", "寻找", "找到", "搜索", "find", "search")
     _APP_TERMS = ("app", "应用", "软件")
     _SETTINGS_TERMS = ("设置", "settings")
+    _COMMON_APP_TERMS = (
+        "微信", "qq", "微博", "知乎", "小红书", "支付宝", "淘宝", "京东",
+        "拼多多", "闲鱼", "美团", "大众点评", "滴滴", "高德", "高德地图",
+        "携程", "抖音", "哔哩哔哩", "b站", "网易云", "飞书", "企业微信",
+        "腾讯会议", "微信读书", "safari", "chrome", "chatgpt", "deepseek",
+        "相机", "照片", "备忘录", "提醒事项", "地图", "天气", "app store",
+        "文件", "电话", "短信",
+    )
     _FOLLOW_UP_TERMS = (
         "然后", "之后", "接着", "再", "并", "并且", "同时",
         "点击", "点一下", "输入", "搜索框", "填写", "发送", "发消息",
@@ -159,6 +167,7 @@ class CostAwareProblemRouter:
             *self._APP_TERMS,
             "手机", "iphone", "ios",
             *self._SETTINGS_TERMS,
+            *self._COMMON_APP_TERMS,
         ))
         if not ((wants_open and mentions_device_app) or wants_app_lookup):
             return None

@@ -48,6 +48,20 @@ def test_system_action_prefers_known_app_open_route() -> None:
     assert decision.requires_gui is False
 
 
+def test_system_action_prefers_common_chinese_app_open_route() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("打开微信", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.SYSTEM_ACTION
+    assert decision.system_action == {
+        "backend": None,
+        "task": "打开微信",
+        "intent": "open_app",
+    }
+    assert decision.requires_gui is False
+
+
 def test_compound_app_task_uses_gui_not_system_or_web_search() -> None:
     router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
 

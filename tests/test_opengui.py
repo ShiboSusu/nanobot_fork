@@ -197,6 +197,22 @@ def test_ios_app_lookup_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
     )
 
 
+def test_ios_chinese_app_name_uses_direct_bundle_launch(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-chinese-app"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+    )
+
+    assert agent._direct_system_action_for_task("打开微信") == Action(
+        action_type="open_app",
+        text="com.tencent.xin",
+    )
+
+
 @pytest.mark.asyncio
 async def test_successful_retry_clears_previous_direct_system_action_error(tmp_path: Path) -> None:
     class FlakyDirectIosBackend(_RecordingIosBackend):
