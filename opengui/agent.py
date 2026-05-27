@@ -32,6 +32,7 @@ from opengui.agent_profiles import (
     profile_uses_native_tools,
     prompt_contract_for_profile,
 )
+from opengui.autonomy_monitor import AutonomyDecisionKind, AutonomyMonitor, StepMonitorInput
 from opengui.interfaces import (
     DeviceBackend,
     InterventionHandler,
@@ -912,6 +913,7 @@ class GuiAgent:
         agent_profile: str | None = None,
         image_scale_ratio: float = 0.5,
         stagnation_limit: int = 0,
+        autonomy_monitor: AutonomyMonitor | None = None,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -946,6 +948,7 @@ class GuiAgent:
         except (TypeError, ValueError):
             parsed_stagnation_limit = 0
         self.stagnation_limit = max(0, parsed_stagnation_limit)
+        self._autonomy_monitor = autonomy_monitor or AutonomyMonitor()
 
     # ------------------------------------------------------------------
     # Public API
@@ -1225,6 +1228,7 @@ class GuiAgent:
             return direct_result
 
         history: list[HistoryTurn] = []
+        self._autonomy_monitor.reset()
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
         stagnation_streak = 0
@@ -1424,6 +1428,26 @@ class GuiAgent:
                     summary_observation = result.next_observation or obs
 
             trace_observation = result.next_observation or obs
+            monitor_decision = self._autonomy_monitor.assess_step(
+                StepMonitorInput(
+                    task=task,
+                    step_index=step_index,
+                    max_steps=self.max_steps,
+                    action=result.action,
+                    current_observation=obs,
+                    next_observation=result.next_observation,
+                    tool_result=result.tool_result,
+                    action_summary=result.action_summary,
+                    state_summary=result.state_summary,
+                    expected_app=app_hint,
+                )
+            )
+            monitor_payload = monitor_decision.to_trace()
+            self._trajectory_recorder.record_event(
+                "autonomy_monitor",
+                step_index=step_index,
+                **monitor_payload,
+            )
 
             # Write trace entry
             await self._write_trace(
@@ -1438,6 +1462,7 @@ class GuiAgent:
                     "action_summary": self._scrub_text_for_artifact_action(result.action_summary, result.action),
                     "action_intent": self._scrub_text_for_artifact_action(result.action_intent, result.action),
                     "state_summary": self._scrub_text_for_artifact_action(result.state_summary, result.action),
+                    "autonomy_monitor": monitor_payload,
                     "screenshot_path": (
                         trace_observation.screenshot_path if trace_observation else None
                     ),
@@ -1484,6 +1509,85 @@ class GuiAgent:
                 chat_latency_s=result.chat_latency_s,
                 ttft_s=result.ttft_s,
             )
+
+            if monitor_decision.decision in {
+                AutonomyDecisionKind.HALT,
+                AutonomyDecisionKind.HUMAN_CONFIRM,
+                AutonomyDecisionKind.S2_TAKEOVER,
+            }:
+                history_with_current_step = history + [
+                    HistoryTurn(
+                        step_index=step_index,
+                        observation=obs,
+                        assistant_message=self._scrub_assistant_message_for_log(
+                            result.assistant_message,
+                            result.action,
+                        ),
+                        tool_result_message={
+                            "role": "tool",
+                            "tool_call_id": result.tool_call_id,
+                            "content": self._scrub_text_for_action(
+                                result.tool_result,
+                                result.action,
+                            ),
+                        },
+                        action_summary=(
+                            self._scrub_text_for_action(
+                                result.action_summary,
+                                result.action,
+                            )
+                            or result.action_summary
+                        ),
+                        action_intent=(
+                            self._scrub_text_for_action(
+                                result.action_intent,
+                                result.action,
+                            )
+                            or result.action_intent
+                        ),
+                        state_summary=(
+                            self._scrub_text_for_action(
+                                result.state_summary,
+                                result.action,
+                            )
+                            or result.state_summary
+                        ),
+                    )
+                ]
+                await self._log_attempt_event(
+                    run_dir,
+                    "autonomy_monitor_stop",
+                    step_index=step_index,
+                    **monitor_payload,
+                )
+                return AgentResult(
+                    success=False,
+                    summary=self._build_state_note(
+                        status="blocked",
+                        history=history_with_current_step,
+                        current_observation=result.next_observation or obs,
+                        error="autonomy_monitor_halt",
+                    ),
+                    model_summary=result.state_summary or result.action_summary,
+                    trace_path=str(run_dir),
+                    steps_taken=steps_taken,
+                    error="autonomy_monitor_halt",
+                    attempt_summary=self._build_attempt_summary(
+                        failure_reason="autonomy_monitor_halt",
+                        result_summary=self._build_state_note(
+                            status="blocked",
+                            history=history_with_current_step,
+                            current_observation=result.next_observation or obs,
+                            error="autonomy_monitor_halt",
+                        ),
+                        model_summary=result.state_summary or result.action_summary,
+                        action_summaries=tuple(
+                            list(turn.action_summary for turn in history)
+                            + [result.action_summary]
+                        ),
+                    ),
+                    token_usage=total_usage,
+                )
 
             if intervention_cancelled:
                 termination_summary = await self._generate_termination_summary(
