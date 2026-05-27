@@ -327,6 +327,38 @@ async def test_planner_subtask_gui_failure_blocks_plan(tmp_path: Path) -> None:
     )
 
     assert response is not None
+    assert "wda down" in response.content
+    assert "1/1 subtasks completed" not in response.content
+    assert gui_tool.calls == [{"task": "Open Bilibili"}]
+
+
+@pytest.mark.asyncio
+async def test_planner_subtask_gui_failure_with_summary_blocks_plan(tmp_path: Path) -> None:
+    loop = _make_loop_with_planner(
+        tmp_path,
+        '{"route":"plan","confidence":0.92,"reason":"App playback",'
+        '"subtasks":[{"id":"open_bilibili","route":"gui_task","task":"Open Bilibili"}]}',
+    )
+    assert loop._gui_config is not None
+    loop._gui_config.planner_subtasks_enabled = True
+    gui_tool = _FakeGuiTaskTool(payload={
+        "success": False,
+        "summary": "Stopped after max steps without reaching the goal.",
+        "steps_taken": 15,
+        "error": None,
+    })
+    loop.tools.register(gui_tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="u1",
+            chat_id="cli-chat",
+            content="在B站播放罗翔的刑法课视频",
+        )
+    )
+
+    assert response is not None
     assert "subtask_failed" in response.content
     assert "1/1 subtasks completed" not in response.content
     assert gui_tool.calls == [{"task": "Open Bilibili"}]

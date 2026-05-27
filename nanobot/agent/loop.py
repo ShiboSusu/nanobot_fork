@@ -579,8 +579,8 @@ class AgentLoop:
                     "intent": subtask.system_action or "open_app",
                 },
             )
-            output = await self._execute_system_action_route(decision)
-            return self._subtask_execution_from_output(output)
+            result = await self._execute_system_action_route_result(decision)
+            return self._subtask_execution_from_tool_result(result)
         if subtask.route == RouteKind.GUI:
             decision = RouteDecision(
                 route=RouteKind.GUI,
@@ -589,8 +589,8 @@ class AgentLoop:
                 requires_gui=True,
                 routed_task=subtask.task,
             )
-            output = await self._execute_gui_route(decision, original_task=subtask.task)
-            return self._subtask_execution_from_output(output)
+            result = await self._execute_gui_route_result(decision, original_task=subtask.task)
+            return self._subtask_execution_from_tool_result(result)
         if subtask.route == RouteKind.TOOL_CALL:
             return SubtaskExecution(
                 status=SubtaskStatus.NEEDS_USER,
@@ -629,6 +629,25 @@ class AgentLoop:
             )
         return SubtaskExecution(status=SubtaskStatus.SUCCESS, output=output)
 
+    @classmethod
+    def _subtask_execution_from_tool_result(cls, result: Any) -> SubtaskExecution:
+        output = cls._format_router_tool_result(result)
+        if isinstance(result, str):
+            try:
+                payload = json.loads(result)
+            except json.JSONDecodeError:
+                return cls._subtask_execution_from_output(output)
+            if isinstance(payload, dict):
+                success = payload.get("success")
+                error = payload.get("error")
+                if success is False or error:
+                    return SubtaskExecution(
+                        status=SubtaskStatus.FAILED,
+                        output=output,
+                        error=str(error or "subtask_failed"),
+                    )
+        return cls._subtask_execution_from_output(output)
+
     @staticmethod
     def _policy_confirmation_message(decision: RouteDecision) -> str:
         categories = ", ".join(decision.policy.categories) or "sensitive_action"
@@ -639,22 +658,28 @@ class AgentLoop:
         )
 
     async def _execute_system_action_route(self, decision: RouteDecision) -> str:
+        result = await self._execute_system_action_route_result(decision)
+        return self._format_router_tool_result(result)
+
+    async def _execute_system_action_route_result(self, decision: RouteDecision) -> Any:
         task = (decision.system_action or {}).get("task")
         if not isinstance(task, str) or not task.strip():
             return "系统动作路由缺少可执行任务。"
         tool = self.tools.get("gui_task")
         if tool is None:
             return "GUI/system action tool is not available."
-        result = await tool.execute(task=task)
-        return self._format_router_tool_result(result)
+        return await tool.execute(task=task)
 
     async def _execute_gui_route(self, decision: RouteDecision, *, original_task: str) -> str:
+        result = await self._execute_gui_route_result(decision, original_task=original_task)
+        return self._format_router_tool_result(result)
+
+    async def _execute_gui_route_result(self, decision: RouteDecision, *, original_task: str) -> Any:
         task = decision.routed_task or original_task
         tool = self.tools.get("gui_task")
         if tool is None:
             return "GUI tool is not available."
-        result = await tool.execute(task=task)
-        return self._format_router_tool_result(result)
+        return await tool.execute(task=task)
 
     @staticmethod
     def _format_router_tool_result(result: Any) -> str:
