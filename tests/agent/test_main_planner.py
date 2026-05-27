@@ -61,6 +61,20 @@ def test_parse_tool_plan_to_route_decision() -> None:
     assert decision.suggested_tools == ("web_search", "web_fetch")
 
 
+def test_parse_single_tool_subtask_plan_to_route_decision_uses_tool_route() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    decision = planner.parse_decision(
+        '{"route":"plan","confidence":0.88,"reason":"Public lookup",'
+        '"subtasks":[{"route":"web_search","tool":"web_search","task":"查询深圳天气"}]}',
+        original_task="查询深圳天气",
+    )
+
+    assert decision.route == RouteKind.TOOL_CALL
+    assert decision.requires_gui is False
+    assert decision.suggested_tools == ("web_search", "web_fetch")
+
+
 def test_parse_system_action_plan_to_route_decision() -> None:
     planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
 

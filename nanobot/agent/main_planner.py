@@ -80,6 +80,7 @@ class MainPlanner:
 
     def parse_plan(self, content: str, *, original_task: str) -> PlannerPlan:
         payload = self._parse_json_payload(content)
+        route_raw = str(payload.get("route") or "").strip().casefold()
         route = self._route_from_payload(payload)
         confidence = self._confidence(payload.get("confidence"))
         if confidence < self.config.confidence_threshold:
@@ -90,6 +91,8 @@ class MainPlanner:
         reason = str(payload.get("reason") or "35B planner selected this route.").strip()
         risk_notes = self._risk_notes(payload.get("risk_notes"))
         subtasks = self._parse_subtasks(payload, route=route, original_task=original_task)
+        if route_raw == "plan" and len(subtasks) == 1:
+            route = subtasks[0].route
         return PlannerPlan(
             original_task=original_task,
             route=route,
