@@ -74,7 +74,65 @@ async def test_plan_executor_stops_before_policy_blocked_subtask() -> None:
 
     assert result.status == PlanExecutionStatus.HUMAN_CONFIRM
     assert calls == []
+    assert [item.subtask.id for item in result.subtasks] == ["credit"]
+    assert result.subtasks[0].policy is not None
+    assert result.subtasks[0].policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert result.subtasks[0].error == PolicyAction.ASK_HUMAN_CONFIRM.value
     assert "financial" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_plan_executor_maps_takeover_policy_to_needs_user() -> None:
+    calls: list[str] = []
+
+    async def dispatch(subtask: PlannerSubtask) -> SubtaskExecution:
+        calls.append(subtask.id)
+        return SubtaskExecution(status=SubtaskStatus.SUCCESS, output="should not run")
+
+    executor = PlanExecutor(
+        policy_check=lambda task: PolicyDecision(
+            PolicyAction.REQUIRE_HUMAN_TAKEOVER,
+            reason="manual app control required",
+            categories=("manual_takeover",),
+        ),
+        dispatch=dispatch,
+    )
+
+    result = await executor.execute(
+        _plan(PlannerSubtask(id="takeover", route=RouteKind.GUI, task="manual"))
+    )
+
+    assert result.status == PlanExecutionStatus.NEEDS_USER
+    assert calls == []
+    assert result.subtasks[0].policy is not None
+    assert result.subtasks[0].policy.action == PolicyAction.REQUIRE_HUMAN_TAKEOVER
+
+
+@pytest.mark.asyncio
+async def test_plan_executor_maps_halt_policy_to_blocked() -> None:
+    calls: list[str] = []
+
+    async def dispatch(subtask: PlannerSubtask) -> SubtaskExecution:
+        calls.append(subtask.id)
+        return SubtaskExecution(status=SubtaskStatus.SUCCESS, output="should not run")
+
+    executor = PlanExecutor(
+        policy_check=lambda task: PolicyDecision(
+            PolicyAction.HALT,
+            reason="unsafe",
+            categories=("unsafe",),
+        ),
+        dispatch=dispatch,
+    )
+
+    result = await executor.execute(
+        _plan(PlannerSubtask(id="halt", route=RouteKind.GUI, task="unsafe"))
+    )
+
+    assert result.status == PlanExecutionStatus.BLOCKED
+    assert calls == []
+    assert result.subtasks[0].policy is not None
+    assert result.subtasks[0].policy.action == PolicyAction.HALT
 
 
 @pytest.mark.asyncio
@@ -133,3 +191,48 @@ async def test_plan_executor_can_skip_missing_app_when_allowed() -> None:
 
     assert result.status == PlanExecutionStatus.SKIPPED
     assert "missing_app" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_plan_executor_blocks_skipped_subtask_when_missing_app_skip_not_allowed() -> None:
+    async def dispatch(subtask: PlannerSubtask) -> SubtaskExecution:
+        return SubtaskExecution(
+            status=SubtaskStatus.SKIPPED,
+            output="",
+            error="missing_app",
+        )
+
+    executor = PlanExecutor(
+        policy_check=lambda task: PolicyDecision(PolicyAction.ALLOW),
+        dispatch=dispatch,
+    )
+
+    result = await executor.execute(
+        _plan(PlannerSubtask(id="open_youku", route=RouteKind.GUI, task="打开优酷"))
+    )
+
+    assert result.status == PlanExecutionStatus.BLOCKED
+    assert result.subtasks[-1].status == SubtaskStatus.SKIPPED
+    assert "missing_app" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_plan_executor_stops_after_needs_user_subtask() -> None:
+    async def dispatch(subtask: PlannerSubtask) -> SubtaskExecution:
+        return SubtaskExecution(
+            status=SubtaskStatus.NEEDS_USER,
+            output="need login confirmation",
+        )
+
+    executor = PlanExecutor(
+        policy_check=lambda task: PolicyDecision(PolicyAction.ALLOW),
+        dispatch=dispatch,
+    )
+
+    result = await executor.execute(
+        _plan(PlannerSubtask(id="login", route=RouteKind.GUI, task="登录"))
+    )
+
+    assert result.status == PlanExecutionStatus.NEEDS_USER
+    assert result.subtasks[-1].status == SubtaskStatus.NEEDS_USER
+    assert "need login confirmation" in result.summary

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from nanobot.agent.main_planner import PlannerPlan, PlannerSubtask
-from opengui.policy import PolicyDecision
+from opengui.policy import PolicyAction, PolicyDecision
 
 
 class SubtaskStatus(str, Enum):
@@ -74,10 +74,25 @@ class PlanExecutor:
         for subtask in plan.subtasks:
             policy = self._policy_check(subtask.task)
             if not policy.allowed:
+                result = SubtaskResult(
+                    subtask=subtask,
+                    status=SubtaskStatus.NEEDS_USER,
+                    output=policy.reason,
+                    error=policy.action.value,
+                    policy=policy,
+                    metadata={
+                        "categories": policy.categories,
+                        "matched_terms": policy.matched_terms,
+                    },
+                )
+                results.append(result)
                 categories = ", ".join(policy.categories) or "sensitive_action"
                 return PlanExecutionResult(
-                    status=PlanExecutionStatus.HUMAN_CONFIRM,
-                    summary=f"Subtask {subtask.id} requires human confirmation: {categories}",
+                    status=self._status_from_policy(policy),
+                    summary=(
+                        f"Subtask {subtask.id} blocked by policy "
+                        f"{policy.action.value}: {categories}"
+                    ),
                     subtasks=tuple(results),
                 )
 
@@ -121,6 +136,14 @@ class PlanExecutor:
             summary=f"{len(results)}/{total} subtasks completed.",
             subtasks=tuple(results),
         )
+
+    @staticmethod
+    def _status_from_policy(policy: PolicyDecision) -> PlanExecutionStatus:
+        if policy.action == PolicyAction.ASK_HUMAN_CONFIRM:
+            return PlanExecutionStatus.HUMAN_CONFIRM
+        if policy.action == PolicyAction.REQUIRE_HUMAN_TAKEOVER:
+            return PlanExecutionStatus.NEEDS_USER
+        return PlanExecutionStatus.BLOCKED
 
 
 __all__ = [
