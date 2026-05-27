@@ -27,6 +27,24 @@ def test_parse_gui_plan_to_route_decision() -> None:
     assert decision.suggested_tools == ()
 
 
+def test_parse_multi_subtask_plan_to_route_decision_preserves_original_task() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    decision = planner.parse_decision(
+        '{"route":"plan","confidence":0.91,"reason":"Multi-step app task",'
+        '"subtasks":['
+        '{"route":"system_action","task":"Open Bilibili","system_action":"open_app"},'
+        '{"route":"gui_task","task":"Search for 罗翔 刑法课"},'
+        '{"route":"gui_task","task":"Play the best matching video"}'
+        "]}",
+        original_task="在B站播放罗翔的刑法课视频",
+    )
+
+    assert decision.route == RouteKind.GUI
+    assert decision.requires_gui is True
+    assert decision.routed_task == "在B站播放罗翔的刑法课视频"
+
+
 def test_parse_tool_plan_to_route_decision() -> None:
     planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
 

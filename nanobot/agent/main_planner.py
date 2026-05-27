@@ -102,7 +102,11 @@ class MainPlanner:
     def plan_to_route_decision(self, plan: PlannerPlan) -> RouteDecision:
         route = plan.route
         subtask = plan.subtasks[0] if plan.subtasks else None
-        task = subtask.task if subtask and subtask.task else plan.original_task
+        task = (
+            plan.original_task
+            if route == RouteKind.GUI and len(plan.subtasks) > 1
+            else subtask.task if subtask and subtask.task else plan.original_task
+        )
 
         if route == RouteKind.TOOL_CALL:
             return RouteDecision(
