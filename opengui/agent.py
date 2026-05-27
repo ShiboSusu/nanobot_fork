@@ -1995,21 +1995,77 @@ class GuiAgent:
     def _direct_system_action_for_task(self, task: str) -> Action | None:
         if self.backend.platform != "ios":
             return None
-        normalized_task = " ".join((task or "").strip().lower().split())
+        normalized_task = self._normalize_system_action_task(task)
         if not normalized_task:
             return None
-        wants_open = any(word in normalized_task for word in ("打开", "开启", "启动", "open", "launch"))
-        if not wants_open:
+        if self._ios_task_has_follow_up_gui_work(normalized_task):
             return None
         target = None
-        if "设置" in normalized_task or "settings" in normalized_task:
+        wants_open = any(word in normalized_task for word in ("打开", "开启", "启动", "open", "launch"))
+        wants_app_lookup = (
+            any(word in normalized_task for word in ("查找", "寻找", "找到", "搜索", "find", "search"))
+            and any(word in normalized_task for word in ("app", "应用", "软件"))
+        )
+        if not wants_open and not wants_app_lookup:
+            return None
+        if wants_open and ("设置" in normalized_task or "settings" in normalized_task):
             target = "settings"
+        if target is None:
+            target = self._extract_ios_app_target(normalized_task)
         if target is None:
             return None
         bundle_id = resolve_ios_bundle(target)
-        if bundle_id == target:
+        if bundle_id == target and "." not in bundle_id:
             return None
         return Action(action_type="open_app", text=bundle_id)
+
+    @staticmethod
+    def _normalize_system_action_task(task: str) -> str:
+        return " ".join((task or "").strip().lower().split())
+
+    @staticmethod
+    def _ios_task_has_follow_up_gui_work(normalized_task: str) -> bool:
+        follow_up_terms = (
+            "然后", "之后", "接着", "再", "并", "并且", "同时",
+            "点击", "点一下", "输入", "搜索框", "填写", "发送", "发消息",
+            "购买", "付款", "登录", "选择", "切换", "查看", "进入", "改成",
+            "调到", "滑动",
+            "then", "and then", "tap", "click", "type", "send", "pay",
+            "login", "log in", "select", "switch",
+        )
+        if any(term in normalized_task for term in follow_up_terms):
+            return True
+        is_app_lookup = (
+            any(term in normalized_task for term in ("查找", "寻找", "找到", "搜索", "find", "search"))
+            and any(term in normalized_task for term in ("app", "应用", "软件"))
+        )
+        if "搜索" in normalized_task and not is_app_lookup:
+            return True
+        return False
+
+    @staticmethod
+    def _extract_ios_app_target(normalized_task: str) -> str | None:
+        task = re.sub(
+            r"^(?:请|麻烦|帮我|用手机|在手机上|用\s*iphone|在\s*iphone\s*上|用\s*ios|在\s*ios\s*上)\s*",
+            "",
+            normalized_task,
+        )
+        patterns = (
+            r"(?:打开|开启|启动|open|launch)\s*(.+)",
+            r"(?:查找|寻找|找到|搜索|find|search)\s*(.+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, task)
+            if not match:
+                continue
+            target = match.group(1)
+            target = re.split(r"[，,。；;]", target, maxsplit=1)[0]
+            target = re.sub(r"(?:这个|一下|手机里的|手机上|的)\s*", "", target)
+            target = re.sub(r"\s*(?:app|应用|软件)$", "", target)
+            target = target.strip(" '\"")
+            if target:
+                return target
+        return None
 
     # ------------------------------------------------------------------
     # Single step

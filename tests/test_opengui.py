@@ -147,6 +147,56 @@ async def test_ios_settings_task_uses_direct_bundle_launch(tmp_path: Path) -> No
     ]
 
 
+@pytest.mark.asyncio
+async def test_ios_known_app_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-safari"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+    )
+
+    result = await agent.run("帮我用手机打开 Safari app", max_retries=1)
+
+    assert result.success is True
+    assert result.steps_taken == 1
+    assert backend.executed_actions == [
+        Action(action_type="open_app", text="com.apple.mobilesafari")
+    ]
+
+
+def test_ios_compound_app_task_skips_direct_bundle_launch(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-compound"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+    )
+
+    assert agent._direct_system_action_for_task("打开设置，然后点击搜索框") is None
+    assert agent._direct_system_action_for_task("打开 Safari 搜索天气") is None
+
+
+def test_ios_app_lookup_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-lookup"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+    )
+
+    assert agent._direct_system_action_for_task("查找 Safari app") == Action(
+        action_type="open_app",
+        text="com.apple.mobilesafari",
+    )
+
+
 def test_parse_scroll_allows_center_default() -> None:
     action = parse_action({
         "action_type": "scroll",

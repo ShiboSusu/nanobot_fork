@@ -244,7 +244,9 @@ class GuiSubagentTool(Tool):
             await self._shutdown_android_backend(active_backend)
 
     async def _run_task(self, active_backend: Any, task: str, **kwargs: Any) -> str:
-        policy_context, memory_store = self._load_policy_context_and_memory_store()
+        policy_context, memory_store = self._load_policy_context_and_memory_store(
+            platform=active_backend.platform,
+        )
         skill_library = None
         if self._gui_config.enable_skill_execution:
             self._refresh_cached_skill_stores()
@@ -561,24 +563,47 @@ class GuiSubagentTool(Tool):
         policy_context, _ = GuiSubagentTool._load_policy_context_and_memory_store(self)
         return policy_context
 
-    def _load_policy_context_and_memory_store(self) -> tuple[str | None, Any | None]:
-        """Load all POLICY entries as raw text for direct injection into the GUI agent system prompt.
+    def _load_policy_context_and_memory_store(
+        self,
+        *,
+        platform: str | None = None,
+    ) -> tuple[str | None, Any | None]:
+        return GuiSubagentTool._load_memory_context_and_memory_store(
+            self,
+            platform=platform,
+        )
+
+    def _load_memory_context_and_memory_store(
+        self,
+        *,
+        platform: str | None = None,
+    ) -> tuple[str | None, Any | None]:
+        """Load always-on GUI memory for direct injection into the GUI agent prompt.
 
         Policies must always be present regardless of task relevance, so they are loaded
-        in full without embedding-based search filtering.
+        in full without embedding-based search filtering. OS guide entries are loaded
+        only for the active platform to avoid cross-platform navigation contamination.
         """
         from opengui.memory.store import MemoryStore
         from opengui.memory.types import MemoryType
 
         try:
             memory_store = MemoryStore(DEFAULT_OPENGUI_MEMORY_DIR)
+            lines: list[str] = []
+
             policy_entries = memory_store.list_all(memory_type=MemoryType.POLICY)
-            if not policy_entries:
-                return None, memory_store
-            lines = [f"- {entry.content}" for entry in policy_entries]
-            return "\n".join(lines), memory_store
+            lines.extend(f"- [policy] {entry.content}" for entry in policy_entries)
+
+            if platform:
+                os_entries = memory_store.list_all(
+                    memory_type=MemoryType.OS_GUIDE,
+                    platform=platform,
+                )
+                lines.extend(f"- [os] {entry.content}" for entry in os_entries)
+
+            return ("\n".join(lines) if lines else None), memory_store
         except Exception:
-            logger.warning("Failed to load GUI policy memory", exc_info=True)
+            logger.warning("Failed to load GUI memory", exc_info=True)
             return None, None
 
     def _build_embedding_adapter(self) -> NanobotEmbeddingAdapter:
