@@ -5,7 +5,9 @@ Covers: AGENT-05, SKILL-08, TRAJ-03, TEST-05.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -30,15 +32,20 @@ from opengui.trajectory.recorder import TrajectoryRecorder
 
 
 class _FakeEmbedder:
-    """Deterministic embedder: hash each text to a unit vector slot."""
+    """Deterministic bag-of-token embedder for semantic-ish test retrieval."""
 
-    DIM = 8
+    DIM = 32
 
     async def embed(self, texts: list[str]) -> np.ndarray:
         vecs = np.zeros((len(texts), self.DIM), dtype=np.float32)
         for i, text in enumerate(texts):
-            slot = hash(text) % self.DIM
-            vecs[i, slot] = 1.0
+            for token in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", text.lower()):
+                digest = hashlib.sha256(token.encode("utf-8")).digest()
+                slot = int.from_bytes(digest[:4], "big") % self.DIM
+                vecs[i, slot] += 1.0
+            norm = float(np.linalg.norm(vecs[i]))
+            if norm > 0:
+                vecs[i] /= norm
         return vecs
 
 
@@ -54,6 +61,12 @@ class _RecordingLLM:
         if not self._responses:
             raise AssertionError("No scripted responses left")
         return self._responses.pop(0)
+
+
+class _AndroidDryRunBackend(DryRunBackend):
+    @property
+    def platform(self) -> str:
+        return "android"
 
 
 def _done_response(call_id: str = "tc_done") -> LLMResponse:
@@ -147,10 +160,13 @@ async def test_skill_path_chosen_above_threshold(tmp_path: Path) -> None:
     mock_exec_result.state.value = "succeeded"
     mock_executor.execute = AsyncMock(return_value=mock_exec_result)
 
-    llm = _RecordingLLM([_done_response()])
+    llm = _RecordingLLM([
+        LLMResponse(content='{"applicable": true}'),
+        _done_response(),
+    ])
     recorder = _make_recorder(tmp_path, "Turn on Wi-Fi")
     agent = GuiAgent(
-        llm, DryRunBackend(),
+        llm, _AndroidDryRunBackend(),
         trajectory_recorder=recorder,
         skill_library=lib, skill_executor=mock_executor,
         skill_threshold=0.3,  # low threshold to ensure match
