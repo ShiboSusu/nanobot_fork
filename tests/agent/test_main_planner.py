@@ -164,6 +164,17 @@ def test_parse_full_plan_rejects_unsupported_subtask_route() -> None:
         )
 
 
+def test_parse_full_plan_rejects_nested_plan_subtask_route() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    with pytest.raises(ValueError, match="unsupported subtask route"):
+        planner.parse_plan(
+            '{"route":"plan","confidence":0.9,"reason":"bad",'
+            '"subtasks":[{"route":"plan","task":"nested plan"}]}',
+            original_task="bad",
+        )
+
+
 def test_parse_full_plan_rejects_missing_subtask_task() -> None:
     planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
 

@@ -252,6 +252,8 @@ class MainPlanner:
         route_raw = str(payload.get("route") or "").strip().casefold()
         if not route_raw:
             route_raw = str(payload.get("tool") or "").strip().casefold()
+        if route_raw == "plan":
+            raise ValueError("unsupported subtask route: plan")
         route = self._ROUTE_MAP.get(route_raw)
         if route is None:
             raise ValueError(f"unsupported subtask route: {route_raw or '<missing>'}")
@@ -269,7 +271,7 @@ class MainPlanner:
         if isinstance(subtasks, list):
             for index, item in enumerate(subtasks, start=1):
                 if isinstance(item, dict):
-                    parsed.append(self._parse_subtask(item, index=index, original_task=original_task))
+                    parsed.append(self._parse_subtask(item, index=index))
         if parsed:
             return tuple(parsed)
         return (
@@ -285,7 +287,6 @@ class MainPlanner:
         payload: dict[str, Any],
         *,
         index: int,
-        original_task: str,
     ) -> PlannerSubtask:
         risk_level = str(payload.get("risk_level") or "low").strip().casefold()
         if risk_level not in _RISK_LEVELS:
