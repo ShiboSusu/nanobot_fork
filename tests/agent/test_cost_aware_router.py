@@ -128,6 +128,36 @@ def test_account_presence_read_requires_human_confirmation() -> None:
     assert "financial_or_account_read" in decision.policy.categories
 
 
+def test_private_account_query_requires_human_confirmation_not_web_search() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("查一下我的淘宝订单到哪了", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.HUMAN_CONFIRM
+    assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert "private_account_query" in decision.policy.categories
+
+
+def test_sensitive_financial_app_open_requires_human_confirmation() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("打开支付宝", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.HUMAN_CONFIRM
+    assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert "sensitive_app_open" in decision.policy.categories
+
+
+def test_policy_matches_obfuscated_sensitive_chinese_term() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("帮我支 付这个订单", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.HUMAN_CONFIRM
+    assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert "payment_or_purchase" in decision.policy.categories
+
+
 def test_noop_skill_library_keeps_skill_interface_disabled() -> None:
     library = NoopSkillLibrary()
 

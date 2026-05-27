@@ -61,7 +61,7 @@ class PolicyStore:
             category="payment_or_purchase",
             action=PolicyAction.ASK_HUMAN_CONFIRM,
             terms=(
-                "付款", "确认支付", "立即支付", "完成支付", "支付密码",
+                "支付", "付款", "确认支付", "立即支付", "完成支付", "支付密码",
                 "转账", "充值", "下单", "购买", "结算", "收银台",
                 "pay", "payment", "purchase", "checkout", "transfer money",
                 "place order",
@@ -127,6 +127,19 @@ class PolicyStore:
                 "presence status",
             ),
             reason="Financial, account, and presence status reads require user confirmation.",
+        ),
+        PolicyRule(
+            category="private_account_query",
+            action=PolicyAction.ASK_HUMAN_CONFIRM,
+            terms=(
+                "我的订单", "我的淘宝订单", "我的京东订单", "我的美团订单",
+                "我的拼多多订单", "我的携程订单", "我的滴滴订单",
+                "物流到哪", "快递到哪", "退款进度", "我的优惠券",
+                "我的券包", "我的积分", "会员积分", "花呗", "借呗",
+                "芝麻信用", "医保", "社保", "公积金", "my order",
+                "my refund", "my coupon", "my points",
+            ),
+            reason="Private account, order, benefits, and membership queries require user confirmation.",
         ),
     )
 
@@ -196,7 +209,15 @@ class PolicyStore:
             return False
         if re.fullmatch(r"[a-z0-9_ -]+", needle):
             return re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", text) is not None
-        return needle in text
+        compact_text = PolicyStore._compact_obfuscated_cjk(text)
+        compact_needle = PolicyStore._compact_obfuscated_cjk(needle)
+        if compact_needle == "支付":
+            return re.search(r"支付(?!宝)", compact_text) is not None
+        return needle in text or compact_needle in compact_text
+
+    @staticmethod
+    def _compact_obfuscated_cjk(text: str) -> str:
+        return re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", text or "")
 
     @staticmethod
     def _max_action(left: PolicyAction, right: PolicyAction) -> PolicyAction:

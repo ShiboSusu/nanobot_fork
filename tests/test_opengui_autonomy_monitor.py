@@ -345,6 +345,125 @@ async def test_gui_agent_uses_s2_hint_before_halting_on_monitor_red(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_gui_agent_uses_s2_hint_for_amber_monitor_decision(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor(mid_threshold=0.20, red_threshold=0.90, horizon_threshold=0.95)
+    backend = _StaticScreenBackend()
+    s1 = _RecordingLLM([
+        LLMResponse(
+            content="Action: tap Settings",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 120,
+                        "y": 220,
+                        "intent": "tap Settings",
+                        "summary": "Settings is visible",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-2",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "intent": "complete after amber guidance",
+                        "summary": "Settings is open",
+                    },
+                )
+            ],
+        ),
+    ])
+    s2 = _RecordingLLM([
+        LLMResponse(content='{"route":"S2_HINT","hint":"Do not repeat the tap; verify the current page first."}')
+    ])
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task="点击屏幕上的设置图标", platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        include_date_context=False,
+        autonomy_monitor=monitor,
+        s2_llm=s2,
+        s2_model="qwen3.5-397b-a17b",
+        s2_max_hints=1,
+    )
+
+    result = await agent.run("点击屏幕上的设置图标", max_retries=1)
+
+    assert result.success is True
+    assert len(s2.calls) == 1
+    assert len(s1.calls) == 2
+    assert monitor.cumulative_risk >= 0.20
+    second_prompt = json.dumps(s1.calls[1], ensure_ascii=False)
+    assert "Do not repeat the tap; verify the current page first." in second_prompt
+
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    first_step = next(event for event in trace_events if event["event"] == "step")
+    assert first_step["autonomy_monitor"]["decision"] == AutonomyDecisionKind.CHEAP_VERIFY.value
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_rejects_unverified_first_step_done(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor()
+    backend = _StaticScreenBackend()
+    s1 = _RecordingLLM([
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "intent": "declare completion immediately",
+                        "summary": "The task is complete.",
+                    },
+                )
+            ],
+        )
+    ])
+    task = "打开设置并进入蓝牙"
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task=task, platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        include_date_context=False,
+        autonomy_monitor=monitor,
+    )
+
+    result = await agent.run(task, max_retries=1)
+
+    assert result.success is False
+    assert result.error == "autonomy_monitor_halt"
+    assert backend.execute_calls == []
+
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    first_step = next(event for event in trace_events if event["event"] == "step")
+    assert first_step["autonomy_monitor"]["decision"] == AutonomyDecisionKind.HALT.value
+    assert "unverified_done" in first_step["autonomy_monitor"]["signal_keys"]
+
+
+@pytest.mark.asyncio
 async def test_gui_agent_pre_action_monitor_pauses_before_unsafe_action(tmp_path: Path) -> None:
     monitor = AutonomyMonitor()
     backend = _StaticScreenBackend()

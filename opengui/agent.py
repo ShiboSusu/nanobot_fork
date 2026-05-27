@@ -1530,6 +1530,87 @@ class GuiAgent:
                 ttft_s=result.ttft_s,
             )
 
+            if (
+                monitor_decision.decision == AutonomyDecisionKind.CHEAP_VERIFY
+                and self._can_request_s2_guidance(monitor_decision, s2_guidance)
+            ):
+                history_with_current_step = history + [
+                    HistoryTurn(
+                        step_index=step_index,
+                        observation=obs,
+                        assistant_message=self._scrub_assistant_message_for_log(
+                            result.assistant_message,
+                            result.action,
+                        ),
+                        tool_result_message={
+                            "role": "tool",
+                            "tool_call_id": result.tool_call_id,
+                            "content": self._scrub_text_for_action(
+                                result.tool_result,
+                                result.action,
+                            ),
+                        },
+                        action_summary=(
+                            self._scrub_text_for_action(
+                                result.action_summary,
+                                result.action,
+                            )
+                            or result.action_summary
+                        ),
+                        action_intent=(
+                            self._scrub_text_for_action(
+                                result.action_intent,
+                                result.action,
+                            )
+                            or result.action_intent
+                        ),
+                        state_summary=(
+                            self._scrub_text_for_action(
+                                result.state_summary,
+                                result.action,
+                            )
+                            or result.state_summary
+                        ),
+                    )
+                ]
+                hint, usage = await self._request_s2_guidance(
+                    task=task,
+                    step_index=step_index,
+                    action=result.action,
+                    current_observation=obs,
+                    next_observation=result.next_observation,
+                    tool_result=result.tool_result,
+                    action_summary=result.action_summary,
+                    state_summary=result.state_summary,
+                    monitor_payload=monitor_payload,
+                )
+                for k, v in usage.items():
+                    total_usage[k] = total_usage.get(k, 0) + v
+                s2_guidance.append(hint)
+                await self._log_attempt_event(
+                    run_dir,
+                    "s2_guidance",
+                    step_index=step_index,
+                    model=self._s2_model,
+                    hint=hint,
+                    monitor=monitor_payload,
+                )
+                await self._write_trace(
+                    run_dir / "trace.jsonl",
+                    self._scrub_for_artifact({
+                        "event": "s2_guidance",
+                        "step_index": step_index,
+                        "model": self._s2_model,
+                        "hint": hint,
+                        "monitor": monitor_payload,
+                        "timestamp": time.time(),
+                    }),
+                )
+                history = history_with_current_step
+                if result.next_observation is not None:
+                    obs = result.next_observation
+                continue
+
             if monitor_decision.decision in {
                 AutonomyDecisionKind.HALT,
                 AutonomyDecisionKind.HUMAN_CONFIRM,
@@ -1589,7 +1670,6 @@ class GuiAgent:
                     for k, v in usage.items():
                         total_usage[k] = total_usage.get(k, 0) + v
                     s2_guidance.append(hint)
-                    self._autonomy_monitor.mark_s2_guidance_issued()
                     await self._log_attempt_event(
                         run_dir,
                         "s2_guidance",
@@ -2732,6 +2812,7 @@ class GuiAgent:
         if len(s2_guidance) >= self._s2_max_hints:
             return False
         return monitor_decision.decision in {
+            AutonomyDecisionKind.CHEAP_VERIFY,
             AutonomyDecisionKind.HALT,
             AutonomyDecisionKind.S2_TAKEOVER,
         }

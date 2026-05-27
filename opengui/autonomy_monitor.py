@@ -337,6 +337,15 @@ class AutonomyMonitor:
                 reason="The model declared success while its own text suggests failure or incompletion.",
             ))
 
+        if _unverified_done(step, self._last_action_signature):
+            signals.append(RiskSignal(
+                key="unverified_done",
+                category="progress",
+                value=1.0,
+                weight=0.80,
+                reason="The model declared success before any verified GUI progress was recorded.",
+            ))
+
         if self._has_safety_keyword(
             action=step.action,
             task=step.task,
@@ -451,6 +460,14 @@ def _premature_done(step: StepMonitorInput) -> bool:
         "未完成",
     )
     return any(hint in text for hint in failure_hints)
+
+
+def _unverified_done(step: StepMonitorInput, last_action_signature: tuple[Any, ...] | None) -> bool:
+    return (
+        step.action.action_type == "done"
+        and step.action.status == "success"
+        and last_action_signature is None
+    )
 
 
 def _observation_text(observation: Observation | None) -> str:

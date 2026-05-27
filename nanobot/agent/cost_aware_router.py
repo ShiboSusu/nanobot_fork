@@ -72,6 +72,12 @@ class CostAwareProblemRouter:
         "相机", "照片", "备忘录", "提醒事项", "地图", "天气", "app store",
         "文件", "电话", "短信",
     )
+    _SENSITIVE_APP_TERMS = (
+        "支付宝", "银行", "钱包", "招商银行", "工商银行", "建设银行",
+        "农业银行", "中国银行", "交通银行", "平安银行", "中信银行",
+        "浦发银行", "民生银行", "广发银行", "兴业银行", "花呗", "借呗",
+        "alipay", "bank", "wallet",
+    )
     _FOLLOW_UP_TERMS = (
         "然后", "之后", "接着", "再", "并", "并且", "同时",
         "点击", "点一下", "输入", "搜索框", "填写", "发送", "发消息",
@@ -120,6 +126,21 @@ class CostAwareProblemRouter:
 
         system_intent = self._system_action_intent(normalized)
         if system_intent and "gui_task" in available:
+            if system_intent == "open_app" and self._mentions_sensitive_app(normalized):
+                return RouteDecision(
+                    route=RouteKind.HUMAN_CONFIRM,
+                    reason="Opening a financial or sensitive account app may expose private state.",
+                    policy=PolicyDecision(
+                        action=PolicyAction.ASK_HUMAN_CONFIRM,
+                        categories=("sensitive_app_open",),
+                        reason="Sensitive app opens require user confirmation before device execution.",
+                        matched_terms=tuple(
+                            term for term in self._SENSITIVE_APP_TERMS if term in normalized
+                        ),
+                        source="router",
+                    ),
+                    requires_gui=False,
+                )
             return RouteDecision(
                 route=RouteKind.SYSTEM_ACTION,
                 reason="A device system action can solve this without visual exploration.",
@@ -205,6 +226,9 @@ class CostAwareProblemRouter:
             any(term in normalized for term in app_terms)
             and any(term in normalized for term in app_gui_operation_terms)
         )
+
+    def _mentions_sensitive_app(self, normalized: str) -> bool:
+        return any(term in normalized for term in self._SENSITIVE_APP_TERMS)
 
     @staticmethod
     def _normalize(task: str) -> str:
