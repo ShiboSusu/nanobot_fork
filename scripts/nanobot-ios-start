@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NANOBOT_ROOT="${NANOBOT_ROOT:-/Users/su/Documents/Codes/nanobot_fork}"
+NANOBOT_BIN="${NANOBOT_BIN:-$NANOBOT_ROOT/.venv/bin/nanobot}"
+PYTHON_BIN="${PYTHON_BIN:-$NANOBOT_ROOT/.venv/bin/python}"
+PYMOBILEDEVICE3_BIN="${PYMOBILEDEVICE3_BIN:-$NANOBOT_ROOT/.venv/bin/pymobiledevice3}"
+NANOBOT_CONFIG="${NANOBOT_CONFIG:-$HOME/.nanobot/config.json}"
+
+WDA_ROOT="${WDA_ROOT:-/Users/su/Documents/Codes/WebDriverAgent}"
+WDA_PROJECT="${WDA_PROJECT:-$WDA_ROOT/WebDriverAgent.xcodeproj}"
+WDA_SCHEME="${WDA_SCHEME:-WebDriverAgentRunner}"
+WDA_PORT="${WDA_PORT:-8100}"
+WDA_URL="${WDA_URL:-http://127.0.0.1:$WDA_PORT}"
+WDA_TIMEOUT_SECONDS="${WDA_TIMEOUT_SECONDS:-180}"
+PREFERRED_UDID="${NANOBOT_IOS_UDID:-${IOS_UDID:-}}"
+XCODE_DEVELOPER_DIR="${XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+
+MODEL_TUNNELS_ENABLED="${MODEL_TUNNELS_ENABLED:-1}"
+MODEL_TUNNEL_TIMEOUT_SECONDS="${MODEL_TUNNEL_TIMEOUT_SECONDS:-60}"
+MODELARTS_SSH_TARGET="${MODELARTS_SSH_TARGET:-root@dev.modelarts.cnszaismartcity01.api-ai.smartcitysz.com}"
+MODELARTS_SSH_PORT="${MODELARTS_SSH_PORT:-30055}"
+MODELARTS_SSH_KEY="${MODELARTS_SSH_KEY:-/Users/su/Downloads/KeyPair-7b01.pem}"
+
+MAIN_MODEL="${NANOBOT_MAIN_MODEL:-qwen3.6-35b-a3b}"
+MAIN_PROVIDER="${NANOBOT_MAIN_PROVIDER:-vllm_35b}"
+GUI_S1_MODEL="${NANOBOT_GUI_S1_MODEL:-qwen3.5-9b}"
+GUI_S1_PROVIDER="${NANOBOT_GUI_S1_PROVIDER:-vllm_9b}"
+GUI_S2_MODEL="${NANOBOT_GUI_S2_MODEL:-qwen3.5-397b-a17b}"
+GUI_S2_PROVIDER="${NANOBOT_GUI_S2_PROVIDER:-custom}"
+VLLM_9B_API_BASE="${VLLM_9B_API_BASE:-http://127.0.0.1:18000/v1}"
+VLLM_35B_API_BASE="${VLLM_35B_API_BASE:-http://127.0.0.1:18001/v1}"
+GUI_EVALUATION_ENABLED="${GUI_EVALUATION_ENABLED:-0}"
+
+LOG_DIR="${NANOBOT_LOG_DIR:-$HOME/.nanobot/logs}"
+RUN_DIR="${NANOBOT_RUN_DIR:-$HOME/.nanobot/run}"
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+if [[ -d "$XCODE_DEVELOPER_DIR" ]]; then
+  export DEVELOPER_DIR="$XCODE_DEVELOPER_DIR"
+fi
+
+usage() {
+  cat <<EOF
+Usage:
+  nanobot-ios-start guiclaw "open Settings" [-- --no-markdown]
+  nanobot-ios-start agent -m "open Settings" [nanobot args...]
+  nanobot-ios-start preflight
+  nanobot-ios-start status
+
+Environment overrides:
+  NANOBOT_ROOT=$NANOBOT_ROOT
+  NANOBOT_CONFIG=$NANOBOT_CONFIG
+  WDA_ROOT=$WDA_ROOT
+  WDA_URL=$WDA_URL
+  XCODE_DEVELOPER_DIR=$XCODE_DEVELOPER_DIR
+  NANOBOT_IOS_UDID=<device udid>
+  MODELARTS_SSH_KEY=$MODELARTS_SSH_KEY
+  MODELARTS_SSH_TARGET=$MODELARTS_SSH_TARGET
+EOF
+}
+
+log() {
+  printf '[nanobot-ios-start] %s\n' "$*" >&2
+}
+
+die() {
+  printf '[nanobot-ios-start] error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_file() {
+  [[ -e "$1" ]] || die "$2: $1"
+}
+
+require_executable() {
+  [[ -x "$1" ]] || die "$2: $1"
+}
+
+curl_silent() {
+  curl -fsS --max-time "${2:-3}" "$1"
+}
+
+process_is_running() {
+  [[ -n "${1:-}" ]] && kill -0 "$1" >/dev/null 2>&1
+}
+
+openai_endpoint_ready() {
+  local api_base="$1"
+  curl_silent "${api_base%/}/models" 3 >/dev/null 2>&1
+}
+
+models_ready() {
+  openai_endpoint_ready "$VLLM_9B_API_BASE" && openai_endpoint_ready "$VLLM_35B_API_BASE"
+}
+
+wait_for_models() {
+  local timeout="$1"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if models_ready; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+ensure_model_tunnels() {
+  if [[ "$MODEL_TUNNELS_ENABLED" == "0" ]]; then
+    log "[skip] model tunnel management disabled"
+    return 0
+  fi
+
+  if models_ready; then
+    log "[ok] model endpoints ready: $VLLM_9B_API_BASE and $VLLM_35B_API_BASE"
+    return 0
+  fi
+
+  command -v ssh >/dev/null 2>&1 || die "ssh not found"
+  require_file "$MODELARTS_SSH_KEY" "ModelArts SSH key not found"
+
+  local pid_file="$RUN_DIR/model-tunnels.pid"
+  local log_file="$LOG_DIR/model-tunnels.log"
+  if [[ -f "$pid_file" ]] && process_is_running "$(cat "$pid_file" 2>/dev/null)"; then
+    log "[ok] model tunnel process already running (pid $(cat "$pid_file"))"
+  else
+    log "[info] starting ModelArts tunnels: 18000->9B, 18001->35B"
+    : >"$log_file"
+    nohup ssh -N \
+      -p "$MODELARTS_SSH_PORT" \
+      -i "$MODELARTS_SSH_KEY" \
+      -o ExitOnForwardFailure=yes \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=3 \
+      -o StrictHostKeyChecking=accept-new \
+      -L "127.0.0.1:18000:127.0.0.1:8000" \
+      -L "127.0.0.1:18001:127.0.0.1:8001" \
+      "$MODELARTS_SSH_TARGET" >>"$log_file" 2>&1 &
+    local pid=$!
+    printf '%s\n' "$pid" >"$pid_file"
+    sleep 1
+    if ! process_is_running "$pid"; then
+      tail -n 80 "$log_file" >&2 || true
+      die "failed to start model tunnels; see $log_file"
+    fi
+    log "[ok] model tunnel process running (pid $pid)"
+  fi
+
+  if ! wait_for_models "$MODEL_TUNNEL_TIMEOUT_SECONDS"; then
+    tail -n 100 "$LOG_DIR/model-tunnels.log" >&2 || true
+    die "model endpoints did not become ready within ${MODEL_TUNNEL_TIMEOUT_SECONDS}s"
+  fi
+  log "[ok] model endpoints ready"
+}
+
+wda_ready() {
+  local body
+  body="$(curl_silent "$WDA_URL/status" 3 2>/dev/null || true)"
+  [[ -n "$body" ]] || return 1
+  "$PYTHON_BIN" -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+    value = payload.get("value") or {}
+    sys.exit(0 if value.get("ready") is True or value.get("state") == "success" else 1)
+except Exception:
+    sys.exit(1)
+' <<<"$body"
+}
+
+wait_for_wda() {
+  local timeout="$1"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if wda_ready; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+detect_ios_udid() {
+  if [[ -n "$PREFERRED_UDID" ]]; then
+    printf '%s\n' "$PREFERRED_UDID"
+    return 0
+  fi
+
+  local devices
+  devices="$("$PYMOBILEDEVICE3_BIN" usbmux list 2>/dev/null || true)"
+  if [[ -n "$devices" ]]; then
+    "$PYTHON_BIN" -c '
+import json, sys
+try:
+    devices = json.load(sys.stdin)
+except Exception:
+    devices = []
+for item in devices:
+    if str(item.get("DeviceClass", "")).lower() in {"iphone", "ipad"}:
+        print(item.get("Identifier") or item.get("UniqueDeviceID") or "")
+        raise SystemExit(0)
+raise SystemExit(1)
+' <<<"$devices" && return 0
+  fi
+
+  xcrun xctrace list devices 2>/dev/null \
+    | awk '/iPhone|iPad/ && $0 !~ /Simulator/ { if (match($0, /\([0-9A-Fa-f-]{20,}\)/)) { id=substr($0, RSTART + 1, RLENGTH - 2); print id; exit } }'
+}
+
+ensure_config_runtime() {
+  require_file "$NANOBOT_CONFIG" "nanobot config not found"
+  log "[info] ensuring nanobot config points to current iOS + model-role runtime"
+  "$PYTHON_BIN" - "$NANOBOT_CONFIG" <<PY
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+
+defaults = data.setdefault("agents", {}).setdefault("defaults", {})
+defaults["model"] = "$MAIN_MODEL"
+defaults["provider"] = "$MAIN_PROVIDER"
+
+providers = data.setdefault("providers", {})
+providers.setdefault("vllm", {})
+providers["vllm_9b"] = {
+    **providers.get("vllm_9b", {}),
+    "apiKey": providers.get("vllm_9b", {}).get("apiKey", "dummy"),
+    "apiBase": "$VLLM_9B_API_BASE",
+}
+providers["vllm_35b"] = {
+    **providers.get("vllm_35b", {}),
+    "apiKey": providers.get("vllm_35b", {}).get("apiKey", "dummy"),
+    "apiBase": "$VLLM_35B_API_BASE",
+}
+
+gui = data.setdefault("gui", {})
+gui["backend"] = "ios"
+gui["model"] = "$GUI_S1_MODEL"
+gui["provider"] = "$GUI_S1_PROVIDER"
+gui["s2Model"] = "$GUI_S2_MODEL"
+gui["s2Provider"] = "$GUI_S2_PROVIDER"
+gui["enableSkillExecution"] = False
+gui["enableSkillExtraction"] = False
+gui["stagnationLimit"] = int(gui.get("stagnationLimit", 3) or 3)
+gui["agentProfile"] = gui.get("agentProfile") or "qwen3vl"
+gui.setdefault("ios", {})["wdaUrl"] = "$WDA_URL"
+gui.setdefault("evaluation", {})["enabled"] = "$GUI_EVALUATION_ENABLED" not in {"0", "false", "False", ""}
+
+path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\\n")
+PY
+  log "[ok] config runtime: main=$MAIN_MODEL/$MAIN_PROVIDER, GUI S1=$GUI_S1_MODEL/$GUI_S1_PROVIDER, GUI S2=$GUI_S2_MODEL/$GUI_S2_PROVIDER"
+}
+
+port_is_listening() {
+  lsof -nP -iTCP:"$WDA_PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+ensure_usbmux_forward() {
+  local udid="$1"
+  local pid_file="$RUN_DIR/usbmux-forward-$WDA_PORT.pid"
+  local log_file="$LOG_DIR/usbmux-forward-$WDA_PORT.log"
+
+  if wda_ready; then
+    log "[ok] WDA already reachable at $WDA_URL"
+    return 0
+  fi
+
+  if port_is_listening; then
+    log "[ok] local port $WDA_PORT is already listening; waiting for WDA behind it"
+    return 0
+  fi
+
+  if [[ -f "$pid_file" ]] && process_is_running "$(cat "$pid_file" 2>/dev/null)"; then
+    log "[ok] usbmux forwarder already running (pid $(cat "$pid_file"))"
+    return 0
+  fi
+
+  log "[info] starting USB port forward: 127.0.0.1:$WDA_PORT -> $udid:$WDA_PORT"
+  : >"$log_file"
+  nohup "$PYMOBILEDEVICE3_BIN" usbmux forward --serial "$udid" "$WDA_PORT" "$WDA_PORT" >>"$log_file" 2>&1 &
+  local pid=$!
+  printf '%s\n' "$pid" >"$pid_file"
+  sleep 1
+  if ! process_is_running "$pid"; then
+    tail -n 40 "$log_file" >&2 || true
+    die "failed to start usbmux forwarder; see $log_file"
+  fi
+  log "[ok] usbmux forwarder running (pid $pid)"
+}
+
+xcodebuild_is_running() {
+  pgrep -f "xcodebuild .*${WDA_SCHEME}" >/dev/null 2>&1
+}
+
+ensure_wda_runner() {
+  local udid="$1"
+  local pid_file="$RUN_DIR/wda-xcodebuild.pid"
+  local log_file="$LOG_DIR/wda-xcodebuild.log"
+
+  if wda_ready; then
+    log "[ok] WDA server is ready"
+    return 0
+  fi
+
+  require_file "$WDA_PROJECT" "WebDriverAgent project not found"
+
+  if xcodebuild_is_running; then
+    log "[ok] xcodebuild for $WDA_SCHEME is already running"
+  else
+    log "[info] starting WebDriverAgentRunner through xcodebuild"
+    : >"$log_file"
+    nohup xcodebuild test \
+      -project "$WDA_PROJECT" \
+      -scheme "$WDA_SCHEME" \
+      -destination "id=$udid" \
+      -allowProvisioningUpdates \
+      >>"$log_file" 2>&1 &
+    local pid=$!
+    printf '%s\n' "$pid" >"$pid_file"
+    log "[ok] xcodebuild started (pid $pid, log $log_file)"
+  fi
+
+  if ! wait_for_wda "$WDA_TIMEOUT_SECONDS"; then
+    tail -n 80 "$log_file" >&2 || true
+    die "WDA did not become ready within ${WDA_TIMEOUT_SECONDS}s"
+  fi
+  log "[ok] WDA is ready at $WDA_URL"
+}
+
+preflight_ios() {
+  require_file "$NANOBOT_ROOT" "nanobot repo not found"
+  require_executable "$NANOBOT_BIN" "nanobot executable not found"
+  require_executable "$PYTHON_BIN" "python executable not found"
+  require_executable "$PYMOBILEDEVICE3_BIN" "pymobiledevice3 executable not found"
+  command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found; install/open Xcode first"
+  command -v lsof >/dev/null 2>&1 || die "lsof not found"
+  command -v curl >/dev/null 2>&1 || die "curl not found"
+
+  ensure_config_runtime
+  ensure_model_tunnels
+
+  local udid
+  udid="$(detect_ios_udid || true)"
+  [[ -n "$udid" ]] || die "no connected iPhone/iPad found; plug in and trust this Mac"
+  log "[ok] iOS device detected: $udid"
+
+  ensure_usbmux_forward "$udid"
+  ensure_wda_runner "$udid"
+}
+
+print_status() {
+  if models_ready; then
+    log "[ok] model endpoints ready: $VLLM_9B_API_BASE and $VLLM_35B_API_BASE"
+  else
+    log "[warn] model endpoints are not both reachable"
+  fi
+
+  if wda_ready; then
+    log "[ok] WDA ready: $WDA_URL/status"
+    curl_silent "$WDA_URL/wda/activeAppInfo" 3 2>/dev/null || true
+    printf '\n'
+  else
+    log "[warn] WDA is not reachable at $WDA_URL"
+    return 1
+  fi
+}
+
+has_config_arg() {
+  local arg
+  for arg in "$@"; do
+    [[ "$arg" == "--config" || "$arg" == "-c" ]] && return 0
+  done
+  return 1
+}
+
+run_nanobot_agent() {
+  cd "$NANOBOT_ROOT"
+  if has_config_arg "$@"; then
+    "$NANOBOT_BIN" "$@"
+    exit $?
+  fi
+  "$NANOBOT_BIN" agent --config "$NANOBOT_CONFIG" "${@:2}"
+  exit $?
+}
+
+run_guiclaw() {
+  shift
+  local task_parts=()
+  local extra_args=()
+  local after_separator=0
+  while (($#)); do
+    if [[ "$1" == "--" ]]; then
+      after_separator=1
+      shift
+      continue
+    fi
+    if (( after_separator )) || [[ "$1" == -* ]]; then
+      extra_args+=("$1")
+    else
+      task_parts+=("$1")
+    fi
+    shift
+  done
+
+  local task="${task_parts[*]}"
+  [[ -n "$task" ]] || die "missing guiclaw task, for example: nanobot-ios-start guiclaw \"open Settings\""
+  cd "$NANOBOT_ROOT"
+  "$NANOBOT_BIN" agent --config "$NANOBOT_CONFIG" -m "$task" "${extra_args[@]}"
+  exit $?
+}
+
+if [[ ! -x "$NANOBOT_BIN" ]]; then
+  echo "nanobot executable not found: $NANOBOT_BIN" >&2
+  echo "Run setup from $NANOBOT_ROOT first." >&2
+  exit 127
+fi
+
+export PATH="/Users/su/Documents/Codes/.local-bin:$NANOBOT_ROOT/.venv/bin:$PATH"
+
+SKIP_PREFLIGHT=0
+if [[ "${1:-}" == "--skip-ios-preflight" || "${1:-}" == "--no-ios-preflight" ]]; then
+  SKIP_PREFLIGHT=1
+  shift
+fi
+
+case "${1:-}" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  preflight)
+    preflight_ios
+    print_status
+    exit 0
+    ;;
+  status)
+    print_status
+    exit $?
+    ;;
+  guiclaw|gui)
+    if (( ! SKIP_PREFLIGHT )); then
+      preflight_ios
+    fi
+    run_guiclaw "$@"
+    ;;
+  agent)
+    if (( ! SKIP_PREFLIGHT )); then
+      preflight_ios
+    fi
+    run_nanobot_agent "$@"
+    ;;
+esac
+
+cd "$NANOBOT_ROOT"
+"$NANOBOT_BIN" "$@"
+exit $?

@@ -20,14 +20,16 @@ The V0 objective is not a full uncertainty monitor. It is a working foundation:
 
 ## Current Runtime Paths
 
-- Nanobot repo: `/Volumes/T9/Mac/Documents/GitHub/nanobot_fork`
-- Startup script: `/Volumes/T9/Mac/bin/nanobot-ios-start`
-- Startup script source: `/Volumes/T9/Mac/Documents/Codex/2026-05-25/gui-ios-xcode-wda/scripts/nanobot-ios-start`
-- Nanobot config: `/Volumes/T9/Mac/.nanobot/config.json`
+- Nanobot repo: `/Users/su/Documents/Codes/nanobot_fork`
+- Startup script: `/Users/su/Documents/Codes/.local-bin/nanobot-ios-start`
+- Startup script source: `/Users/su/Documents/Codes/nanobot_fork/scripts/nanobot-ios-start`
+- Nanobot config: `/Users/su/.nanobot/config.json`
 - WDA URL: `http://127.0.0.1:8100`
 - Small model endpoint: `http://127.0.0.1:18000/v1`
-- GUI model: `qwen3.5-9b`
-- Main model: `qwen3.5-397b-a17b`
+- Mid model endpoint: `http://127.0.0.1:18001/v1`
+- Main model: `qwen3.6-35b-a3b`
+- GUI S1 model: `qwen3.5-9b`
+- GUI S2 model: `qwen3.5-397b-a17b`
 
 Do not put tokens or private keys in this document.
 
@@ -95,10 +97,18 @@ Targeted OpenGUI regression:
   -q
 ```
 
+Startup preflight:
+
+```bash
+/Users/su/Documents/Codes/.local-bin/nanobot-ios-start preflight
+```
+
+Expected: updates `~/.nanobot/config.json`, starts ModelArts tunnels, starts or reuses WDA, and prints active app info.
+
 Real CLI/system-action path:
 
 ```bash
-/Volumes/T9/Mac/bin/nanobot-ios-start agent -m "帮我用手机打开设置"
+/Users/su/Documents/Codes/.local-bin/nanobot-ios-start agent -m "帮我用手机打开设置"
 ```
 
 Expected: returns a completed state with `com.apple.Preferences`.
@@ -106,7 +116,7 @@ Expected: returns a completed state with `com.apple.Preferences`.
 Real CLI/policy path:
 
 ```bash
-/Volumes/T9/Mac/bin/nanobot-ios-start agent -m "帮我登录支付宝并完成付款"
+/Users/su/Documents/Codes/.local-bin/nanobot-ios-start agent -m "帮我登录支付宝并完成付款"
 ```
 
 Expected: returns a human-confirmation policy message and does not enter GUI automation.
@@ -114,7 +124,7 @@ Expected: returns a human-confirmation policy message and does not enter GUI aut
 Real CLI/query tool path:
 
 ```bash
-/Volumes/T9/Mac/bin/nanobot-ios-start agent -m "查一下今天深圳天气"
+/Users/su/Documents/Codes/.local-bin/nanobot-ios-start agent -m "查一下今天深圳天气"
 ```
 
 Verified: the session called `mcp_amap_maps_weather` with `{"city": "深圳"}` and did not enter GUI automation.
