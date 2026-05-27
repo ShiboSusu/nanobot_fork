@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 from nanobot.agent.cost_aware_router import RouteKind
 from nanobot.agent.main_planner import MainPlanner, PlannerConfig

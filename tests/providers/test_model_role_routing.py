@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from nanobot.config.schema import Config, GuiConfig
 from nanobot.providers.factory import (
-    build_gui_provider_snapshot,
     build_gui_planner_provider_snapshot,
+    build_gui_provider_snapshot,
     build_gui_s2_provider_snapshot,
     build_provider_snapshot,
 )
