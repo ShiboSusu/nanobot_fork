@@ -315,6 +315,14 @@ providers["vllm_35b"] = {
     "apiBase": "$VLLM_35B_API_BASE",
 }
 
+for provider_name in ("vllm_9b", "vllm_35b"):
+    provider_config = providers[provider_name]
+    extra_body = dict(provider_config.get("extraBody") or provider_config.get("extra_body") or {})
+    chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+    chat_template_kwargs["enable_thinking"] = False
+    extra_body["chat_template_kwargs"] = chat_template_kwargs
+    provider_config["extraBody"] = extra_body
+
 gui = data.setdefault("gui", {})
 gui["backend"] = "ios"
 gui["model"] = "$GUI_S1_MODEL"
@@ -493,7 +501,11 @@ run_guiclaw() {
   local task="${task_parts[*]}"
   [[ -n "$task" ]] || die "missing guiclaw task, for example: nanobot-ios-start guiclaw \"open Settings\""
   cd "$NANOBOT_ROOT"
-  "$NANOBOT_BIN" agent --config "$NANOBOT_CONFIG" -m "$task" "${extra_args[@]}"
+  if (( ${#extra_args[@]} )); then
+    "$NANOBOT_BIN" agent --config "$NANOBOT_CONFIG" -m "$task" "${extra_args[@]}"
+  else
+    "$NANOBOT_BIN" agent --config "$NANOBOT_CONFIG" -m "$task"
+  fi
   exit $?
 }
 
