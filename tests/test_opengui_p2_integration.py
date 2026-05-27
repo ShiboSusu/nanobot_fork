@@ -8,14 +8,13 @@ import copy
 import hashlib
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-from opengui.agent import AgentResult, GuiAgent
+from opengui.agent import GuiAgent
 from opengui.backends.dry_run import DryRunBackend
 from opengui.interfaces import LLMResponse, ToolCall
 from opengui.memory.retrieval import MemoryRetriever
@@ -24,7 +23,6 @@ from opengui.memory.types import MemoryEntry, MemoryType
 from opengui.skills.data import Skill, SkillStep
 from opengui.skills.library import SkillLibrary
 from opengui.trajectory.recorder import TrajectoryRecorder
-
 
 # ---------------------------------------------------------------------------
 # Test helpers
