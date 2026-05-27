@@ -17,7 +17,7 @@ class PlannerConfig:
     enabled: bool = False
     confidence_threshold: float = 0.65
     max_tokens: int = 512
-    timeout_seconds: float = 8.0
+    timeout_seconds: float = 30.0
 
 
 class MainPlanner:

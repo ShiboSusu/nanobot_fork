@@ -253,7 +253,7 @@ class AgentLoop:
                         gui_config.planner_confidence_threshold if gui_config else 0.65
                     ),
                     max_tokens=gui_config.planner_max_tokens if gui_config else 512,
-                    timeout_seconds=gui_config.planner_timeout_seconds if gui_config else 8.0,
+                    timeout_seconds=gui_config.planner_timeout_seconds if gui_config else 30.0,
                 ),
             )
             if gui_config is not None and gui_config.planner_enabled and planner_provider is not None

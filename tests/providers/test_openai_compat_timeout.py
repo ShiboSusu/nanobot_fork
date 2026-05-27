@@ -38,6 +38,7 @@ def test_openai_compat_provider_sets_timeout_on_local_http_client() -> None:
     client_kwargs = mock_http_client.call_args.kwargs
     _assert_openai_compat_timeout(client_kwargs["timeout"])
     assert client_kwargs["limits"].keepalive_expiry == 0
+    assert client_kwargs["trust_env"] is False
 
     openai_kwargs = mock_async_openai.call_args.kwargs
     _assert_openai_compat_timeout(openai_kwargs["timeout"])

@@ -299,6 +299,7 @@ class OpenAICompatProvider(LLMProvider):
             http_client = httpx.AsyncClient(
                 limits=httpx.Limits(keepalive_expiry=0),
                 timeout=timeout_s,
+                trust_env=False,
             )
 
         self._client = AsyncOpenAI(

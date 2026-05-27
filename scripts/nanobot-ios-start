@@ -28,6 +28,12 @@ GUI_S1_MODEL="${NANOBOT_GUI_S1_MODEL:-qwen3.5-9b}"
 GUI_S1_PROVIDER="${NANOBOT_GUI_S1_PROVIDER:-vllm_9b}"
 GUI_S2_MODEL="${NANOBOT_GUI_S2_MODEL:-qwen3.5-397b-a17b}"
 GUI_S2_PROVIDER="${NANOBOT_GUI_S2_PROVIDER:-custom}"
+PLANNER_ENABLED="${NANOBOT_PLANNER_ENABLED:-1}"
+PLANNER_MODEL="${NANOBOT_PLANNER_MODEL:-qwen3.6-35b-a3b}"
+PLANNER_PROVIDER="${NANOBOT_PLANNER_PROVIDER:-vllm_35b}"
+PLANNER_CONFIDENCE_THRESHOLD="${NANOBOT_PLANNER_CONFIDENCE_THRESHOLD:-0.65}"
+PLANNER_MAX_TOKENS="${NANOBOT_PLANNER_MAX_TOKENS:-512}"
+PLANNER_TIMEOUT_SECONDS="${NANOBOT_PLANNER_TIMEOUT_SECONDS:-30}"
 VLLM_9B_API_BASE="${VLLM_9B_API_BASE:-http://127.0.0.1:18000/v1}"
 VLLM_35B_API_BASE="${VLLM_35B_API_BASE:-http://127.0.0.1:18001/v1}"
 GUI_EVALUATION_ENABLED="${GUI_EVALUATION_ENABLED:-0}"
@@ -54,6 +60,12 @@ Environment overrides:
   WDA_URL=$WDA_URL
   XCODE_DEVELOPER_DIR=$XCODE_DEVELOPER_DIR
   NANOBOT_IOS_UDID=<device udid>
+  NANOBOT_PLANNER_ENABLED=$PLANNER_ENABLED
+  NANOBOT_PLANNER_MODEL=$PLANNER_MODEL
+  NANOBOT_PLANNER_PROVIDER=$PLANNER_PROVIDER
+  NANOBOT_PLANNER_CONFIDENCE_THRESHOLD=$PLANNER_CONFIDENCE_THRESHOLD
+  NANOBOT_PLANNER_MAX_TOKENS=$PLANNER_MAX_TOKENS
+  NANOBOT_PLANNER_TIMEOUT_SECONDS=$PLANNER_TIMEOUT_SECONDS
   MODELARTS_SSH_KEY=$MODELARTS_SSH_KEY
   MODELARTS_SSH_TARGET=$MODELARTS_SSH_TARGET
 EOF
@@ -84,6 +96,10 @@ process_is_running() {
   [[ -n "${1:-}" ]] && kill -0 "$1" >/dev/null 2>&1
 }
 
+truthy() {
+  [[ "${1:-}" != "0" && "${1:-}" != "false" && "${1:-}" != "False" && "${1:-}" != "" ]]
+}
+
 openai_endpoint_ready() {
   local api_base="$1"
   curl_silent "${api_base%/}/models" 3 >/dev/null 2>&1
@@ -91,7 +107,8 @@ openai_endpoint_ready() {
 
 uses_provider() {
   local provider="$1"
-  [[ "$MAIN_PROVIDER" == "$provider" || "$GUI_S1_PROVIDER" == "$provider" || "$GUI_S2_PROVIDER" == "$provider" ]]
+  [[ "$MAIN_PROVIDER" == "$provider" || "$GUI_S1_PROVIDER" == "$provider" || "$GUI_S2_PROVIDER" == "$provider" ]] && return 0
+  truthy "$PLANNER_ENABLED" && [[ "$PLANNER_PROVIDER" == "$provider" ]]
 }
 
 required_model_api_bases() {
@@ -104,15 +121,19 @@ required_model_api_bases() {
 }
 
 required_model_endpoint_label() {
-  local endpoints=()
+  local label=""
   while IFS= read -r api_base; do
-    [[ -n "$api_base" ]] && endpoints+=("$api_base")
+    [[ -z "$api_base" ]] && continue
+    if [[ -z "$label" ]]; then
+      label="$api_base"
+    else
+      label="$label, $api_base"
+    fi
   done < <(required_model_api_bases)
-  if (( ${#endpoints[@]} == 0 )); then
+  if [[ -z "$label" ]]; then
     printf 'none'
   else
-    local IFS=', '
-    printf '%s' "${endpoints[*]}"
+    printf '%s' "$label"
   fi
 }
 
@@ -300,6 +321,12 @@ gui["model"] = "$GUI_S1_MODEL"
 gui["provider"] = "$GUI_S1_PROVIDER"
 gui["s2Model"] = "$GUI_S2_MODEL"
 gui["s2Provider"] = "$GUI_S2_PROVIDER"
+gui["plannerEnabled"] = "$PLANNER_ENABLED" not in {"0", "false", "False", ""}
+gui["plannerModel"] = "$PLANNER_MODEL"
+gui["plannerProvider"] = "$PLANNER_PROVIDER"
+gui["plannerConfidenceThreshold"] = float("$PLANNER_CONFIDENCE_THRESHOLD")
+gui["plannerMaxTokens"] = int("$PLANNER_MAX_TOKENS")
+gui["plannerTimeoutSeconds"] = float("$PLANNER_TIMEOUT_SECONDS")
 gui["enableSkillExecution"] = False
 gui["enableSkillExtraction"] = False
 gui["stagnationLimit"] = int(gui.get("stagnationLimit", 3) or 3)
@@ -309,7 +336,7 @@ gui.setdefault("evaluation", {})["enabled"] = "$GUI_EVALUATION_ENABLED" not in {
 
 path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\\n")
 PY
-  log "[ok] config runtime: main=$MAIN_MODEL/$MAIN_PROVIDER, GUI S1=$GUI_S1_MODEL/$GUI_S1_PROVIDER, GUI S2=$GUI_S2_MODEL/$GUI_S2_PROVIDER"
+  log "[ok] config runtime: main=$MAIN_MODEL/$MAIN_PROVIDER, planner=$PLANNER_MODEL/$PLANNER_PROVIDER enabled=$PLANNER_ENABLED, GUI S1=$GUI_S1_MODEL/$GUI_S1_PROVIDER, GUI S2=$GUI_S2_MODEL/$GUI_S2_PROVIDER"
 }
 
 port_is_listening() {
@@ -411,9 +438,9 @@ preflight_ios() {
 
 print_status() {
   if models_ready; then
-    log "[ok] model endpoints ready: $VLLM_9B_API_BASE and $VLLM_35B_API_BASE"
+    log "[ok] required model endpoints ready: $(required_model_endpoint_label)"
   else
-    log "[warn] model endpoints are not both reachable"
+    log "[warn] required model endpoints are not all reachable: $(required_model_endpoint_label)"
   fi
 
   if wda_ready; then

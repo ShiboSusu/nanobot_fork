@@ -35,6 +35,10 @@ def test_gui_config_accepts_explicit_s2_model_and_provider() -> None:
     assert cfg.planner_timeout_seconds == 6
 
 
+def test_gui_config_default_planner_timeout_is_large_enough_for_remote_35b() -> None:
+    assert GuiConfig().planner_timeout_seconds == 30.0
+
+
 def test_provider_snapshots_keep_main_gui_s1_and_gui_s2_separate() -> None:
     cfg = Config.model_validate({
         "agents": {
