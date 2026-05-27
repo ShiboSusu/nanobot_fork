@@ -221,6 +221,21 @@ def test_parse_action_maps_coordinate_alias_pair() -> None:
     assert action.relative is True
 
 
+def test_parse_action_normalizes_fractional_relative_coordinates() -> None:
+    action = parse_action({
+        "action_type": "tap",
+        "x": 0.498,
+        "y": 0.195,
+        "relative": True,
+    })
+
+    assert action.relative is True
+    assert action.x == pytest.approx(497.502)
+    assert action.y == pytest.approx(194.805)
+    assert resolve_coordinate(action.x, 402, relative=action.relative) == 200
+    assert resolve_coordinate(action.y, 874, relative=action.relative) == 170
+
+
 def test_parse_action_maps_stringified_coordinate_alias_pair() -> None:
     action = parse_action({
         "action": "tap",

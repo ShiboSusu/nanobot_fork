@@ -135,6 +135,11 @@ def parse_action(payload: dict[str, typing.Any]) -> Action:
     pixels = _optional_int(payload, "pixels", action_type)
     duration_ms = _optional_int(payload, "duration_ms", action_type)
     relative = bool(payload.get("relative", False))
+    if relative:
+        x = _normalize_fractional_relative_coordinate(x)
+        y = _normalize_fractional_relative_coordinate(y)
+        x2 = _normalize_fractional_relative_coordinate(x2)
+        y2 = _normalize_fractional_relative_coordinate(y2)
     status = _optional_str(payload, "status")
     auto_enter = bool(payload.get("auto_enter", True))
 
@@ -206,6 +211,14 @@ def _fmt_coord(action: Action) -> str:
     if action.relative:
         return f"({action.x}/{_RELATIVE_GRID_MAX}, {action.y}/{_RELATIVE_GRID_MAX})"
     return f"({action.x}, {action.y})"
+
+
+def _normalize_fractional_relative_coordinate(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if 0.0 < value < 1.0:
+        return value * _RELATIVE_GRID_MAX
+    return value
 
 
 def _normalize_coordinate_payload(payload: dict[str, typing.Any]) -> dict[str, typing.Any]:
