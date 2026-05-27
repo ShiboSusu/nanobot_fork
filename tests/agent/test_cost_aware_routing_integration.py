@@ -17,8 +17,14 @@ from nanobot.providers.base import LLMResponse
 
 
 class _FakeGuiTaskTool(Tool):
-    def __init__(self) -> None:
+    def __init__(self, payload: dict[str, Any] | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._payload = payload or {
+            "success": True,
+            "summary": "system action completed",
+            "steps_taken": 1,
+            "error": None,
+        }
 
     @property
     def name(self) -> str:
@@ -38,14 +44,7 @@ class _FakeGuiTaskTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         self.calls.append(dict(kwargs))
-        return json.dumps(
-            {
-                "success": True,
-                "summary": "system action completed",
-                "steps_taken": 1,
-                "error": None,
-            }
-        )
+        return json.dumps(self._payload)
 
 
 def _make_loop(tmp_path: Path) -> AgentLoop:
@@ -256,7 +255,7 @@ async def test_planner_subtask_policy_block_stops_before_gui(tmp_path: Path) -> 
             channel="cli",
             sender_id="u1",
             chat_id="cli-chat",
-            content="在京东金融里查看一下我的白条总额度是多少",
+            content="继续执行刚才那个账户信息检查计划",
         )
     )
 
@@ -267,6 +266,70 @@ async def test_planner_subtask_policy_block_stops_before_gui(tmp_path: Path) -> 
         or "blocked by policy" in response.content
     )
     assert gui_tool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_planner_subtasks_enabled_tool_plan_uses_route_hint(tmp_path: Path) -> None:
+    loop = _make_loop_with_planner(
+        tmp_path,
+        '{"route":"plan","confidence":0.9,"reason":"Public lookup",'
+        '"subtasks":[{"route":"web_search","tool":"web_search","task":"查询深圳天气"}]}',
+    )
+    assert loop._gui_config is not None
+    loop._gui_config.planner_subtasks_enabled = True
+    gui_tool = _FakeGuiTaskTool()
+    loop.tools.register(gui_tool)
+    loop._run_agent_loop = AsyncMock(return_value=("天气结果", [], [], "stop", False))  # type: ignore[method-assign]
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="u1",
+            chat_id="cli-chat",
+            content="查询一下今天深圳天气",
+        )
+    )
+
+    assert response is not None
+    assert response.content == "天气结果"
+    initial_messages = loop._run_agent_loop.await_args.args[0]  # type: ignore[attr-defined]
+    user_message = initial_messages[-1]["content"]
+    assert "Cost-Aware Router" in user_message
+    assert "Recommended route: tool_call" in user_message
+    assert gui_tool.calls == []
+    loop._main_planner.provider.chat_with_retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_planner_subtask_gui_failure_blocks_plan(tmp_path: Path) -> None:
+    loop = _make_loop_with_planner(
+        tmp_path,
+        '{"route":"plan","confidence":0.92,"reason":"App playback",'
+        '"subtasks":[{"id":"open_bilibili","route":"gui_task","task":"Open Bilibili"}]}',
+    )
+    assert loop._gui_config is not None
+    loop._gui_config.planner_subtasks_enabled = True
+    gui_tool = _FakeGuiTaskTool(payload={
+        "success": False,
+        "summary": "",
+        "steps_taken": 0,
+        "error": "wda down",
+    })
+    loop.tools.register(gui_tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="u1",
+            chat_id="cli-chat",
+            content="在B站播放罗翔的刑法课视频",
+        )
+    )
+
+    assert response is not None
+    assert "subtask_failed" in response.content
+    assert "1/1 subtasks completed" not in response.content
+    assert gui_tool.calls == [{"task": "Open Bilibili"}]
 
 
 @pytest.mark.asyncio

@@ -555,25 +555,17 @@ class AgentLoop:
         return result.summary
 
     def _planner_subtask_policy(self, task: str) -> PolicyDecision:
-        policy = self._problem_router.classify(
+        return self._problem_router.classify(
             task,
             available_tools=set(self.tools.tool_names),
         ).policy
-        if not policy.allowed:
-            return policy
 
-        normalized = " ".join((task or "").casefold().split())
-        if "白条" in normalized or ("京东金融" in normalized and "额度" in normalized):
-            return PolicyDecision(
-                PolicyAction.ASK_HUMAN_CONFIRM,
-                categories=("private_account_query",),
-                reason="Private financial account or credit-limit queries require user confirmation.",
-                matched_terms=tuple(
-                    term for term in ("京东金融", "白条", "额度") if term in normalized
-                ),
-                source="planner_subtask_policy",
-            )
-        return policy
+    @staticmethod
+    def _planner_plan_directly_executable(plan: PlannerPlan) -> bool:
+        executable_routes = {RouteKind.SYSTEM_ACTION, RouteKind.GUI}
+        return bool(plan.subtasks) and all(
+            subtask.route in executable_routes for subtask in plan.subtasks
+        )
 
     async def _dispatch_planner_subtask(self, subtask: PlannerSubtask) -> SubtaskExecution:
         if subtask.route == RouteKind.SYSTEM_ACTION:
@@ -620,7 +612,16 @@ class AgentLoop:
     @staticmethod
     def _subtask_execution_from_output(output: str) -> SubtaskExecution:
         lowered = output.lower()
-        if "error:" in lowered or "blocked" in lowered or "stagnation_detected" in lowered:
+        failure_markers = (
+            "error:",
+            "blocked",
+            "failed",
+            "not available",
+            "stagnation_detected",
+            "未完成",
+            "缺少可执行",
+        )
+        if any(marker in lowered for marker in failure_markers):
             return SubtaskExecution(
                 status=SubtaskStatus.FAILED,
                 output=output,
@@ -1245,6 +1246,7 @@ class AgentLoop:
                     content=content,
                     metadata=dict(msg.metadata or {}),
                 )
+            planner_route_decision: RouteDecision | None = None
             if (
                 self._main_planner is not None
                 and self._gui_config is not None
@@ -1255,20 +1257,26 @@ class AgentLoop:
                         msg.content,
                         available_tools=set(self.tools.tool_names),
                     )
-                    content = await self._execute_planner_plan(plan)
-                    self._save_direct_router_turn(session, msg.content, content)
-                    return OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=msg.chat_id,
-                        content=content,
-                        metadata=dict(msg.metadata or {}),
-                    )
+                    if self._planner_plan_directly_executable(plan):
+                        content = await self._execute_planner_plan(plan)
+                        self._save_direct_router_turn(session, msg.content, content)
+                        return OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=content,
+                            metadata=dict(msg.metadata or {}),
+                        )
+                    planner_route_decision = self._main_planner.plan_to_route_decision(plan)
                 except Exception as exc:
                     logger.warning(
                         "35B plan executor failed; falling back to route mode: {}",
                         exc,
                     )
-            route_decision = await self._plan_problem_route(msg.content)
+            route_decision = (
+                planner_route_decision
+                if planner_route_decision is not None
+                else await self._plan_problem_route(msg.content)
+            )
             if route_decision.route == RouteKind.HUMAN_CONFIRM:
                 content = self._policy_confirmation_message(route_decision)
                 self._save_direct_router_turn(session, msg.content, content)

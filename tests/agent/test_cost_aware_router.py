@@ -138,6 +138,19 @@ def test_private_account_query_requires_human_confirmation_not_web_search() -> N
     assert "private_account_query" in decision.policy.categories
 
 
+def test_jd_baitiao_credit_limit_requires_human_confirmation() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify(
+        "在京东金融里查看一下我的白条总额度是多少",
+        available_tools={"gui_task", "web_search"},
+    )
+
+    assert decision.route == RouteKind.HUMAN_CONFIRM
+    assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert "private_account_query" in decision.policy.categories
+
+
 def test_sensitive_financial_app_open_requires_human_confirmation() -> None:
     router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
 
