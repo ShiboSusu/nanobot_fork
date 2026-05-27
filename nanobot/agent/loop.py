@@ -521,6 +521,17 @@ class AgentLoop:
             available_tools=set(self.tools.tool_names),
         )
 
+    async def _plan_problem_route(self, content: str) -> RouteDecision:
+        if self._main_planner is not None:
+            try:
+                return await self._main_planner.plan(
+                    content,
+                    available_tools=set(self.tools.tool_names),
+                )
+            except Exception as exc:
+                logger.warning("35B planner failed; falling back to deterministic router: {}", exc)
+        return self._classify_problem_route(content)
+
     @staticmethod
     def _policy_confirmation_message(decision: RouteDecision) -> str:
         categories = ", ".join(decision.policy.categories) or "sensitive_action"
@@ -537,6 +548,14 @@ class AgentLoop:
         tool = self.tools.get("gui_task")
         if tool is None:
             return "GUI/system action tool is not available."
+        result = await tool.execute(task=task)
+        return self._format_router_tool_result(result)
+
+    async def _execute_gui_route(self, decision: RouteDecision, *, original_task: str) -> str:
+        task = decision.routed_task or original_task
+        tool = self.tools.get("gui_task")
+        if tool is None:
+            return "GUI tool is not available."
         result = await tool.execute(task=task)
         return self._format_router_tool_result(result)
 
@@ -1130,8 +1149,27 @@ class AgentLoop:
                     content=content,
                     metadata=dict(msg.metadata or {}),
                 )
+            route_decision = await self._plan_problem_route(msg.content)
+            if route_decision.route == RouteKind.HUMAN_CONFIRM:
+                content = self._policy_confirmation_message(route_decision)
+                self._save_direct_router_turn(session, msg.content, content)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                    metadata=dict(msg.metadata or {}),
+                )
             if route_decision.route == RouteKind.SYSTEM_ACTION:
                 content = await self._execute_system_action_route(route_decision)
+                self._save_direct_router_turn(session, msg.content, content)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=content,
+                    metadata=dict(msg.metadata or {}),
+                )
+            if route_decision.route == RouteKind.GUI:
+                content = await self._execute_gui_route(route_decision, original_task=msg.content)
                 self._save_direct_router_turn(session, msg.content, content)
                 return OutboundMessage(
                     channel=msg.channel,

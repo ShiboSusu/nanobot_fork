@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from nanobot.agent.cost_aware_router import RouteKind
 from nanobot.agent.main_planner import MainPlanner, PlannerConfig
+from nanobot.providers.base import LLMResponse
 
 
 def test_parse_gui_plan_to_route_decision() -> None:
@@ -78,3 +81,26 @@ def test_parse_rejects_unknown_route() -> None:
             '{"route":"shell","confidence":0.9,"reason":"bad","subtasks":[]}',
             original_task="运行命令",
         )
+
+
+@pytest.mark.asyncio
+async def test_planner_uses_content_json_without_native_tool_calls() -> None:
+    provider = SimpleNamespace(
+        chat_with_retry=AsyncMock(return_value=LLMResponse(
+            content='{"route":"tool_call","confidence":0.9,"reason":"Public lookup","subtasks":[]}'
+        ))
+    )
+    planner = MainPlanner(
+        provider=provider,
+        model="qwen3.6-35b-a3b",
+        config=PlannerConfig(enabled=True),
+    )
+
+    decision = await planner.plan("查询深圳天气", available_tools={"web_search", "gui_task"})
+
+    assert decision.route == RouteKind.TOOL_CALL
+    call = provider.chat_with_retry.await_args
+    assert call.kwargs["tools"] is None
+    assert call.kwargs["tool_choice"] is None
+    assert call.kwargs["model"] == "qwen3.6-35b-a3b"
+    assert "Return only JSON" in call.args[0][0]["content"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -100,6 +101,53 @@ class MainPlanner:
             policy=PolicyDecision(PolicyAction.ALLOW),
             requires_gui=False,
         )
+
+    async def plan(
+        self,
+        task: str,
+        *,
+        available_tools: set[str] | frozenset[str],
+    ) -> RouteDecision:
+        if self.provider is None:
+            raise RuntimeError("planner provider is not configured")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are the main task planner/router for nanobot. "
+                    "Choose the cheapest safe route for the user's request. "
+                    "Use content-only JSON, no native tool calls. "
+                    "Allowed top-level routes: tool_call, system_action, gui_task, ask_user, s2. "
+                    "Public information lookup should use tool_call. "
+                    "Tasks inside a mobile app should use gui_task. "
+                    "Safe one-shot device actions can use system_action. "
+                    "Ambiguous tasks should use ask_user. "
+                    "Return only JSON with route, confidence, reason, subtasks, and risk_notes."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": task,
+                        "available_tools": sorted(available_tools),
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        response = await asyncio.wait_for(
+            self.provider.chat_with_retry(
+                messages,
+                tools=None,
+                model=self.model,
+                max_tokens=self.config.max_tokens,
+                temperature=0.0,
+                tool_choice=None,
+            ),
+            timeout=self.config.timeout_seconds,
+        )
+        return self.parse_decision(response.content or "", original_task=task)
 
     @classmethod
     def _parse_json_payload(cls, content: str) -> dict[str, Any]:
