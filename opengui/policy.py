@@ -118,6 +118,16 @@ class PolicyStore:
             ),
             reason="Account security changes require user confirmation.",
         ),
+        PolicyRule(
+            category="financial_or_account_read",
+            action=PolicyAction.ASK_HUMAN_CONFIRM,
+            terms=(
+                "蚂蚁森林", "余额", "账单", "资产", "在线状态", "q我吧",
+                "状态是不是", "account balance", "account status",
+                "presence status",
+            ),
+            reason="Financial, account, and presence status reads require user confirmation.",
+        ),
     )
 
     def __init__(self, rules: tuple[PolicyRule, ...] | None = None) -> None:

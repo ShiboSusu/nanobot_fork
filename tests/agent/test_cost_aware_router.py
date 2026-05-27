@@ -89,6 +89,45 @@ def test_query_task_prefers_tool_call_without_gui() -> None:
     assert decision.requires_gui is False
 
 
+def test_in_app_search_uses_gui_not_web_search() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("在抖音里搜索“旅行Vlog”", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.GUI
+    assert decision.requires_gui is True
+
+
+def test_train_schedule_query_prefers_tool_call_without_gui() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("看看今天下午去天津的火车，要快一点的", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.TOOL_CALL
+    assert decision.suggested_tools == ("web_search", "web_fetch")
+    assert decision.requires_gui is False
+
+
+def test_financial_account_read_requires_human_confirmation() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("打开支付宝，看看我的蚂蚁森林能量有多少克", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.HUMAN_CONFIRM
+    assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert "financial_or_account_read" in decision.policy.categories
+
+
+def test_account_presence_read_requires_human_confirmation() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify("检查我的QQ在线状态是不是“Q我吧”", available_tools={"gui_task", "web_search"})
+
+    assert decision.route == RouteKind.HUMAN_CONFIRM
+    assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert "financial_or_account_read" in decision.policy.categories
+
+
 def test_noop_skill_library_keeps_skill_interface_disabled() -> None:
     library = NoopSkillLibrary()
 

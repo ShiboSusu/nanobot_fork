@@ -56,6 +56,7 @@ class CostAwareProblemRouter:
     _QUERY_TERMS = (
         "查", "查询", "搜索", "天气", "新闻", "汇率", "价格", "百科",
         "资料", "信息", "路线", "地址", "几点", "多少", "最新",
+        "火车", "高铁", "动车", "列车", "车次", "车票", "航班", "机票",
         "search", "look up", "weather", "news", "exchange rate", "price",
         "what is", "who is", "when is", "where is", "how many",
     )
@@ -74,8 +75,8 @@ class CostAwareProblemRouter:
     _FOLLOW_UP_TERMS = (
         "然后", "之后", "接着", "再", "并", "并且", "同时",
         "点击", "点一下", "输入", "搜索框", "填写", "发送", "发消息",
-        "购买", "付款", "登录", "选择", "切换", "查看", "进入", "改成",
-        "调到", "滑动",
+        "购买", "付款", "登录", "选择", "切换", "查看", "看看",
+        "检查", "播放", "进入", "改成", "调到", "滑动",
         "then", "and then", "tap", "click", "type", "send", "pay",
         "login", "log in", "select", "switch",
     )
@@ -188,10 +189,22 @@ class CostAwareProblemRouter:
         return any(term in normalized for term in self._QUERY_TERMS)
 
     def _has_device_gui_context(self, normalized: str) -> bool:
-        return any(term in normalized for term in (
+        if any(term in normalized for term in (
             "手机", "iphone", "ios", "app", "应用", "软件", "设置", "搜索框",
             "点击", "输入", "打开", "启动", "open", "launch", "tap", "click",
-        ))
+        )):
+            return True
+
+        app_terms = (term for term in self._COMMON_APP_TERMS if term not in {"天气"})
+        app_gui_operation_terms = (
+            *self._OPEN_TERMS,
+            "点击", "输入", "搜索", "查看", "看看", "检查", "播放", "进入",
+            "tap", "click", "type", "search", "watch", "play",
+        )
+        return (
+            any(term in normalized for term in app_terms)
+            and any(term in normalized for term in app_gui_operation_terms)
+        )
 
     @staticmethod
     def _normalize(task: str) -> str:
