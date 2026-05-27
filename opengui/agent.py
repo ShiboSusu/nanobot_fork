@@ -914,6 +914,9 @@ class GuiAgent:
         image_scale_ratio: float = 0.5,
         stagnation_limit: int = 0,
         autonomy_monitor: AutonomyMonitor | None = None,
+        s2_llm: LLMProvider | None = None,
+        s2_model: str | None = None,
+        s2_max_hints: int = 1,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -949,6 +952,13 @@ class GuiAgent:
             parsed_stagnation_limit = 0
         self.stagnation_limit = max(0, parsed_stagnation_limit)
         self._autonomy_monitor = autonomy_monitor or AutonomyMonitor()
+        self._s2_llm = s2_llm
+        self._s2_model = s2_model or model
+        try:
+            parsed_s2_max_hints = int(s2_max_hints)
+        except (TypeError, ValueError):
+            parsed_s2_max_hints = 1
+        self._s2_max_hints = max(0, parsed_s2_max_hints)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1229,6 +1239,7 @@ class GuiAgent:
 
         history: list[HistoryTurn] = []
         self._autonomy_monitor.reset()
+        s2_guidance: list[str] = []
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
         stagnation_streak = 0
@@ -1247,6 +1258,7 @@ class GuiAgent:
                 app_hint=app_hint,
                 memory_context=memory_context,
                 skill_context=skill_context,
+                s2_guidance=s2_guidance,
             )
             prompt_snapshot = self._snapshot_step_prompt(
                 task=task,
@@ -1554,6 +1566,45 @@ class GuiAgent:
                         ),
                     )
                 ]
+                if self._can_request_s2_guidance(monitor_decision, s2_guidance):
+                    hint, usage = await self._request_s2_guidance(
+                        task=task,
+                        step_index=step_index,
+                        action=result.action,
+                        current_observation=obs,
+                        next_observation=result.next_observation,
+                        tool_result=result.tool_result,
+                        action_summary=result.action_summary,
+                        state_summary=result.state_summary,
+                        monitor_payload=monitor_payload,
+                    )
+                    for k, v in usage.items():
+                        total_usage[k] = total_usage.get(k, 0) + v
+                    s2_guidance.append(hint)
+                    await self._log_attempt_event(
+                        run_dir,
+                        "s2_guidance",
+                        step_index=step_index,
+                        model=self._s2_model,
+                        hint=hint,
+                        monitor=monitor_payload,
+                    )
+                    await self._write_trace(
+                        run_dir / "trace.jsonl",
+                        self._scrub_for_artifact({
+                            "event": "s2_guidance",
+                            "step_index": step_index,
+                            "model": self._s2_model,
+                            "hint": hint,
+                            "monitor": monitor_payload,
+                            "timestamp": time.time(),
+                        }),
+                    )
+                    history = history_with_current_step
+                    if result.next_observation is not None:
+                        obs = result.next_observation
+                    continue
+
                 await self._log_attempt_event(
                     run_dir,
                     "autonomy_monitor_stop",
@@ -2403,6 +2454,7 @@ class GuiAgent:
         app_hint: str | None,
         memory_context: str | None = None,
         skill_context: str | None = None,
+        s2_guidance: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the prompt for the current step.
 
@@ -2429,6 +2481,7 @@ class GuiAgent:
             history=history,
             app_hint=app_hint,
             skill_context=skill_context,
+            s2_guidance=s2_guidance,
         )
         messages.append(
             self._current_user_message(
@@ -2450,6 +2503,7 @@ class GuiAgent:
         history: list[HistoryTurn],
         app_hint: str | None,
         skill_context: str | None = None,
+        s2_guidance: list[str] | None = None,
     ) -> str:
         """Build the text prompt that frames the current step."""
         recent_intents = self._format_recent_intents(
@@ -2493,6 +2547,15 @@ class GuiAgent:
                 f"Latest state summary: {latest_summary}",
             ])
 
+        if s2_guidance:
+            lines.extend([
+                "",
+                "System 2 recovery guidance:",
+                "\n".join(f"- {hint}" for hint in s2_guidance[-2:]),
+                "",
+                "Use this guidance to avoid repeating the failed pattern. Continue with the cheapest safe next GUI action.",
+            ])
+
         if skill_context:
             lines.extend([
                 "",
@@ -2504,6 +2567,76 @@ class GuiAgent:
             ])
 
         return "\n".join(lines)
+
+    def _can_request_s2_guidance(
+        self,
+        monitor_decision: Any,
+        s2_guidance: list[str],
+    ) -> bool:
+        if self._s2_llm is None or self._s2_max_hints <= 0:
+            return False
+        if len(s2_guidance) >= self._s2_max_hints:
+            return False
+        return monitor_decision.decision in {
+            AutonomyDecisionKind.HALT,
+            AutonomyDecisionKind.S2_TAKEOVER,
+        }
+
+    async def _request_s2_guidance(
+        self,
+        *,
+        task: str,
+        step_index: int,
+        action: Action,
+        current_observation: Observation,
+        next_observation: Observation | None,
+        tool_result: str,
+        action_summary: str | None,
+        state_summary: str | None,
+        monitor_payload: dict[str, Any],
+    ) -> tuple[str, dict[str, int]]:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are System 2 for a GUI agent. The small GUI model may be stuck "
+                    "or outside its reliable autonomy boundary. Give one concise recovery "
+                    "hint for the small model. Do not take unsafe actions; if the task is "
+                    "already complete, say to verify completion and call done."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": task,
+                        "step_index": step_index,
+                        "action": self._serialize_action(action),
+                        "action_summary": action_summary,
+                        "state_summary": state_summary,
+                        "tool_result": tool_result,
+                        "current_observation": self._serialize_observation(current_observation),
+                        "next_observation": self._serialize_observation(next_observation),
+                        "monitor": monitor_payload,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            },
+        ]
+        try:
+            response = await self._s2_llm.chat(
+                messages=messages,
+                model=self._s2_model,
+                max_tokens=512,
+            )
+        except Exception as exc:
+            return f"S2 guidance unavailable: {type(exc).__name__}: {exc}", {}
+
+        hint = (response.content or "").strip()
+        if not hint:
+            hint = "Re-check the current screen, avoid repeating the same action, and choose the next verifiable step."
+        return hint[:1200], dict(response.usage or {})
 
     @staticmethod
     def _format_recent_intents(history: list[HistoryTurn], *, window: int = 8) -> str:

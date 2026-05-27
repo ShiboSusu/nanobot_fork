@@ -50,6 +50,8 @@ class GuiSubagentTool(Tool):
         provider: "LLMProvider",
         model: str,
         workspace: Path,
+        s2_provider: "LLMProvider | None" = None,
+        s2_model: str | None = None,
         gui_event_callback: Any | None = None,
         gui_frame_callback: Any | None = None,
     ) -> None:
@@ -59,11 +61,18 @@ class GuiSubagentTool(Tool):
         self._gui_config = gui_config
         self._provider = provider
         self._model = model
+        self._s2_provider = s2_provider
+        self._s2_model = s2_model
         self._workspace = Path(workspace)
         self._gui_event_callback = gui_event_callback
         self._gui_frame_callback = gui_frame_callback
         self._llm_adapter = NanobotLLMAdapter(
             provider, model, capture_ttft=gui_config.capture_ttft,
+        )
+        self._s2_llm_adapter = (
+            NanobotLLMAdapter(s2_provider, s2_model, capture_ttft=gui_config.capture_ttft)
+            if s2_provider is not None and s2_model
+            else None
         )
         self._embedding_signature: str | None = self._resolve_embedding_signature()
         self._embedding_adapter = self._build_embedding_adapter() if gui_config.embedding_model else None
@@ -329,6 +338,8 @@ class GuiSubagentTool(Tool):
             agent_profile=self._gui_config.agent_profile,
             image_scale_ratio=self._gui_config.image_scale_ratio,
             stagnation_limit=self._gui_config.stagnation_limit,
+            s2_llm=self._s2_llm_adapter,
+            s2_model=self._s2_model,
         )
 
         result = await agent.run(task=task)

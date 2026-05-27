@@ -69,7 +69,7 @@ def test_from_config_passes_gui_runtime_to_agent_loop(tmp_path):
             self.workspace = kwargs["workspace"]
 
     with patch("nanobot.nanobot._make_provider", return_value=main_provider), \
-         patch("nanobot.nanobot._resolve_gui_runtime", return_value=(gui_provider, "gui-model")), \
+         patch("nanobot.nanobot._resolve_gui_runtime", return_value=(gui_provider, "gui-model", None, None)), \
          patch("nanobot.nanobot.AgentLoop", _FakeAgentLoop):
         bot = Nanobot.from_config(config_path, workspace=tmp_path)
 

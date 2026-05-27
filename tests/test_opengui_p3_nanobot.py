@@ -166,6 +166,7 @@ def test_agent_loop_registers_gui_tool_with_gui_runtime_override(tmp_workspace: 
     main_provider.get_default_model.return_value = "main-model"
     main_provider.generation = SimpleNamespace(max_tokens=4096)
     gui_provider = MagicMock()
+    gui_s2_provider = MagicMock()
 
     with patch("nanobot.agent.tools.gui.GuiSubagentTool", return_value=MagicMock()) as mock_gui_tool:
         AgentLoop(
@@ -176,11 +177,15 @@ def test_agent_loop_registers_gui_tool_with_gui_runtime_override(tmp_workspace: 
             gui_config=Config(gui={"backend": "dry-run"}).gui,
             gui_provider=gui_provider,
             gui_model="gui-model",
+            gui_s2_provider=gui_s2_provider,
+            gui_s2_model="s2-model",
         )
 
     kwargs = mock_gui_tool.call_args.kwargs
     assert kwargs["provider"] is gui_provider
     assert kwargs["model"] == "gui-model"
+    assert kwargs["s2_provider"] is gui_s2_provider
+    assert kwargs["s2_model"] == "s2-model"
 
 
 @pytest.mark.asyncio

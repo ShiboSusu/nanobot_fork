@@ -62,7 +62,13 @@ from nanobot.utils.progress_events import (
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, GuiConfig, ToolsConfig, WebToolsConfig
+    from nanobot.config.schema import (
+        ChannelsConfig,
+        ExecToolConfig,
+        GuiConfig,
+        ToolsConfig,
+        WebToolsConfig,
+    )
     from nanobot.cron.service import CronService
 
 
@@ -218,6 +224,8 @@ class AgentLoop:
         gui_config: "GuiConfig | None" = None,
         gui_provider: LLMProvider | None = None,
         gui_model: str | None = None,
+        gui_s2_provider: LLMProvider | None = None,
+        gui_s2_model: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
@@ -230,6 +238,8 @@ class AgentLoop:
         self._provider_signature = provider_signature
         self._gui_provider = gui_provider
         self._gui_model = gui_model
+        self._gui_s2_provider = gui_s2_provider
+        self._gui_s2_model = gui_s2_model
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = (
@@ -409,6 +419,8 @@ class AgentLoop:
                     gui_config=self._gui_config,
                     provider=self._gui_provider or self.provider,
                     model=self._gui_model or self.model,
+                    s2_provider=self._gui_s2_provider,
+                    s2_model=self._gui_s2_model,
                     workspace=self.workspace,
                 )
             )

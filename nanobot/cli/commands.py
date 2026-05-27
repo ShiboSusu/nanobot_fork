@@ -444,6 +444,20 @@ def _resolve_gui_runtime(config: Config):
     return snapshot.provider, snapshot.model
 
 
+def _resolve_gui_s2_runtime(config: Config):
+    """Resolve the optional GUI S2 provider/model pair."""
+    from nanobot.providers.factory import build_gui_s2_provider_snapshot
+
+    try:
+        snapshot = build_gui_s2_provider_snapshot(config)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    if snapshot is None:
+        return None, None
+    return snapshot.provider, snapshot.model
+
+
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import load_config, resolve_config_env_vars, set_config_path
@@ -540,6 +554,7 @@ def serve(
     bus = MessageBus()
     provider = _make_provider(runtime_config)
     gui_provider, gui_model = _resolve_gui_runtime(runtime_config)
+    gui_s2_provider, gui_s2_model = _resolve_gui_s2_runtime(runtime_config)
     session_manager = SessionManager(runtime_config.workspace_path)
     agent_loop = AgentLoop(
         bus=bus,
@@ -567,6 +582,8 @@ def serve(
         gui_config=runtime_config.gui,
         gui_provider=gui_provider,
         gui_model=gui_model,
+        gui_s2_provider=gui_s2_provider,
+        gui_s2_model=gui_s2_model,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -634,6 +651,7 @@ def _run_gateway(
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.providers.factory import (
         build_gui_provider_snapshot,
+        build_gui_s2_provider_snapshot,
         build_provider_snapshot,
         load_provider_snapshot,
     )
@@ -647,6 +665,7 @@ def _run_gateway(
     try:
         provider_snapshot = build_provider_snapshot(config)
         gui_provider_snapshot = build_gui_provider_snapshot(config)
+        gui_s2_provider_snapshot = build_gui_s2_provider_snapshot(config)
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
@@ -691,6 +710,8 @@ def _run_gateway(
         gui_config=config.gui,
         gui_provider=gui_provider_snapshot.provider if gui_provider_snapshot else None,
         gui_model=gui_provider_snapshot.model if gui_provider_snapshot else None,
+        gui_s2_provider=gui_s2_provider_snapshot.provider if gui_s2_provider_snapshot else None,
+        gui_s2_model=gui_s2_provider_snapshot.model if gui_s2_provider_snapshot else None,
     )
 
     from nanobot.agent.loop import UNIFIED_SESSION_KEY
@@ -1046,6 +1067,7 @@ def agent(
     bus = MessageBus()
     provider = _make_provider(config)
     gui_provider, gui_model = _resolve_gui_runtime(config)
+    gui_s2_provider, gui_s2_model = _resolve_gui_s2_runtime(config)
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
@@ -1086,6 +1108,8 @@ def agent(
         gui_config=config.gui,
         gui_provider=gui_provider,
         gui_model=gui_model,
+        gui_s2_provider=gui_s2_provider,
+        gui_s2_model=gui_s2_model,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):

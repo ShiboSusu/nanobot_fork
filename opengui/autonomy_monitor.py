@@ -153,7 +153,10 @@ class AutonomyMonitor:
         self.cumulative_risk = 1.0 - (1.0 - self.cumulative_risk) * (1.0 - risk)
 
         safety = any(signal.key == "safety_keyword_flag" for signal in signals)
-        cumulative_over_budget = self.cumulative_risk >= self.horizon_threshold
+        cumulative_over_budget = (
+            self.cumulative_risk >= self.horizon_threshold
+            and step.action.action_type != "done"
+        )
         red = safety or risk >= self.red_threshold or cumulative_over_budget
         amber = risk >= self.mid_threshold
 

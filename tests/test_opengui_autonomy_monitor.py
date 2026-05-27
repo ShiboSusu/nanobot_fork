@@ -94,9 +94,18 @@ def test_monitor_failed_observation_is_red_halt(tmp_path: Path) -> None:
 class _RecordingLLM:
     def __init__(self, responses: list[LLMResponse]) -> None:
         self._responses = list(responses)
+        self.calls: list[list[dict[str, object]]] = []
 
-    async def chat(self, messages, tools=None, tool_choice=None) -> LLMResponse:
-        del messages, tools, tool_choice
+    async def chat(
+        self,
+        messages,
+        tools=None,
+        tool_choice=None,
+        model=None,
+        max_tokens=None,
+    ) -> LLMResponse:
+        del tools, tool_choice, model, max_tokens
+        self.calls.append(messages)
         if not self._responses:
             raise AssertionError("No scripted responses left")
         return self._responses.pop(0)
@@ -178,3 +187,74 @@ async def test_gui_agent_records_monitor_decision_and_stops_on_red(tmp_path: Pat
     ]
     monitor_events = [event for event in trajectory_events if event["type"] == "autonomy_monitor"]
     assert monitor_events[-1]["decision"] == AutonomyDecisionKind.HALT.value
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_uses_s2_hint_before_halting_on_monitor_red(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor(horizon_threshold=0.20)
+    backend = _StaticScreenBackend()
+    s1 = _RecordingLLM([
+        LLMResponse(
+            content="Action: tap Settings",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 120,
+                        "y": 220,
+                        "intent": "tap Settings",
+                        "summary": "Settings is visible",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-2",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "intent": "confirm task is complete after S2 guidance",
+                        "summary": "Settings is open",
+                    },
+                )
+            ],
+        ),
+    ])
+    s2 = _RecordingLLM([
+        LLMResponse(content="Recovery hint: stop tapping the same point; verify Settings is already open.")
+    ])
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task="点击屏幕上的设置图标", platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        include_date_context=False,
+        autonomy_monitor=monitor,
+        s2_llm=s2,
+        s2_model="qwen3.5-397b-a17b",
+        s2_max_hints=1,
+    )
+
+    result = await agent.run("点击屏幕上的设置图标", max_retries=1)
+
+    assert result.success is True
+    assert len(s2.calls) == 1
+    assert len(s1.calls) == 2
+
+    second_prompt = json.dumps(s1.calls[1], ensure_ascii=False)
+    assert "System 2 recovery guidance" in second_prompt
+    assert "verify Settings is already open" in second_prompt
+
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "s2_guidance" for event in trace_events)

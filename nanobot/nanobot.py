@@ -63,7 +63,7 @@ class Nanobot:
             )
 
         provider = _make_provider(config)
-        gui_provider, gui_model = _resolve_gui_runtime(config)
+        gui_provider, gui_model, gui_s2_provider, gui_s2_model = _resolve_gui_runtime(config)
         bus = MessageBus()
         defaults = config.agents.defaults
 
@@ -90,6 +90,8 @@ class Nanobot:
             gui_config=config.gui,
             gui_provider=gui_provider,
             gui_model=gui_model,
+            gui_s2_provider=gui_s2_provider,
+            gui_s2_model=gui_s2_model,
         )
         return cls(loop)
 
@@ -129,11 +131,18 @@ def _make_provider(config: Any) -> Any:
     return make_provider(config)
 
 
-def _resolve_gui_runtime(config: Any) -> tuple[Any | None, str | None]:
-    """Resolve the optional GUI provider/model pair for the SDK facade."""
-    from nanobot.providers.factory import build_gui_provider_snapshot
+def _resolve_gui_runtime(config: Any) -> tuple[Any | None, str | None, Any | None, str | None]:
+    """Resolve optional GUI S1 and S2 provider/model pairs for the SDK facade."""
+    from nanobot.providers.factory import (
+        build_gui_provider_snapshot,
+        build_gui_s2_provider_snapshot,
+    )
 
     snapshot = build_gui_provider_snapshot(config)
-    if snapshot is None:
-        return None, None
-    return snapshot.provider, snapshot.model
+    s2_snapshot = build_gui_s2_provider_snapshot(config)
+    return (
+        snapshot.provider if snapshot else None,
+        snapshot.model if snapshot else None,
+        s2_snapshot.provider if s2_snapshot else None,
+        s2_snapshot.model if s2_snapshot else None,
+    )
