@@ -164,6 +164,29 @@ def test_parse_full_plan_rejects_unsupported_subtask_route() -> None:
         )
 
 
+def test_parse_full_plan_rejects_missing_subtask_task() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    with pytest.raises(ValueError, match="subtask 1 missing task"):
+        planner.parse_plan(
+            '{"route":"plan","confidence":0.9,"reason":"bad",'
+            '"subtasks":[{"route":"gui_task"}]}',
+            original_task="bad",
+        )
+
+
+def test_parse_full_plan_normalizes_invalid_risk_level_to_medium() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    plan = planner.parse_plan(
+        '{"route":"plan","confidence":0.9,"reason":"risk",'
+        '"subtasks":[{"route":"gui_task","task":"Open app","risk_level":"unknown"}]}',
+        original_task="Open app",
+    )
+
+    assert plan.subtasks[0].risk_level == "medium"
+
+
 @pytest.mark.asyncio
 async def test_planner_uses_content_json_without_native_tool_calls() -> None:
     provider = SimpleNamespace(

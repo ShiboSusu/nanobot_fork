@@ -289,11 +289,14 @@ class MainPlanner:
     ) -> PlannerSubtask:
         risk_level = str(payload.get("risk_level") or "low").strip().casefold()
         if risk_level not in _RISK_LEVELS:
-            risk_level = "low"
+            risk_level = "medium"
+        task = self._optional_text(payload.get("task"))
+        if not task:
+            raise ValueError(f"subtask {index} missing task")
         return PlannerSubtask(
             id=self._subtask_id(payload, index=index),
             route=self._route_from_subtask(payload),
-            task=self._optional_text(payload.get("task")) or original_task,
+            task=task,
             tool=self._optional_text(payload.get("tool")),
             system_action=self._optional_text(payload.get("system_action") or payload.get("intent")),
             validator=self._optional_text(payload.get("validator")),
