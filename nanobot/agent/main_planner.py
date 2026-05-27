@@ -91,8 +91,8 @@ class MainPlanner:
         reason = str(payload.get("reason") or "35B planner selected this route.").strip()
         risk_notes = self._risk_notes(payload.get("risk_notes"))
         subtasks = self._parse_subtasks(payload, route=route, original_task=original_task)
-        if route_raw == "plan" and len(subtasks) == 1:
-            route = subtasks[0].route
+        if route_raw == "plan":
+            route = self._route_for_legacy_plan(subtasks)
         return PlannerPlan(
             original_task=original_task,
             route=route,
@@ -288,6 +288,17 @@ class MainPlanner:
                 task=original_task,
             ),
         )
+
+    @staticmethod
+    def _route_for_legacy_plan(subtasks: tuple[PlannerSubtask, ...]) -> RouteKind:
+        if not subtasks:
+            return RouteKind.GUI
+        routes = {subtask.route for subtask in subtasks}
+        if routes == {RouteKind.TOOL_CALL}:
+            return RouteKind.TOOL_CALL
+        if len(subtasks) == 1:
+            return subtasks[0].route
+        return RouteKind.GUI
 
     def _parse_subtask(
         self,
