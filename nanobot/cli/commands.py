@@ -458,6 +458,20 @@ def _resolve_gui_s2_runtime(config: Config):
     return snapshot.provider, snapshot.model
 
 
+def _resolve_gui_planner_runtime(config: Config):
+    """Resolve the optional 35B main planner provider/model pair."""
+    from nanobot.providers.factory import build_gui_planner_provider_snapshot
+
+    try:
+        snapshot = build_gui_planner_provider_snapshot(config)
+    except ValueError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    if snapshot is None:
+        return None, None
+    return snapshot.provider, snapshot.model
+
+
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
     from nanobot.config.loader import load_config, resolve_config_env_vars, set_config_path
@@ -555,6 +569,7 @@ def serve(
     provider = _make_provider(runtime_config)
     gui_provider, gui_model = _resolve_gui_runtime(runtime_config)
     gui_s2_provider, gui_s2_model = _resolve_gui_s2_runtime(runtime_config)
+    planner_provider, planner_model = _resolve_gui_planner_runtime(runtime_config)
     session_manager = SessionManager(runtime_config.workspace_path)
     agent_loop = AgentLoop(
         bus=bus,
@@ -584,6 +599,8 @@ def serve(
         gui_model=gui_model,
         gui_s2_provider=gui_s2_provider,
         gui_s2_model=gui_s2_model,
+        planner_provider=planner_provider,
+        planner_model=planner_model,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -651,6 +668,7 @@ def _run_gateway(
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.providers.factory import (
         build_gui_provider_snapshot,
+        build_gui_planner_provider_snapshot,
         build_gui_s2_provider_snapshot,
         build_provider_snapshot,
         load_provider_snapshot,
@@ -666,6 +684,7 @@ def _run_gateway(
         provider_snapshot = build_provider_snapshot(config)
         gui_provider_snapshot = build_gui_provider_snapshot(config)
         gui_s2_provider_snapshot = build_gui_s2_provider_snapshot(config)
+        planner_provider_snapshot = build_gui_planner_provider_snapshot(config)
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
         raise typer.Exit(1) from exc
@@ -712,6 +731,8 @@ def _run_gateway(
         gui_model=gui_provider_snapshot.model if gui_provider_snapshot else None,
         gui_s2_provider=gui_s2_provider_snapshot.provider if gui_s2_provider_snapshot else None,
         gui_s2_model=gui_s2_provider_snapshot.model if gui_s2_provider_snapshot else None,
+        planner_provider=planner_provider_snapshot.provider if planner_provider_snapshot else None,
+        planner_model=planner_provider_snapshot.model if planner_provider_snapshot else None,
     )
 
     from nanobot.agent.loop import UNIFIED_SESSION_KEY
@@ -1068,6 +1089,7 @@ def agent(
     provider = _make_provider(config)
     gui_provider, gui_model = _resolve_gui_runtime(config)
     gui_s2_provider, gui_s2_model = _resolve_gui_s2_runtime(config)
+    planner_provider, planner_model = _resolve_gui_planner_runtime(config)
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
@@ -1110,6 +1132,8 @@ def agent(
         gui_model=gui_model,
         gui_s2_provider=gui_s2_provider,
         gui_s2_model=gui_s2_model,
+        planner_provider=planner_provider,
+        planner_model=planner_model,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):

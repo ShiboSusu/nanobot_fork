@@ -22,6 +22,7 @@ from nanobot.agent.cost_aware_router import (
     RouteKind,
 )
 from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
+from nanobot.agent.main_planner import MainPlanner, PlannerConfig
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
@@ -226,6 +227,8 @@ class AgentLoop:
         gui_model: str | None = None,
         gui_s2_provider: LLMProvider | None = None,
         gui_s2_model: str | None = None,
+        planner_provider: LLMProvider | None = None,
+        planner_model: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
@@ -240,6 +243,22 @@ class AgentLoop:
         self._gui_model = gui_model
         self._gui_s2_provider = gui_s2_provider
         self._gui_s2_model = gui_s2_model
+        self._main_planner = (
+            MainPlanner(
+                provider=planner_provider,
+                model=planner_model,
+                config=PlannerConfig(
+                    enabled=bool(gui_config and gui_config.planner_enabled),
+                    confidence_threshold=(
+                        gui_config.planner_confidence_threshold if gui_config else 0.65
+                    ),
+                    max_tokens=gui_config.planner_max_tokens if gui_config else 512,
+                    timeout_seconds=gui_config.planner_timeout_seconds if gui_config else 8.0,
+                ),
+            )
+            if gui_config is not None and gui_config.planner_enabled and planner_provider is not None
+            else None
+        )
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = (

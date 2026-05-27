@@ -189,6 +189,18 @@ def build_gui_s2_provider_snapshot(config: Config) -> ProviderSnapshot | None:
     )
 
 
+def build_gui_planner_provider_snapshot(config: Config) -> ProviderSnapshot | None:
+    """Create the optional 35B main planner provider snapshot from config.gui."""
+    if config.gui is None or not config.gui.planner_enabled:
+        return None
+    planner_model = config.gui.planner_model or config.agents.defaults.model
+    return build_provider_snapshot(
+        config,
+        model_override=planner_model,
+        provider_override=config.gui.planner_provider,
+    )
+
+
 def load_provider_snapshot(config_path: Path | None = None) -> ProviderSnapshot:
     from nanobot.config.loader import load_config, resolve_config_env_vars
 
