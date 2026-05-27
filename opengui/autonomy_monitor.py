@@ -58,6 +58,19 @@ class RiskSignal:
 
 
 @dataclass(frozen=True)
+class PreActionMonitorInput:
+    """Cheap, observable state for one proposed GUI action before execution."""
+
+    task: str
+    step_index: int
+    max_steps: int
+    action: Action
+    current_observation: Observation
+    action_summary: str | None = None
+    state_summary: str | None = None
+
+
+@dataclass(frozen=True)
 class StepMonitorInput:
     """Cheap, observable state for one completed GUI step."""
 
@@ -147,6 +160,30 @@ class AutonomyMonitor:
         self.cumulative_risk = 0.0
         self._last_action_signature = None
 
+    def assess_pre_action(self, step: PreActionMonitorInput) -> MonitorDecision:
+        signals = tuple(self._signals_for_pre_action(step))
+        risk = min(1.0, sum(signal.contribution for signal in signals))
+        safety = any(signal.key == "safety_keyword_flag" for signal in signals)
+
+        if safety:
+            return MonitorDecision(
+                decision=AutonomyDecisionKind.HUMAN_CONFIRM,
+                tier="red",
+                risk=risk,
+                cumulative_risk=self.cumulative_risk,
+                signals=signals,
+                reason="Safety keyword detected before action; require human confirmation before continuing.",
+            )
+
+        return MonitorDecision(
+            decision=AutonomyDecisionKind.S1_EXECUTE,
+            tier="green",
+            risk=risk,
+            cumulative_risk=self.cumulative_risk,
+            signals=signals,
+            reason="Pre-action risk allows S1 to execute.",
+        )
+
     def assess_step(self, step: StepMonitorInput) -> MonitorDecision:
         signals = tuple(self._signals_for_step(step))
         risk = min(1.0, sum(signal.contribution for signal in signals))
@@ -189,6 +226,24 @@ class AutonomyMonitor:
             signals=signals,
             reason=reason,
         )
+
+    def _signals_for_pre_action(self, step: PreActionMonitorInput) -> list[RiskSignal]:
+        signals: list[RiskSignal] = []
+        if self._has_safety_keyword(
+            action=step.action,
+            task=step.task,
+            action_summary=step.action_summary,
+            state_summary=step.state_summary,
+            current_observation=step.current_observation,
+        ):
+            signals.append(RiskSignal(
+                key="safety_keyword_flag",
+                category="safety",
+                value=1.0,
+                weight=0.90,
+                reason="Task, action, or visible state contains sensitive-action keywords.",
+            ))
+        return signals
 
     def _signals_for_step(self, step: StepMonitorInput) -> list[RiskSignal]:
         signals: list[RiskSignal] = []
@@ -275,7 +330,15 @@ class AutonomyMonitor:
                 reason="The model declared success while its own text suggests failure or incompletion.",
             ))
 
-        if self._has_safety_keyword(step):
+        if self._has_safety_keyword(
+            action=step.action,
+            task=step.task,
+            action_summary=step.action_summary,
+            state_summary=step.state_summary,
+            tool_result=step.tool_result,
+            current_observation=step.current_observation,
+            next_observation=step.next_observation,
+        ):
             signals.append(RiskSignal(
                 key="safety_keyword_flag",
                 category="safety",
@@ -286,18 +349,28 @@ class AutonomyMonitor:
 
         return signals
 
-    def _has_safety_keyword(self, step: StepMonitorInput) -> bool:
-        if step.action.action_type in {"done", "wait", "request_intervention"}:
+    def _has_safety_keyword(
+        self,
+        *,
+        action: Action,
+        task: str,
+        action_summary: str | None = None,
+        state_summary: str | None = None,
+        tool_result: str | None = None,
+        current_observation: Observation | None = None,
+        next_observation: Observation | None = None,
+    ) -> bool:
+        if action.action_type in {"done", "wait", "request_intervention"}:
             return False
         text = " ".join(
             part
             for part in (
-                step.task,
-                step.action_summary or "",
-                step.state_summary or "",
-                step.tool_result or "",
-                _observation_text(step.current_observation),
-                _observation_text(step.next_observation),
+                task,
+                action_summary or "",
+                state_summary or "",
+                tool_result or "",
+                _observation_text(current_observation),
+                _observation_text(next_observation),
             )
             if part
         ).casefold()

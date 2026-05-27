@@ -32,7 +32,12 @@ from opengui.agent_profiles import (
     profile_uses_native_tools,
     prompt_contract_for_profile,
 )
-from opengui.autonomy_monitor import AutonomyDecisionKind, AutonomyMonitor, StepMonitorInput
+from opengui.autonomy_monitor import (
+    AutonomyDecisionKind,
+    AutonomyMonitor,
+    PreActionMonitorInput,
+    StepMonitorInput,
+)
 from opengui.interfaces import (
     DeviceBackend,
     InterventionHandler,
@@ -1365,6 +1370,7 @@ class GuiAgent:
                             tool_result="intervention_resumed",
                             next_observation=next_observation,
                             execution_snapshot={
+                                **(result.execution_snapshot or {}),
                                 "tool_result": "intervention_resumed",
                                 "intervention": {
                                     "requested": True,
@@ -1389,6 +1395,7 @@ class GuiAgent:
                         result,
                         tool_result="intervention_cancelled",
                         execution_snapshot={
+                            **(result.execution_snapshot or {}),
                             "tool_result": "intervention_cancelled",
                             "intervention": {
                                 "requested": True,
@@ -2167,6 +2174,55 @@ class GuiAgent:
                         "policy_gate": {
                             "intervention_requested": True,
                             "reason": policy_reason,
+                        },
+                    },
+                    intervention_requested=True,
+                    step_usage=step_usage,
+                    duration_s=time.monotonic() - _step_start,
+                    chat_latency_s=step_chat_latency_s or None,
+                    ttft_s=step_ttft_s,
+                )
+
+            pre_action_decision = self._autonomy_monitor.assess_pre_action(
+                PreActionMonitorInput(
+                    task=task,
+                    step_index=step_index,
+                    max_steps=total_steps,
+                    action=action,
+                    current_observation=current_observation,
+                    action_summary=action_summary,
+                    state_summary=state_summary,
+                )
+            )
+            if pre_action_decision.decision == AutonomyDecisionKind.HUMAN_CONFIRM:
+                pre_action_payload = pre_action_decision.to_trace()
+                intervention_action = Action(
+                    action_type="request_intervention",
+                    text=pre_action_decision.reason,
+                )
+                return StepResult(
+                    action=intervention_action,
+                    tool_call_id=tool_call.id,
+                    tool_result="intervention_requested",
+                    assistant_message=assistant_message,
+                    action_summary=action_summary,
+                    action_intent=action_summary,
+                    state_summary=state_summary,
+                    prompt_snapshot=prompt_snapshot,
+                    model_snapshot={
+                        **(model_snapshot or {}),
+                        "autonomy_monitor_pre_action": {
+                            **pre_action_payload,
+                            "original_action": self._serialize_action(action),
+                        },
+                    },
+                    execution_snapshot={
+                        "tool_result": "intervention_requested",
+                        "next_observation": None,
+                        "done": False,
+                        "autonomy_monitor_pre_action": {
+                            **pre_action_payload,
+                            "original_action": self._serialize_action(action),
                         },
                     },
                     intervention_requested=True,

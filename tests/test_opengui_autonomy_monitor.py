@@ -10,14 +10,22 @@ from opengui.agent import GuiAgent
 from opengui.autonomy_monitor import (
     AutonomyDecisionKind,
     AutonomyMonitor,
+    PreActionMonitorInput,
     StepMonitorInput,
 )
-from opengui.interfaces import LLMResponse, ToolCall
+from opengui.interfaces import InterventionResolution, LLMResponse, ToolCall
 from opengui.observation import Observation
+from opengui.policy import PolicyStore
 from opengui.trajectory.recorder import TrajectoryRecorder
 
 
-def _observation(path: Path, *, app: str = "Settings", data: bytes = b"screen") -> Observation:
+def _observation(
+    path: Path,
+    *,
+    app: str = "Settings",
+    data: bytes = b"screen",
+    extra: dict[str, object] | None = None,
+) -> Observation:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return Observation(
@@ -26,6 +34,7 @@ def _observation(path: Path, *, app: str = "Settings", data: bytes = b"screen") 
         screen_height=844,
         foreground_app=app,
         platform="ios",
+        extra=extra or {},
     )
 
 
@@ -89,6 +98,30 @@ def test_monitor_failed_observation_is_red_halt(tmp_path: Path) -> None:
     assert decision.decision == AutonomyDecisionKind.HALT
     assert decision.tier == "red"
     assert "observe_failed" in decision.signal_keys
+
+
+def test_monitor_flags_safety_keywords_before_action(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor()
+    current = _observation(
+        tmp_path / "current.png",
+        extra={"visible_text": ["Delete account", "Cancel"]},
+    )
+
+    decision = monitor.assess_pre_action(
+        PreActionMonitorInput(
+            task="清理账号设置",
+            step_index=1,
+            max_steps=5,
+            action=Action(action_type="tap", x=120, y=240),
+            current_observation=current,
+            action_summary="tap Delete account",
+            state_summary="The page shows a destructive Delete account button.",
+        )
+    )
+
+    assert decision.decision == AutonomyDecisionKind.HUMAN_CONFIRM
+    assert decision.tier == "red"
+    assert "safety_keyword_flag" in decision.signal_keys
 
 
 class _RecordingLLM:
@@ -258,3 +291,79 @@ async def test_gui_agent_uses_s2_hint_before_halting_on_monitor_red(tmp_path: Pa
         for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert any(event["event"] == "s2_guidance" for event in trace_events)
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_pre_action_monitor_pauses_before_unsafe_action(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor()
+    backend = _StaticScreenBackend()
+    s1 = _RecordingLLM([
+        LLMResponse(
+            content="Action: tap Delete account",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 120,
+                        "y": 240,
+                        "intent": "tap Delete account",
+                        "summary": "The Delete account button is visible.",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-2",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "intent": "user confirmed the sensitive step manually",
+                        "summary": "The task is complete after human confirmation.",
+                    },
+                )
+            ],
+        ),
+    ])
+    requests = []
+
+    class _Handler:
+        async def request_intervention(self, request) -> InterventionResolution:
+            requests.append(request)
+            assert not backend.execute_calls
+            return InterventionResolution(resume_confirmed=True, note="confirmed manually")
+
+    task = "清理账号设置"
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task=task, platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        include_date_context=False,
+        autonomy_monitor=monitor,
+        intervention_handler=_Handler(),
+        policy_store=PolicyStore(rules=()),
+    )
+
+    result = await agent.run(task, max_retries=1)
+
+    assert result.success is True
+    assert backend.execute_calls == []
+    assert len(requests) == 1
+    assert "Safety keyword detected" in requests[0].reason
+
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    first_step = next(event for event in trace_events if event["event"] == "step")
+    pre_action = first_step["execution"]["autonomy_monitor_pre_action"]
+    assert pre_action["decision"] == AutonomyDecisionKind.HUMAN_CONFIRM.value
+    assert "safety_keyword_flag" in pre_action["signal_keys"]
