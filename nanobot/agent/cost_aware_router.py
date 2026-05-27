@@ -47,6 +47,7 @@ class RouteDecision:
     suggested_tools: tuple[str, ...] = ()
     requires_gui: bool = False
     system_action: dict[str, Any] | None = None
+    routed_task: str | None = None
     skill_candidates: tuple[SkillCandidate, ...] = ()
 
 

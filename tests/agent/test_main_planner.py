@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import pytest
+
+from nanobot.agent.cost_aware_router import RouteKind
+from nanobot.agent.main_planner import MainPlanner, PlannerConfig
+
+
+def test_parse_gui_plan_to_route_decision() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    decision = planner.parse_decision(
+        '{"route":"gui_task","confidence":0.91,"reason":"App internal task",'
+        '"subtasks":[{"route":"gui_task","task":"在抖音里搜索旅行Vlog"}]}',
+        original_task="在抖音里搜索旅行Vlog",
+    )
+
+    assert decision.route == RouteKind.GUI
+    assert decision.requires_gui is True
+    assert decision.reason == "App internal task"
+    assert decision.system_action is None
+    assert decision.routed_task == "在抖音里搜索旅行Vlog"
+    assert decision.suggested_tools == ()
+
+
+def test_parse_tool_plan_to_route_decision() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    decision = planner.parse_decision(
+        "```json\n"
+        '{"route":"tool_call","confidence":0.88,"reason":"Public lookup",'
+        '"subtasks":[{"route":"web_search","tool":"web_search","task":"查询深圳天气"}]}'
+        "\n```",
+        original_task="查询深圳天气",
+    )
+
+    assert decision.route == RouteKind.TOOL_CALL
+    assert decision.requires_gui is False
+    assert decision.suggested_tools == ("web_search", "web_fetch")
+
+
+def test_parse_system_action_plan_to_route_decision() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    decision = planner.parse_decision(
+        '{"route":"system_action","confidence":0.95,"reason":"Safe direct action",'
+        '"subtasks":[{"route":"system_action","task":"打开设置","system_action":"open_settings"}]}',
+        original_task="打开设置",
+    )
+
+    assert decision.route == RouteKind.SYSTEM_ACTION
+    assert decision.system_action == {
+        "backend": None,
+        "task": "打开设置",
+        "intent": "open_settings",
+    }
+
+
+def test_parse_rejects_low_confidence() -> None:
+    planner = MainPlanner(
+        provider=None,
+        model=None,
+        config=PlannerConfig(enabled=True, confidence_threshold=0.65),
+    )
+
+    with pytest.raises(ValueError, match="low confidence"):
+        planner.parse_decision(
+            '{"route":"gui_task","confidence":0.2,"reason":"not sure","subtasks":[]}',
+            original_task="打开设置",
+        )
+
+
+def test_parse_rejects_unknown_route() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    with pytest.raises(ValueError, match="unsupported route"):
+        planner.parse_decision(
+            '{"route":"shell","confidence":0.9,"reason":"bad","subtasks":[]}',
+            original_task="运行命令",
+        )
