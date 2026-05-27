@@ -124,6 +124,44 @@ def test_monitor_flags_safety_keywords_before_action(tmp_path: Path) -> None:
     assert "safety_keyword_flag" in decision.signal_keys
 
 
+def test_monitor_can_discount_risk_after_s2_recovery(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor(horizon_threshold=0.40)
+    action = Action(action_type="tap", x=100, y=200)
+    first = _observation(tmp_path / "first.png")
+    second = _observation(tmp_path / "second.png")
+    third = _observation(tmp_path / "third.png", data=b"changed-screen")
+
+    red_decision = monitor.assess_step(
+        StepMonitorInput(
+            task="打开设置",
+            step_index=1,
+            max_steps=5,
+            action=action,
+            current_observation=first,
+            next_observation=None,
+            tool_result="ok (observation failed: timeout)",
+            action_summary="tap Settings",
+        )
+    )
+    monitor.mark_s2_guidance_issued()
+    next_decision = monitor.assess_step(
+        StepMonitorInput(
+            task="打开设置",
+            step_index=2,
+            max_steps=5,
+            action=Action(action_type="wait"),
+            current_observation=second,
+            next_observation=third,
+            tool_result="ok",
+            action_summary="wait for Settings to settle",
+        )
+    )
+
+    assert red_decision.decision == AutonomyDecisionKind.HALT
+    assert next_decision.decision == AutonomyDecisionKind.S1_EXECUTE
+    assert next_decision.cumulative_risk < monitor.horizon_threshold
+
+
 class _RecordingLLM:
     def __init__(self, responses: list[LLMResponse]) -> None:
         self._responses = list(responses)
@@ -260,7 +298,13 @@ async def test_gui_agent_uses_s2_hint_before_halting_on_monitor_red(tmp_path: Pa
         ),
     ])
     s2 = _RecordingLLM([
-        LLMResponse(content="Recovery hint: stop tapping the same point; verify Settings is already open.")
+        LLMResponse(
+            content=(
+                "<think>private chain of thought that must not be passed to S1</think>\n"
+                '{"route":"S2_HINT","hint":"Verify Settings is already open, then call done if complete.",'
+                '"rationale":"hidden verifier notes"}'
+            )
+        )
     ])
     recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task="点击屏幕上的设置图标", platform="ios")
     agent = GuiAgent(
@@ -284,13 +328,20 @@ async def test_gui_agent_uses_s2_hint_before_halting_on_monitor_red(tmp_path: Pa
 
     second_prompt = json.dumps(s1.calls[1], ensure_ascii=False)
     assert "System 2 recovery guidance" in second_prompt
-    assert "verify Settings is already open" in second_prompt
+    assert "Verify Settings is already open, then call done if complete." in second_prompt
+    assert "private chain of thought" not in second_prompt
+    assert "hidden verifier notes" not in second_prompt
+
+    s2_prompt = json.dumps(s2.calls[0], ensure_ascii=False)
+    assert "Respond only with JSON" in s2_prompt
 
     trace_events = [
         json.loads(line)
         for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert any(event["event"] == "s2_guidance" for event in trace_events)
+    s2_events = [event for event in trace_events if event["event"] == "s2_guidance"]
+    assert s2_events
+    assert s2_events[0]["hint"] == "Verify Settings is already open, then call done if complete."
 
 
 @pytest.mark.asyncio

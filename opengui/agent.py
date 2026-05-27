@@ -1588,6 +1588,7 @@ class GuiAgent:
                     for k, v in usage.items():
                         total_usage[k] = total_usage.get(k, 0) + v
                     s2_guidance.append(hint)
+                    self._autonomy_monitor.mark_s2_guidance_issued()
                     await self._log_attempt_event(
                         run_dir,
                         "s2_guidance",
@@ -2658,7 +2659,9 @@ class GuiAgent:
                     "You are System 2 for a GUI agent. The small GUI model may be stuck "
                     "or outside its reliable autonomy boundary. Give one concise recovery "
                     "hint for the small model. Do not take unsafe actions; if the task is "
-                    "already complete, say to verify completion and call done."
+                    "already complete, say to verify completion and call done. "
+                    "Respond only with JSON: {\"route\":\"S2_HINT\",\"hint\":\"...\"}. "
+                    "Do not include thinking, rationale, markdown, or extra text."
                 ),
             },
             {
@@ -2689,10 +2692,40 @@ class GuiAgent:
         except Exception as exc:
             return f"S2 guidance unavailable: {type(exc).__name__}: {exc}", {}
 
-        hint = (response.content or "").strip()
+        hint = self._extract_s2_guidance_hint(response.content or "")
         if not hint:
             hint = "Re-check the current screen, avoid repeating the same action, and choose the next verifiable step."
         return hint[:1200], dict(response.usage or {})
+
+    @staticmethod
+    def _extract_s2_guidance_hint(content: str) -> str:
+        text = GuiAgent._strip_s2_thinking_noise(content)
+        json_hint = GuiAgent._extract_s2_guidance_json_hint(text)
+        if json_hint:
+            return json_hint
+        return text.strip()
+
+    @staticmethod
+    def _extract_s2_guidance_json_hint(text: str) -> str:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            return ""
+        try:
+            payload = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        hint = payload.get("hint") or payload.get("guidance") or payload.get("recovery_hint")
+        return str(hint).strip() if hint else ""
+
+    @staticmethod
+    def _strip_s2_thinking_noise(content: str) -> str:
+        text = re.sub(r"(?is)<think>.*?</think>", "", content or "")
+        text = re.sub(r"(?is)```(?:json)?\s*", "", text)
+        text = text.replace("```", "")
+        return text.strip()
 
     @staticmethod
     def _format_recent_intents(history: list[HistoryTurn], *, window: int = 8) -> str:

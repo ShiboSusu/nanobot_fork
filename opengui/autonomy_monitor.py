@@ -135,6 +135,7 @@ class AutonomyMonitor:
     mid_threshold: float = 0.50
     red_threshold: float = 0.70
     horizon_threshold: float = 0.65
+    recovery_risk_discount: float = 0.25
     safety_keywords: tuple[str, ...] = (
         "支付",
         "付款",
@@ -159,6 +160,11 @@ class AutonomyMonitor:
     def reset(self) -> None:
         self.cumulative_risk = 0.0
         self._last_action_signature = None
+
+    def mark_s2_guidance_issued(self) -> None:
+        """Discount accumulated risk after S2 has inspected the trajectory."""
+        discount = min(1.0, max(0.0, self.recovery_risk_discount))
+        self.cumulative_risk *= discount
 
     def assess_pre_action(self, step: PreActionMonitorInput) -> MonitorDecision:
         signals = tuple(self._signals_for_pre_action(step))
