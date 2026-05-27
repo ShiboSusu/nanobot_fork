@@ -133,6 +133,8 @@ class ProvidersConfig(Base):
     zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
     dashscope: ProviderConfig = Field(default_factory=ProviderConfig)
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
+    vllm_9b: ProviderConfig = Field(default_factory=ProviderConfig)  # Dedicated local vLLM endpoint for GUI S1 / small model
+    vllm_35b: ProviderConfig = Field(default_factory=ProviderConfig)  # Dedicated local vLLM endpoint for main-agent mid model
     ollama: ProviderConfig = Field(default_factory=ProviderConfig)  # Ollama local models
     lm_studio: ProviderConfig = Field(default_factory=ProviderConfig)  # LM Studio local models
     ovms: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenVINO Model Server (OVMS)
@@ -275,6 +277,8 @@ class GuiConfig(Base):
     validator_model: str | None = None
     grounder_model: str | None = None
     reuser_model: str | None = None
+    s2_model: str | None = None
+    s2_provider: str | None = None
     agent_profile: str | None = None
     adb: AdbConfig = Field(default_factory=AdbConfig)
     scrcpy: ScrcpyConfig = Field(default_factory=ScrcpyConfig)

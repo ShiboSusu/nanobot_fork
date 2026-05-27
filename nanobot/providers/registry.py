@@ -363,6 +363,22 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         is_local=True,
     ),
+    ProviderSpec(
+        name="vllm_9b",
+        keywords=("vllm-9b", "vllm_9b", "qwen3.5-9b"),
+        env_key="HOSTED_VLLM_9B_API_KEY",
+        display_name="vLLM/Local 9B",
+        backend="openai_compat",
+        is_local=True,
+    ),
+    ProviderSpec(
+        name="vllm_35b",
+        keywords=("vllm-35b", "vllm_35b", "qwen3.6-35b-a3b"),
+        env_key="HOSTED_VLLM_35B_API_KEY",
+        display_name="vLLM/Local 35B",
+        backend="openai_compat",
+        is_local=True,
+    ),
     # Ollama (local, OpenAI-compatible)
     ProviderSpec(
         name="ollama",

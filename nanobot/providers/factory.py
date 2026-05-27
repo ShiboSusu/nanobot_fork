@@ -178,6 +178,17 @@ def build_gui_provider_snapshot(config: Config) -> ProviderSnapshot | None:
     )
 
 
+def build_gui_s2_provider_snapshot(config: Config) -> ProviderSnapshot | None:
+    """Create the optional GUI S2 provider snapshot from config.gui."""
+    if config.gui is None or not config.gui.s2_model:
+        return None
+    return build_provider_snapshot(
+        config,
+        model_override=config.gui.s2_model,
+        provider_override=config.gui.s2_provider,
+    )
+
+
 def load_provider_snapshot(config_path: Path | None = None) -> ProviderSnapshot:
     from nanobot.config.loader import load_config, resolve_config_env_vars
 
