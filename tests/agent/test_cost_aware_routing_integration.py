@@ -208,6 +208,68 @@ async def test_35b_planner_gui_route_executes_gui_task_directly(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_35b_planner_subtask_queue_executes_system_then_gui(tmp_path: Path) -> None:
+    loop = _make_loop_with_planner(
+        tmp_path,
+        '{"route":"plan","confidence":0.92,"reason":"App playback",'
+        '"subtasks":['
+        '{"id":"open_bilibili","route":"system_action","task":"Open Bilibili","system_action":"open_app"},'
+        '{"id":"search_video","route":"gui_task","task":"Search Bilibili for 罗翔 刑法课"}'
+        "]}",
+    )
+    assert loop._gui_config is not None
+    loop._gui_config.planner_subtasks_enabled = True
+    gui_tool = _FakeGuiTaskTool()
+    loop.tools.register(gui_tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="u1",
+            chat_id="cli-chat",
+            content="在B站播放罗翔的刑法课视频",
+        )
+    )
+
+    assert response is not None
+    assert "2/2 subtasks completed" in response.content
+    assert gui_tool.calls == [
+        {"task": "Open Bilibili"},
+        {"task": "Search Bilibili for 罗翔 刑法课"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_planner_subtask_policy_block_stops_before_gui(tmp_path: Path) -> None:
+    loop = _make_loop_with_planner(
+        tmp_path,
+        '{"route":"plan","confidence":0.92,"reason":"financial",'
+        '"subtasks":[{"id":"credit","route":"gui_task","task":"查看京东金融白条额度"}]}',
+    )
+    assert loop._gui_config is not None
+    loop._gui_config.planner_subtasks_enabled = True
+    gui_tool = _FakeGuiTaskTool()
+    loop.tools.register(gui_tool)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="u1",
+            chat_id="cli-chat",
+            content="在京东金融里查看一下我的白条总额度是多少",
+        )
+    )
+
+    assert response is not None
+    assert (
+        "需要你确认或接管" in response.content
+        or "requires human confirmation" in response.content
+        or "blocked by policy" in response.content
+    )
+    assert gui_tool.calls == []
+
+
+@pytest.mark.asyncio
 async def test_35b_planner_tool_route_injects_route_hint(tmp_path: Path) -> None:
     loop = _make_loop_with_planner(
         tmp_path,

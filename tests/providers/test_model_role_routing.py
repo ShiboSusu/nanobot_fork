@@ -18,6 +18,7 @@ def test_gui_config_accepts_explicit_s2_model_and_provider() -> None:
         "plannerEnabled": True,
         "plannerModel": "qwen3.6-35b-a3b",
         "plannerProvider": "vllm_35b",
+        "plannerSubtasksEnabled": True,
         "plannerConfidenceThreshold": 0.7,
         "plannerMaxTokens": 768,
         "plannerTimeoutSeconds": 6,
@@ -30,9 +31,14 @@ def test_gui_config_accepts_explicit_s2_model_and_provider() -> None:
     assert cfg.planner_enabled is True
     assert cfg.planner_model == "qwen3.6-35b-a3b"
     assert cfg.planner_provider == "vllm_35b"
+    assert cfg.planner_subtasks_enabled is True
     assert cfg.planner_confidence_threshold == 0.7
     assert cfg.planner_max_tokens == 768
     assert cfg.planner_timeout_seconds == 6
+
+
+def test_gui_config_disables_planner_subtasks_by_default() -> None:
+    assert GuiConfig().planner_subtasks_enabled is False
 
 
 def test_gui_config_default_planner_timeout_is_large_enough_for_remote_35b() -> None:

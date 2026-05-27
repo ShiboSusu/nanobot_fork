@@ -18,12 +18,20 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.cost_aware_router import (
     CostAwareProblemRouter,
     NoopSkillLibrary,
+    PolicyAction,
+    PolicyDecision,
     RouteDecision,
     RouteKind,
 )
 from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
-from nanobot.agent.main_planner import MainPlanner, PlannerConfig
+from nanobot.agent.main_planner import MainPlanner, PlannerConfig, PlannerPlan, PlannerSubtask
 from nanobot.agent.memory import Consolidator, Dream
+from nanobot.agent.plan_executor import (
+    PlanExecutionStatus,
+    PlanExecutor,
+    SubtaskExecution,
+    SubtaskStatus,
+)
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.subagent import SubagentManager
@@ -531,6 +539,94 @@ class AgentLoop:
             except Exception as exc:
                 logger.warning("35B planner failed; falling back to deterministic router: {}", exc)
         return self._classify_problem_route(content)
+
+    async def _execute_planner_plan(self, plan: PlannerPlan) -> str:
+        executor = PlanExecutor(
+            policy_check=self._planner_subtask_policy,
+            dispatch=self._dispatch_planner_subtask,
+        )
+        result = await executor.execute(plan)
+        if result.status == PlanExecutionStatus.HUMAN_CONFIRM:
+            return "这个子任务涉及敏感操作，需要你确认或接管后我才能继续。"
+        if result.status == PlanExecutionStatus.NEEDS_USER:
+            return result.summary or "这个子任务需要你接管后才能继续。"
+        if result.status == PlanExecutionStatus.BLOCKED:
+            return result.summary or "Planner subtask execution was blocked."
+        return result.summary
+
+    def _planner_subtask_policy(self, task: str) -> PolicyDecision:
+        policy = self._problem_router.classify(
+            task,
+            available_tools=set(self.tools.tool_names),
+        ).policy
+        if not policy.allowed:
+            return policy
+
+        normalized = " ".join((task or "").casefold().split())
+        if "白条" in normalized or ("京东金融" in normalized and "额度" in normalized):
+            return PolicyDecision(
+                PolicyAction.ASK_HUMAN_CONFIRM,
+                categories=("private_account_query",),
+                reason="Private financial account or credit-limit queries require user confirmation.",
+                matched_terms=tuple(
+                    term for term in ("京东金融", "白条", "额度") if term in normalized
+                ),
+                source="planner_subtask_policy",
+            )
+        return policy
+
+    async def _dispatch_planner_subtask(self, subtask: PlannerSubtask) -> SubtaskExecution:
+        if subtask.route == RouteKind.SYSTEM_ACTION:
+            decision = RouteDecision(
+                route=RouteKind.SYSTEM_ACTION,
+                reason=f"Planner subtask {subtask.id}",
+                policy=PolicyDecision(PolicyAction.ALLOW),
+                system_action={
+                    "backend": None,
+                    "task": subtask.task,
+                    "intent": subtask.system_action or "open_app",
+                },
+            )
+            output = await self._execute_system_action_route(decision)
+            return self._subtask_execution_from_output(output)
+        if subtask.route == RouteKind.GUI:
+            decision = RouteDecision(
+                route=RouteKind.GUI,
+                reason=f"Planner subtask {subtask.id}",
+                policy=PolicyDecision(PolicyAction.ALLOW),
+                requires_gui=True,
+                routed_task=subtask.task,
+            )
+            output = await self._execute_gui_route(decision, original_task=subtask.task)
+            return self._subtask_execution_from_output(output)
+        if subtask.route == RouteKind.TOOL_CALL:
+            return SubtaskExecution(
+                status=SubtaskStatus.NEEDS_USER,
+                output="tool subtasks are executed through the normal agent loop in V0",
+                error="tool_subtask_not_directly_dispatched",
+            )
+        if subtask.route == RouteKind.S2:
+            return SubtaskExecution(
+                status=SubtaskStatus.NEEDS_USER,
+                output="S2 subtask dispatch is reserved for replan/takeover.",
+                error="s2_subtask_not_directly_dispatched",
+            )
+        return SubtaskExecution(
+            status=SubtaskStatus.FAILED,
+            output="",
+            error=f"unsupported_subtask_route:{subtask.route.value}",
+        )
+
+    @staticmethod
+    def _subtask_execution_from_output(output: str) -> SubtaskExecution:
+        lowered = output.lower()
+        if "error:" in lowered or "blocked" in lowered or "stagnation_detected" in lowered:
+            return SubtaskExecution(
+                status=SubtaskStatus.FAILED,
+                output=output,
+                error="subtask_failed",
+            )
+        return SubtaskExecution(status=SubtaskStatus.SUCCESS, output=output)
 
     @staticmethod
     def _policy_confirmation_message(decision: RouteDecision) -> str:
@@ -1149,6 +1245,29 @@ class AgentLoop:
                     content=content,
                     metadata=dict(msg.metadata or {}),
                 )
+            if (
+                self._main_planner is not None
+                and self._gui_config is not None
+                and self._gui_config.planner_subtasks_enabled
+            ):
+                try:
+                    plan = await self._main_planner.plan_full(
+                        msg.content,
+                        available_tools=set(self.tools.tool_names),
+                    )
+                    content = await self._execute_planner_plan(plan)
+                    self._save_direct_router_turn(session, msg.content, content)
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=content,
+                        metadata=dict(msg.metadata or {}),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "35B plan executor failed; falling back to route mode: {}",
+                        exc,
+                    )
             route_decision = await self._plan_problem_route(msg.content)
             if route_decision.route == RouteKind.HUMAN_CONFIRM:
                 content = self._policy_confirmation_message(route_decision)
