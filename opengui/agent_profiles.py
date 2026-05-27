@@ -445,14 +445,31 @@ def _extract_action_json(content: str) -> dict[str, Any]:
 def _extract_tool_call_json(content: str) -> dict[str, Any]:
     matches = list(re.finditer(r"<tool_call>(.*?)</tool_call>", content, re.DOTALL))
     if not matches:
-        raise ValueError("Expected a `<tool_call>` block in the response.")
+        return _extract_first_json_object(content)
     last_error: ValueError | None = None
     for match in matches:
         try:
             return _load_json(match.group(1).strip())
         except ValueError as exc:
             last_error = exc
+    tail = content[matches[-1].end():]
+    try:
+        return _extract_first_json_object(tail)
+    except ValueError:
+        pass
     raise last_error or ValueError("Expected a JSON object.")
+
+
+def _extract_first_json_object(content: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", content):
+        try:
+            payload, _ = decoder.raw_decode(content[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("Expected a JSON object.")
 
 
 def _extract_mai_ui_tool_call(content: str) -> dict[str, Any]:

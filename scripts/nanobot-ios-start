@@ -22,8 +22,8 @@ MODELARTS_SSH_TARGET="${MODELARTS_SSH_TARGET:-root@dev.modelarts.cnszaismartcity
 MODELARTS_SSH_PORT="${MODELARTS_SSH_PORT:-30055}"
 MODELARTS_SSH_KEY="${MODELARTS_SSH_KEY:-/Users/su/Downloads/KeyPair-7b01.pem}"
 
-MAIN_MODEL="${NANOBOT_MAIN_MODEL:-qwen3.6-35b-a3b}"
-MAIN_PROVIDER="${NANOBOT_MAIN_PROVIDER:-vllm_35b}"
+MAIN_MODEL="${NANOBOT_MAIN_MODEL:-qwen3.5-397b-a17b}"
+MAIN_PROVIDER="${NANOBOT_MAIN_PROVIDER:-custom}"
 GUI_S1_MODEL="${NANOBOT_GUI_S1_MODEL:-qwen3.5-9b}"
 GUI_S1_PROVIDER="${NANOBOT_GUI_S1_PROVIDER:-vllm_9b}"
 GUI_S2_MODEL="${NANOBOT_GUI_S2_MODEL:-qwen3.5-397b-a17b}"
@@ -244,7 +244,7 @@ gui["s2Provider"] = "$GUI_S2_PROVIDER"
 gui["enableSkillExecution"] = False
 gui["enableSkillExtraction"] = False
 gui["stagnationLimit"] = int(gui.get("stagnationLimit", 3) or 3)
-gui["agentProfile"] = gui.get("agentProfile") or "qwen3vl"
+gui["agentProfile"] = "${NANOBOT_GUI_AGENT_PROFILE:-default}"
 gui.setdefault("ios", {})["wdaUrl"] = "$WDA_URL"
 gui.setdefault("evaluation", {})["enabled"] = "$GUI_EVALUATION_ENABLED" not in {"0", "false", "False", ""}
 

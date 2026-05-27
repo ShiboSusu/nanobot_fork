@@ -27,9 +27,13 @@ The V0 objective is not a full uncertainty monitor. It is a working foundation:
 - WDA URL: `http://127.0.0.1:8100`
 - Small model endpoint: `http://127.0.0.1:18000/v1`
 - Mid model endpoint: `http://127.0.0.1:18001/v1`
-- Main model: `qwen3.6-35b-a3b`
+- Main model: `qwen3.5-397b-a17b`
 - GUI S1 model: `qwen3.5-9b`
 - GUI S2 model: `qwen3.5-397b-a17b`
+- GUI default action interface: native OpenAI-compatible `computer_use` tool calls (`gui.agentProfile=default`)
+
+Note: `qwen3.6-35b-a3b` is available through `vllm_35b`, but it is not the default main-agent model until the remote vLLM service is started with OpenAI-compatible tool-choice support.
+Note: Qwen text profiles such as `qwen3vl` are compatibility adapters only; they should not be the default when the model server supports native tool calls.
 
 Do not put tokens or private keys in this document.
 

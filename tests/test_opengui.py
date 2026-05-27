@@ -963,6 +963,32 @@ def test_qwen3vl_profile_ignores_inline_tool_call_example() -> None:
     }
 
 
+def test_qwen3vl_profile_recovers_json_after_placeholder_tool_call() -> None:
+    response = LLMResponse(
+        content=(
+            "<think>I should answer in the requested format.</think>\n"
+            "Thought: The search field is at the top of Settings.\n"
+            "Action: tap the search field.\n"
+            "<tool_call>...</tool_call>\n"
+            '{"name":"mobile_use","arguments":{"action":"click","coordinate":[500,120],'
+            '"summary":"tap Settings search field","intent":"tap search field"}}'
+        ),
+        tool_calls=None,
+    )
+
+    normalized = normalize_profile_response("qwen3vl", response)
+
+    assert normalized.tool_calls is not None
+    assert normalized.tool_calls[0].name == "computer_use"
+    assert normalized.tool_calls[0].arguments == {
+        "action_type": "tap",
+        "x": 500,
+        "y": 120,
+        "relative": True,
+        "summary": "tap Settings search field",
+    }
+
+
 def test_qwen3vl_profile_preserves_action_summary() -> None:
     response = LLMResponse(
         content=(

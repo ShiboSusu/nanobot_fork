@@ -281,7 +281,8 @@ class AutonomyMonitor:
                 reason="Backend reported post-action observation failure.",
             ))
 
-        if _screen_unchanged(step.current_observation, step.next_observation):
+        no_progress_action = step.action.action_type not in {"done", "request_intervention", "wait"}
+        if no_progress_action and _screen_unchanged(step.current_observation, step.next_observation):
             signals.append(RiskSignal(
                 key="screen_unchanged",
                 category="transition",
@@ -290,7 +291,7 @@ class AutonomyMonitor:
                 reason="Post-action screenshot and foreground app match the pre-action state.",
             ))
 
-        if self._last_action_signature == _action_signature(step.action):
+        if no_progress_action and self._last_action_signature == _action_signature(step.action):
             signals.append(RiskSignal(
                 key="repeated_action",
                 category="progress",

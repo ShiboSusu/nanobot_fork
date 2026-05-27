@@ -2363,6 +2363,8 @@ class GuiAgent:
         )
         if decision.action == PolicyAction.ALLOW:
             return None
+        if self._is_generic_login_navigation(decision, action, action_summary, state_summary):
+            return None
 
         categories = ", ".join(decision.categories) or "sensitive_action"
         reason = (
@@ -2370,6 +2372,44 @@ class GuiAgent:
             f"({categories}). {decision.reason}"
         ).strip()
         return Action(action_type="request_intervention", text=reason), reason
+
+    @staticmethod
+    def _is_generic_login_navigation(
+        decision: Any,
+        action: Action,
+        action_summary: str | None,
+        state_summary: str | None,
+    ) -> bool:
+        if set(decision.categories) != {"login_or_auth"}:
+            return False
+        if action.action_type not in {"tap", "open_app", "scroll", "back", "home"}:
+            return False
+        text = " ".join(
+            part
+            for part in (
+                action.text or "",
+                action_summary or "",
+                state_summary or "",
+            )
+            if part
+        ).casefold()
+        credential_terms = (
+            "验证码",
+            "短信验证码",
+            "动态码",
+            "密码",
+            "二次验证",
+            "人脸识别",
+            "指纹",
+            "mfa",
+            "otp",
+            "2fa",
+            "password",
+            "passcode",
+            "authenticate",
+            "authentication",
+        )
+        return not any(term in text for term in credential_terms)
 
     def _coordinate_mode(self) -> str:
         return coordinate_mode_for_profile(self.agent_profile, self.model)
