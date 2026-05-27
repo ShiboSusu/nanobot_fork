@@ -1092,6 +1092,7 @@ class GuiAgent:
                         trace_path=result.trace_path,
                     )
                     if result.success:
+                        last_error = None
                         break
                     last_error = result.error
                     last_model_summary = result.model_summary

@@ -197,6 +197,46 @@ def test_ios_app_lookup_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_successful_retry_clears_previous_direct_system_action_error(tmp_path: Path) -> None:
+    class FlakyDirectIosBackend(_RecordingIosBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.post_open_observes = 0
+
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            observation = await super().observe(screenshot_path, timeout=timeout)
+            if screenshot_path.name == "step_001.png":
+                self.post_open_observes += 1
+                if self.post_open_observes == 1:
+                    return Observation(
+                        screenshot_path=observation.screenshot_path,
+                        screen_width=observation.screen_width,
+                        screen_height=observation.screen_height,
+                        foreground_app="com.apple.springboard",
+                        platform=observation.platform,
+                    )
+            return observation
+
+    backend = FlakyDirectIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-direct-retry"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+    )
+
+    result = await agent.run("打开 Safari app", max_retries=2)
+
+    assert result.success is True
+    assert result.error is None
+    assert backend.executed_actions == [
+        Action(action_type="open_app", text="com.apple.mobilesafari"),
+        Action(action_type="open_app", text="com.apple.mobilesafari"),
+    ]
+
+
 def test_parse_scroll_allows_center_default() -> None:
     action = parse_action({
         "action_type": "scroll",
