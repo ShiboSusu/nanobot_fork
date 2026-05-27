@@ -20,10 +20,36 @@ class PlannerConfig:
     timeout_seconds: float = 30.0
 
 
+_RISK_LEVELS = frozenset({"low", "medium", "high"})
+
+
+@dataclass(frozen=True)
+class PlannerSubtask:
+    id: str
+    route: RouteKind
+    task: str
+    tool: str | None = None
+    system_action: str | None = None
+    validator: str | None = None
+    success_condition: str | None = None
+    risk_level: str = "low"
+
+
+@dataclass(frozen=True)
+class PlannerPlan:
+    original_task: str
+    route: RouteKind
+    confidence: float
+    reason: str
+    subtasks: tuple[PlannerSubtask, ...]
+    risk_notes: tuple[str, ...] = ()
+
+
 class MainPlanner:
     """35B semantic router that emits content-only JSON plans."""
 
     _ROUTE_MAP = {
+        "plan": RouteKind.GUI,
         "tool_call": RouteKind.TOOL_CALL,
         "tool": RouteKind.TOOL_CALL,
         "web_search": RouteKind.TOOL_CALL,
@@ -48,12 +74,13 @@ class MainPlanner:
         self.config = config or PlannerConfig()
 
     def parse_decision(self, content: str, *, original_task: str) -> RouteDecision:
-        payload = self._parse_json_payload(content)
-        route_raw = str(payload.get("route") or "").strip().casefold()
-        route = self._ROUTE_MAP.get(route_raw)
-        if route is None:
-            raise ValueError(f"unsupported route: {route_raw or '<missing>'}")
+        return self.plan_to_route_decision(
+            self.parse_plan(content, original_task=original_task)
+        )
 
+    def parse_plan(self, content: str, *, original_task: str) -> PlannerPlan:
+        payload = self._parse_json_payload(content)
+        route = self._route_from_payload(payload)
         confidence = self._confidence(payload.get("confidence"))
         if confidence < self.config.confidence_threshold:
             raise ValueError(
@@ -61,13 +88,26 @@ class MainPlanner:
             )
 
         reason = str(payload.get("reason") or "35B planner selected this route.").strip()
-        subtask = self._first_subtask(payload)
-        task = self._subtask_text(subtask) or original_task
+        risk_notes = self._risk_notes(payload.get("risk_notes"))
+        subtasks = self._parse_subtasks(payload, route=route, original_task=original_task)
+        return PlannerPlan(
+            original_task=original_task,
+            route=route,
+            confidence=confidence,
+            reason=reason,
+            subtasks=subtasks,
+            risk_notes=risk_notes,
+        )
+
+    def plan_to_route_decision(self, plan: PlannerPlan) -> RouteDecision:
+        route = plan.route
+        subtask = plan.subtasks[0] if plan.subtasks else None
+        task = subtask.task if subtask and subtask.task else plan.original_task
 
         if route == RouteKind.TOOL_CALL:
             return RouteDecision(
                 route=RouteKind.TOOL_CALL,
-                reason=reason,
+                reason=plan.reason,
                 policy=PolicyDecision(PolicyAction.ALLOW),
                 suggested_tools=("web_search", "web_fetch"),
                 requires_gui=False,
@@ -76,7 +116,7 @@ class MainPlanner:
         if route == RouteKind.SYSTEM_ACTION:
             return RouteDecision(
                 route=RouteKind.SYSTEM_ACTION,
-                reason=reason,
+                reason=plan.reason,
                 policy=PolicyDecision(PolicyAction.ALLOW),
                 requires_gui=False,
                 system_action={
@@ -89,7 +129,7 @@ class MainPlanner:
         if route == RouteKind.GUI:
             return RouteDecision(
                 route=RouteKind.GUI,
-                reason=reason,
+                reason=plan.reason,
                 policy=PolicyDecision(PolicyAction.ALLOW),
                 requires_gui=True,
                 routed_task=task,
@@ -97,7 +137,7 @@ class MainPlanner:
 
         return RouteDecision(
             route=route,
-            reason=reason,
+            reason=plan.reason,
             policy=PolicyDecision(PolicyAction.ALLOW),
             requires_gui=False,
         )
@@ -108,16 +148,53 @@ class MainPlanner:
         *,
         available_tools: set[str] | frozenset[str],
     ) -> RouteDecision:
+        return self.plan_to_route_decision(
+            await self.plan_full(task, available_tools=available_tools)
+        )
+
+    async def plan_full(
+        self,
+        task: str,
+        *,
+        available_tools: set[str] | frozenset[str],
+    ) -> PlannerPlan:
+        response = await self._call_planner(task, available_tools=available_tools)
+        return self.parse_plan(response.content or "", original_task=task)
+
+    async def _call_planner(
+        self,
+        task: str,
+        *,
+        available_tools: set[str] | frozenset[str],
+    ) -> Any:
         if self.provider is None:
             raise RuntimeError("planner provider is not configured")
-        messages = [
+        return await asyncio.wait_for(
+            self.provider.chat_with_retry(
+                self._messages(task, available_tools=available_tools),
+                tools=None,
+                model=self.model,
+                max_tokens=self.config.max_tokens,
+                temperature=0.0,
+                tool_choice=None,
+            ),
+            timeout=self.config.timeout_seconds,
+        )
+
+    @staticmethod
+    def _messages(
+        task: str,
+        *,
+        available_tools: set[str] | frozenset[str],
+    ) -> list[dict[str, str]]:
+        return [
             {
                 "role": "system",
                 "content": (
                     "You are the main task planner/router for nanobot. "
                     "Choose the cheapest safe route for the user's request. "
                     "Use content-only JSON, no native tool calls. "
-                    "Allowed top-level routes: tool_call, system_action, gui_task, ask_user, s2. "
+                    "Allowed top-level routes: plan, tool_call, system_action, gui_task, ask_user, s2. "
                     "Public information lookup should use tool_call. "
                     "Tasks inside a mobile app should use gui_task. "
                     "Safe one-shot device actions can use system_action. "
@@ -136,18 +213,6 @@ class MainPlanner:
                 ),
             },
         ]
-        response = await asyncio.wait_for(
-            self.provider.chat_with_retry(
-                messages,
-                tools=None,
-                model=self.model,
-                max_tokens=self.config.max_tokens,
-                temperature=0.0,
-                tool_choice=None,
-            ),
-            timeout=self.config.timeout_seconds,
-        )
-        return self.parse_decision(response.content or "", original_task=task)
 
     @classmethod
     def _parse_json_payload(cls, content: str) -> dict[str, Any]:
@@ -176,25 +241,89 @@ class MainPlanner:
             return 0.0
         return min(1.0, max(0.0, confidence))
 
-    @staticmethod
-    def _first_subtask(payload: dict[str, Any]) -> dict[str, Any]:
+    def _route_from_payload(self, payload: dict[str, Any]) -> RouteKind:
+        route_raw = str(payload.get("route") or "").strip().casefold()
+        route = self._ROUTE_MAP.get(route_raw)
+        if route is None:
+            raise ValueError(f"unsupported route: {route_raw or '<missing>'}")
+        return route
+
+    def _route_from_subtask(self, payload: dict[str, Any]) -> RouteKind:
+        route_raw = str(payload.get("route") or "").strip().casefold()
+        if not route_raw:
+            route_raw = str(payload.get("tool") or "").strip().casefold()
+        route = self._ROUTE_MAP.get(route_raw)
+        if route is None:
+            raise ValueError(f"unsupported subtask route: {route_raw or '<missing>'}")
+        return route
+
+    def _parse_subtasks(
+        self,
+        payload: dict[str, Any],
+        *,
+        route: RouteKind,
+        original_task: str,
+    ) -> tuple[PlannerSubtask, ...]:
         subtasks = payload.get("subtasks")
+        parsed: list[PlannerSubtask] = []
         if isinstance(subtasks, list):
-            for item in subtasks:
+            for index, item in enumerate(subtasks, start=1):
                 if isinstance(item, dict):
-                    return item
-        return {}
+                    parsed.append(self._parse_subtask(item, index=index, original_task=original_task))
+        if parsed:
+            return tuple(parsed)
+        return (
+            PlannerSubtask(
+                id="subtask_1",
+                route=route,
+                task=original_task,
+            ),
+        )
+
+    def _parse_subtask(
+        self,
+        payload: dict[str, Any],
+        *,
+        index: int,
+        original_task: str,
+    ) -> PlannerSubtask:
+        risk_level = str(payload.get("risk_level") or "low").strip().casefold()
+        if risk_level not in _RISK_LEVELS:
+            risk_level = "low"
+        return PlannerSubtask(
+            id=self._subtask_id(payload, index=index),
+            route=self._route_from_subtask(payload),
+            task=self._optional_text(payload.get("task")) or original_task,
+            tool=self._optional_text(payload.get("tool")),
+            system_action=self._optional_text(payload.get("system_action") or payload.get("intent")),
+            validator=self._optional_text(payload.get("validator")),
+            success_condition=self._optional_text(payload.get("success_condition")),
+            risk_level=risk_level,
+        )
 
     @staticmethod
-    def _subtask_text(subtask: dict[str, Any]) -> str:
-        task = subtask.get("task")
-        return str(task).strip() if task is not None else ""
+    def _subtask_id(payload: dict[str, Any], *, index: int) -> str:
+        text = MainPlanner._optional_text(payload.get("id"))
+        return text or f"subtask_{index}"
 
     @staticmethod
-    def _system_action_intent(subtask: dict[str, Any]) -> str:
-        intent = subtask.get("system_action") or subtask.get("intent")
+    def _risk_notes(value: Any) -> tuple[str, ...]:
+        if not isinstance(value, list):
+            return ()
+        return tuple(text for item in value if (text := MainPlanner._optional_text(item)))
+
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _system_action_intent(subtask: PlannerSubtask | None) -> str:
+        intent = subtask.system_action if subtask else None
         text = str(intent or "").strip()
         return text or "open_app"
 
 
-__all__ = ["MainPlanner", "PlannerConfig"]
+__all__ = ["MainPlanner", "PlannerConfig", "PlannerPlan", "PlannerSubtask"]

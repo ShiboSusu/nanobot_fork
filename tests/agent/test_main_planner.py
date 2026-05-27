@@ -84,6 +84,86 @@ def test_parse_rejects_unknown_route() -> None:
         )
 
 
+def test_parse_full_plan_with_multiple_subtasks() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    plan = planner.parse_plan(
+        """
+        {
+          "route": "plan",
+          "confidence": 0.92,
+          "reason": "App playback needs app-local actions.",
+          "subtasks": [
+            {
+              "id": "open_bilibili",
+              "route": "system_action",
+              "task": "Open Bilibili",
+              "system_action": "open_app",
+              "success_condition": "Bilibili is in foreground",
+              "risk_level": "low"
+            },
+            {
+              "id": "search_video",
+              "route": "gui_task",
+              "task": "Search Bilibili for 罗翔 刑法课",
+              "success_condition": "Search results are visible",
+              "risk_level": "low"
+            },
+            {
+              "id": "play_video",
+              "route": "gui_task",
+              "task": "Open a matching video and start playback",
+              "success_condition": "Video is playing",
+              "risk_level": "low"
+            }
+          ],
+          "risk_notes": ["public video playback"]
+        }
+        """,
+        original_task="在B站播放罗翔的刑法课视频。",
+    )
+
+    assert plan.original_task == "在B站播放罗翔的刑法课视频。"
+    assert plan.confidence == 0.92
+    assert plan.reason == "App playback needs app-local actions."
+    assert plan.risk_notes == ("public video playback",)
+    assert [subtask.id for subtask in plan.subtasks] == [
+        "open_bilibili",
+        "search_video",
+        "play_video",
+    ]
+    assert plan.subtasks[0].route == RouteKind.SYSTEM_ACTION
+    assert plan.subtasks[0].system_action == "open_app"
+    assert plan.subtasks[1].route == RouteKind.GUI
+    assert plan.subtasks[1].success_condition == "Search results are visible"
+
+
+def test_parse_full_plan_synthesizes_subtask_for_legacy_route() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    plan = planner.parse_plan(
+        '{"route":"gui_task","confidence":0.9,"reason":"App task","subtasks":[]}',
+        original_task="在抖音里搜索旅行Vlog",
+    )
+
+    assert plan.route == RouteKind.GUI
+    assert len(plan.subtasks) == 1
+    assert plan.subtasks[0].id == "subtask_1"
+    assert plan.subtasks[0].route == RouteKind.GUI
+    assert plan.subtasks[0].task == "在抖音里搜索旅行Vlog"
+
+
+def test_parse_full_plan_rejects_unsupported_subtask_route() -> None:
+    planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
+
+    with pytest.raises(ValueError, match="unsupported subtask route"):
+        planner.parse_plan(
+            '{"route":"plan","confidence":0.9,"reason":"bad",'
+            '"subtasks":[{"route":"shell","task":"run rm"}]}',
+            original_task="bad",
+        )
+
+
 @pytest.mark.asyncio
 async def test_planner_uses_content_json_without_native_tool_calls() -> None:
     provider = SimpleNamespace(
@@ -105,3 +185,26 @@ async def test_planner_uses_content_json_without_native_tool_calls() -> None:
     assert call.kwargs["tool_choice"] is None
     assert call.kwargs["model"] == "qwen3.6-35b-a3b"
     assert "Return only JSON" in call.args[0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_plan_full_uses_content_json_without_native_tool_calls() -> None:
+    provider = SimpleNamespace(
+        chat_with_retry=AsyncMock(return_value=LLMResponse(
+            content='{"route":"plan","confidence":0.9,"reason":"ok",'
+            '"subtasks":[{"route":"web_search","tool":"web_search","task":"查询深圳天气"}]}'
+        ))
+    )
+    planner = MainPlanner(
+        provider=provider,
+        model="qwen3.6-35b-a3b",
+        config=PlannerConfig(enabled=True),
+    )
+
+    plan = await planner.plan_full("查询深圳天气", available_tools={"web_search", "gui_task"})
+
+    assert plan.subtasks[0].route == RouteKind.TOOL_CALL
+    call = provider.chat_with_retry.await_args
+    assert call.kwargs["tools"] is None
+    assert call.kwargs["tool_choice"] is None
+    assert call.kwargs["model"] == "qwen3.6-35b-a3b"
