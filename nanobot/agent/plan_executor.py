@@ -76,7 +76,7 @@ class PlanExecutor:
             if not policy.allowed:
                 result = SubtaskResult(
                     subtask=subtask,
-                    status=SubtaskStatus.NEEDS_USER,
+                    status=self._subtask_status_from_policy(policy),
                     output=policy.reason,
                     error=policy.action.value,
                     policy=policy,
@@ -144,6 +144,12 @@ class PlanExecutor:
         if policy.action == PolicyAction.REQUIRE_HUMAN_TAKEOVER:
             return PlanExecutionStatus.NEEDS_USER
         return PlanExecutionStatus.BLOCKED
+
+    @staticmethod
+    def _subtask_status_from_policy(policy: PolicyDecision) -> SubtaskStatus:
+        if policy.action == PolicyAction.HALT:
+            return SubtaskStatus.FAILED
+        return SubtaskStatus.NEEDS_USER
 
 
 __all__ = [

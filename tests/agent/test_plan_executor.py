@@ -133,6 +133,7 @@ async def test_plan_executor_maps_halt_policy_to_blocked() -> None:
     assert calls == []
     assert result.subtasks[0].policy is not None
     assert result.subtasks[0].policy.action == PolicyAction.HALT
+    assert result.subtasks[0].status == SubtaskStatus.FAILED
 
 
 @pytest.mark.asyncio
