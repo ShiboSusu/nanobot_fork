@@ -89,8 +89,40 @@ openai_endpoint_ready() {
   curl_silent "${api_base%/}/models" 3 >/dev/null 2>&1
 }
 
+uses_provider() {
+  local provider="$1"
+  [[ "$MAIN_PROVIDER" == "$provider" || "$GUI_S1_PROVIDER" == "$provider" || "$GUI_S2_PROVIDER" == "$provider" ]]
+}
+
+required_model_api_bases() {
+  if uses_provider "vllm_9b"; then
+    printf '%s\n' "$VLLM_9B_API_BASE"
+  fi
+  if uses_provider "vllm_35b"; then
+    printf '%s\n' "$VLLM_35B_API_BASE"
+  fi
+}
+
+required_model_endpoint_label() {
+  local endpoints=()
+  while IFS= read -r api_base; do
+    [[ -n "$api_base" ]] && endpoints+=("$api_base")
+  done < <(required_model_api_bases)
+  if (( ${#endpoints[@]} == 0 )); then
+    printf 'none'
+  else
+    local IFS=', '
+    printf '%s' "${endpoints[*]}"
+  fi
+}
+
 models_ready() {
-  openai_endpoint_ready "$VLLM_9B_API_BASE" && openai_endpoint_ready "$VLLM_35B_API_BASE"
+  local api_base
+  while IFS= read -r api_base; do
+    [[ -z "$api_base" ]] && continue
+    openai_endpoint_ready "$api_base" || return 1
+  done < <(required_model_api_bases)
+  return 0
 }
 
 wait_for_models() {
@@ -106,13 +138,18 @@ wait_for_models() {
 }
 
 ensure_model_tunnels() {
+  if [[ "$(required_model_endpoint_label)" == "none" ]]; then
+    log "[skip] no local vLLM endpoints required by current model providers"
+    return 0
+  fi
+
   if [[ "$MODEL_TUNNELS_ENABLED" == "0" ]]; then
     log "[skip] model tunnel management disabled"
     return 0
   fi
 
   if models_ready; then
-    log "[ok] model endpoints ready: $VLLM_9B_API_BASE and $VLLM_35B_API_BASE"
+    log "[ok] required model endpoints ready: $(required_model_endpoint_label)"
     return 0
   fi
 
@@ -148,9 +185,9 @@ ensure_model_tunnels() {
 
   if ! wait_for_models "$MODEL_TUNNEL_TIMEOUT_SECONDS"; then
     tail -n 100 "$LOG_DIR/model-tunnels.log" >&2 || true
-    die "model endpoints did not become ready within ${MODEL_TUNNEL_TIMEOUT_SECONDS}s"
+    die "required model endpoints did not become ready within ${MODEL_TUNNEL_TIMEOUT_SECONDS}s: $(required_model_endpoint_label)"
   fi
-  log "[ok] model endpoints ready"
+  log "[ok] required model endpoints ready: $(required_model_endpoint_label)"
 }
 
 wda_ready() {
@@ -174,6 +211,28 @@ wait_for_wda() {
   while (( SECONDS < deadline )); do
     if wda_ready; then
       return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+wda_log_has_untrusted_certificate_error() {
+  local log_file="$1"
+  [[ -f "$log_file" ]] || return 1
+  grep -q "Developer App Certificate is not trusted" "$log_file"
+}
+
+wait_for_wda_or_known_failure() {
+  local timeout="$1"
+  local log_file="$2"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    if wda_ready; then
+      return 0
+    fi
+    if wda_log_has_untrusted_certificate_error "$log_file"; then
+      die "WDA developer certificate is not trusted on the iPhone. On the phone, open Settings > General > VPN & Device Management, trust the developer app certificate for this Apple ID/team, then rerun this script."
     fi
     sleep 2
   done
@@ -322,7 +381,7 @@ ensure_wda_runner() {
     log "[ok] xcodebuild started (pid $pid, log $log_file)"
   fi
 
-  if ! wait_for_wda "$WDA_TIMEOUT_SECONDS"; then
+  if ! wait_for_wda_or_known_failure "$WDA_TIMEOUT_SECONDS" "$log_file"; then
     tail -n 80 "$log_file" >&2 || true
     die "WDA did not become ready within ${WDA_TIMEOUT_SECONDS}s"
   fi

@@ -31,6 +31,7 @@ The V0 objective is not a full uncertainty monitor. It is a working foundation:
 - GUI S1 model: `qwen3.5-9b`
 - GUI S2 model: `qwen3.5-397b-a17b`
 - GUI default action interface: native OpenAI-compatible `computer_use` tool calls (`gui.agentProfile=default`)
+- Startup script only blocks on vLLM endpoints used by the current providers. With the default runtime, 9B is required and 35B is optional.
 
 Note: `qwen3.6-35b-a3b` is available through `vllm_35b`, but it is not the default main-agent model until the remote vLLM service is started with OpenAI-compatible tool-choice support.
 Note: Qwen text profiles such as `qwen3vl` are compatibility adapters only; they should not be the default when the model server supports native tool calls.
