@@ -11,6 +11,7 @@ decision payload that can be logged or used by the agent loop.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -161,6 +162,10 @@ class AutonomyMonitor:
         self.cumulative_risk = 0.0
         self._last_action_signature = None
 
+    def mark_prior_attempt_progress(self) -> None:
+        """Record that a previous retry attempt already produced execution context."""
+        self._last_action_signature = ("prior_attempt",)
+
     def mark_s2_guidance_issued(self) -> None:
         """Discount accumulated risk after S2 has inspected the trajectory."""
         discount = min(1.0, max(0.0, self.recovery_risk_discount))
@@ -300,7 +305,7 @@ class AutonomyMonitor:
                 reason="The same GUI action was proposed on consecutive steps.",
             ))
 
-        if step.max_steps > 0:
+        if step.max_steps > 0 and step.action.action_type not in {"done", "request_intervention"}:
             budget_ratio = step.step_index / step.max_steps
             if budget_ratio >= 0.90:
                 signals.append(RiskSignal(
@@ -338,12 +343,17 @@ class AutonomyMonitor:
             ))
 
         if _unverified_done(step, self._last_action_signature):
+            requires_gui_progress = _task_requires_observable_gui_progress(step.task)
             signals.append(RiskSignal(
                 key="unverified_done",
                 category="progress",
                 value=1.0,
-                weight=0.80,
-                reason="The model declared success before any verified GUI progress was recorded.",
+                weight=0.80 if requires_gui_progress else 0.45,
+                reason=(
+                    "The model declared success before any verified GUI progress was recorded."
+                    if requires_gui_progress
+                    else "The model declared success before any verified GUI progress was recorded; treat as a review signal rather than a hard stop."
+                ),
             ))
 
         if self._has_safety_keyword(
@@ -467,6 +477,26 @@ def _unverified_done(step: StepMonitorInput, last_action_signature: tuple[Any, .
         step.action.action_type == "done"
         and step.action.status == "success"
         and last_action_signature is None
+    )
+
+
+def _task_requires_observable_gui_progress(task: str) -> bool:
+    text = (task or "").casefold()
+    cjk_terms = (
+        "打开", "进入", "点击", "搜索", "播放", "查看", "检查", "购买", "预订",
+        "打车", "发送", "发一条", "改成", "取消", "领取", "筛选", "排序",
+        "输入", "设置", "切换", "调到",
+    )
+    if any(term in text for term in cjk_terms):
+        return True
+    english_terms = (
+        "open", "enter", "tap", "click", "search", "play", "view", "check",
+        "buy", "book", "send", "change", "cancel", "claim", "filter", "sort",
+        "type", "set", "switch",
+    )
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text)
+        for term in english_terms
     )
 
 

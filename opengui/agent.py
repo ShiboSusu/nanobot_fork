@@ -1245,6 +1245,8 @@ class GuiAgent:
 
         history: list[HistoryTurn] = []
         self._autonomy_monitor.reset()
+        if self._active_retry_summaries:
+            self._autonomy_monitor.mark_prior_attempt_progress()
         s2_guidance: list[str] = []
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
@@ -2095,7 +2097,7 @@ class GuiAgent:
             target = self._extract_ios_app_target(normalized_task)
         if target is None:
             return None
-        bundle_id = resolve_ios_bundle(target)
+        bundle_id = resolve_ios_bundle(target, self._installed_apps)
         if bundle_id == target and "." not in bundle_id:
             return None
         return Action(action_type="open_app", text=bundle_id)
@@ -2106,15 +2108,22 @@ class GuiAgent:
 
     @staticmethod
     def _ios_task_has_follow_up_gui_work(normalized_task: str) -> bool:
-        follow_up_terms = (
+        cjk_follow_up_terms = (
             "然后", "之后", "接着", "再", "并", "并且", "同时",
             "点击", "点一下", "输入", "搜索框", "填写", "发送", "发消息",
             "购买", "付款", "登录", "选择", "切换", "查看", "进入", "改成",
             "调到", "滑动",
+        )
+        english_follow_up_terms = (
             "then", "and then", "tap", "click", "type", "send", "pay",
             "login", "log in", "select", "switch",
         )
-        if any(term in normalized_task for term in follow_up_terms):
+        if any(term in normalized_task for term in cjk_follow_up_terms):
+            return True
+        if any(
+            re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", normalized_task)
+            for term in english_follow_up_terms
+        ):
             return True
         is_app_lookup = (
             any(term in normalized_task for term in ("查找", "寻找", "找到", "搜索", "find", "search"))
@@ -2432,6 +2441,17 @@ class GuiAgent:
                 resolved = resolve_android_package(action.text)
                 if resolved != action.text:
                     logger.debug("Resolved app name %r -> %r", action.text, resolved)
+                    action = replace(action, text=resolved)
+
+            # Normalize iOS display names to bundle IDs before hitting WDA.
+            if (
+                action.action_type in ("open_app", "close_app")
+                and action.text
+                and self.backend.platform == "ios"
+            ):
+                resolved = resolve_ios_bundle(action.text, self._installed_apps)
+                if resolved != action.text:
+                    logger.debug("Resolved iOS app name %r -> %r", action.text, resolved)
                     action = replace(action, text=resolved)
 
             # Execute action on backend

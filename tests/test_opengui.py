@@ -213,6 +213,51 @@ def test_ios_chinese_app_name_uses_direct_bundle_launch(tmp_path: Path) -> None:
     )
 
 
+def test_ios_direct_launch_prefers_installed_app_mapping(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-installed-app"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+        installed_apps=["支付宝: com.example.alipay.beta"],
+    )
+
+    assert agent._direct_system_action_for_task("打开 Alipay") == Action(
+        action_type="open_app",
+        text="com.example.alipay.beta",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ios_model_open_app_uses_installed_app_mapping(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="open bilibili",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={"action_type": "open_app", "text": "哔哩哔哩"},
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-model-open-app"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        installed_apps=["哔哩哔哩: tv.danmaku.bilianime"],
+    )
+
+    await agent.run("打开B站然后搜索罗翔", max_retries=1)
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="tv.danmaku.bilianime")
+    ]
+
+
 @pytest.mark.asyncio
 async def test_successful_retry_clears_previous_direct_system_action_error(tmp_path: Path) -> None:
     class FlakyDirectIosBackend(_RecordingIosBackend):
@@ -597,6 +642,41 @@ def test_build_system_prompt_android_apps_excludes_unmapped() -> None:
 
     # With all packages unmapped, no "# Installed Apps" section should appear
     assert "# Installed Apps" not in prompt
+
+
+def test_ios_app_resolver_prefers_device_discovered_names() -> None:
+    from opengui.skills.normalization import resolve_ios_bundle
+
+    installed_apps = ["支付宝: com.example.alipay.beta"]
+
+    assert resolve_ios_bundle("Alipay", installed_apps) == "com.example.alipay.beta"
+    assert resolve_ios_bundle("支付宝", installed_apps) == "com.example.alipay.beta"
+    assert resolve_ios_bundle("未安装的新应用", installed_apps) == "未安装的新应用"
+
+
+def test_annotate_ios_apps_preserves_device_discovered_display_names() -> None:
+    from opengui.skills.normalization import annotate_ios_apps
+
+    result = annotate_ios_apps([
+        "哔哩哔哩: tv.danmaku.bilianime",
+        "com.totally.unknown",
+    ])
+
+    assert result == ["哔哩哔哩: tv.danmaku.bilianime"]
+
+
+def test_build_system_prompt_ios_apps_uses_device_display_names() -> None:
+    prompt = build_system_prompt(
+        platform="ios",
+        installed_apps=["哔哩哔哩: tv.danmaku.bilianime"],
+    )
+
+    assert "哔哩哔哩" in prompt
+    assert not any(
+        "tv.danmaku.bilianime" in line
+        for line in prompt.splitlines()
+        if line.strip().startswith("- ")
+    )
 
 
 @pytest.mark.asyncio

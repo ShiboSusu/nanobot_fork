@@ -14,6 +14,7 @@ stays non-blocking inside the async agent loop.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,59 @@ from opengui.action import Action, describe_action, resolve_coordinate
 from opengui.observation import Observation
 
 logger = logging.getLogger(__name__)
+
+
+def _format_ios_app_entry(bundle_id: str, display: str | None = None) -> str:
+    bundle_id = str(bundle_id).strip()
+    display = str(display).strip() if display else ""
+    if display and display != bundle_id:
+        return f"{display}: {bundle_id}"
+    return bundle_id
+
+
+def _bundle_from_ios_app_entry(entry: str) -> str:
+    cleaned = str(entry).strip()
+    for separator in (": ", "：", ":"):
+        if separator in cleaned:
+            candidate = cleaned.rsplit(separator, 1)[-1].strip()
+            if "." in candidate and " " not in candidate:
+                return candidate
+    return cleaned
+
+
+def _ios_app_entry_has_display(entry: str) -> bool:
+    return _bundle_from_ios_app_entry(entry) != str(entry).strip()
+
+
+def _ios_app_display_from_metadata(metadata: Any) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    for key in (
+        "CFBundleDisplayName",
+        "CFBundleName",
+        "displayName",
+        "display_name",
+        "localizedName",
+        "name",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _json_payload_from_text(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start_candidates = [idx for idx in (text.find("{"), text.find("[")) if idx >= 0]
+        if not start_candidates:
+            raise
+        start = min(start_candidates)
+        end = max(text.rfind("}"), text.rfind("]"))
+        if end <= start:
+            raise
+        return json.loads(text[start:end + 1])
 
 
 def _import_wda() -> Any:
@@ -129,26 +183,104 @@ class WdaBackend:
     # ------------------------------------------------------------------
 
     async def list_apps(self) -> list[str]:
-        """Return bundle IDs of apps installed/running on the device.
+        """Return launchable iOS apps as bundle IDs or ``"Display: bundle"``.
 
-        Uses WDA's ``app_list()`` when available; falls back to an empty list
-        with a warning (some WDA builds omit this endpoint).
+        WDA builds differ in what ``app_list()`` returns, so we merge it with a
+        best-effort ``pymobiledevice3 apps list`` result.  Display names are kept
+        when available because the agent's resolver can then map natural app
+        names to the device's actual bundle IDs.
         """
+        entries_by_bundle: dict[str, str] = {}
+        for entry in await self._list_apps_via_wda():
+            bundle_id = _bundle_from_ios_app_entry(entry)
+            if bundle_id:
+                entries_by_bundle[bundle_id] = entry
+        for entry in await self._list_apps_via_pymobiledevice3():
+            bundle_id = _bundle_from_ios_app_entry(entry)
+            if not bundle_id:
+                continue
+            if bundle_id not in entries_by_bundle or _ios_app_entry_has_display(entry):
+                entries_by_bundle[bundle_id] = entry
+        return list(entries_by_bundle.values())
+
+    async def _list_apps_via_wda(self) -> list[str]:
         try:
             result = await self._wda_call(self._client.app_list)
             if isinstance(result, list):
-                bundle_ids: list[str] = []
+                entries: list[str] = []
                 for entry in result:
                     if isinstance(entry, dict):
                         bid = entry.get("bundleId") or entry.get("bundle_id") or entry.get("id")
                         if bid:
-                            bundle_ids.append(str(bid))
+                            entries.append(_format_ios_app_entry(str(bid), _ios_app_display_from_metadata(entry)))
                     elif isinstance(entry, str):
-                        bundle_ids.append(entry)
-                return bundle_ids
+                        entries.append(entry)
+                return entries
         except Exception as exc:
-            logger.warning("WDA app_list() unavailable (%s); returning empty list.", exc)
+            logger.warning("WDA app_list() unavailable (%s); trying pymobiledevice3.", exc)
         return []
+
+    async def _list_apps_via_pymobiledevice3(self) -> list[str]:
+        cmd = ("pymobiledevice3", "apps", "list")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            logger.debug("pymobiledevice3 not found; iOS app list will use WDA only.")
+            return []
+
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning("pymobiledevice3 apps list timed out; using WDA app list only.")
+            return []
+
+        if proc.returncode != 0:
+            logger.warning(
+                "pymobiledevice3 apps list failed (%s): %s",
+                proc.returncode,
+                stderr.decode(errors="replace").strip(),
+            )
+            return []
+
+        text = stdout.decode(errors="replace")
+        try:
+            payload = _json_payload_from_text(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("Could not parse pymobiledevice3 apps list JSON: %s", exc)
+            return []
+
+        entries: list[str] = []
+        if isinstance(payload, dict):
+            iterable = payload.items()
+        elif isinstance(payload, list):
+            iterable = ((None, item) for item in payload)
+        else:
+            return []
+
+        for key, metadata in iterable:
+            if isinstance(metadata, dict):
+                bundle_id = (
+                    metadata.get("CFBundleIdentifier")
+                    or metadata.get("bundleId")
+                    or metadata.get("bundle_id")
+                    or key
+                )
+                if bundle_id:
+                    entries.append(
+                        _format_ios_app_entry(
+                            str(bundle_id),
+                            _ios_app_display_from_metadata(metadata),
+                        )
+                    )
+            elif isinstance(key, str):
+                entries.append(key)
+        return entries
 
     # ------------------------------------------------------------------
     # Observe

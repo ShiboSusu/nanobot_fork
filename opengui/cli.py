@@ -106,6 +106,13 @@ class AppCache:
         path.write_text(json.dumps(apps, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _cached_app_list_needs_refresh(backend: Any, apps: list[str]) -> bool:
+    """Detect old cache formats that are too lossy for app-name resolution."""
+    if getattr(backend, "platform", "unknown") != "ios":
+        return False
+    return not any((": " in app or "：" in app) for app in apps)
+
+
 @dataclass(slots=True)
 class ProviderConfig:
     base_url: str
@@ -556,6 +563,8 @@ async def _execute_agent(
     installed_apps: list[str] | None = None
     if not args.refresh_apps:
         installed_apps = app_cache.load(cache_key)
+        if installed_apps is not None and _cached_app_list_needs_refresh(backend, installed_apps):
+            installed_apps = None
     if installed_apps is None and hasattr(backend, "list_apps"):
         try:
             installed_apps = await backend.list_apps()
