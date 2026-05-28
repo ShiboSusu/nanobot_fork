@@ -13,6 +13,7 @@ WDA_SCHEME="${WDA_SCHEME:-WebDriverAgentRunner}"
 WDA_PORT="${WDA_PORT:-8100}"
 WDA_URL="${WDA_URL:-http://127.0.0.1:$WDA_PORT}"
 WDA_TIMEOUT_SECONDS="${WDA_TIMEOUT_SECONDS:-180}"
+WDA_LAUNCHD_LABEL="${WDA_LAUNCHD_LABEL:-com.nanobot.wda.$WDA_PORT}"
 PREFERRED_UDID="${NANOBOT_IOS_UDID:-${IOS_UDID:-}}"
 XCODE_DEVELOPER_DIR="${XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
@@ -275,10 +276,50 @@ wait_for_wda_or_known_failure() {
 stop_wda_xcodebuild_from_pid_file() {
   local pid_file="$1"
   local pid
+  launchctl remove "$WDA_LAUNCHD_LABEL" >/dev/null 2>&1 || true
   pid="$(cat "$pid_file" 2>/dev/null || true)"
   if process_is_running "$pid"; then
     kill "$pid" >/dev/null 2>&1 || true
   fi
+}
+
+start_wda_xcodebuild() {
+  local udid="$1"
+  local pid_file="$2"
+  local log_file="$3"
+
+  : >"$log_file"
+  if command -v launchctl >/dev/null 2>&1; then
+    launchctl remove "$WDA_LAUNCHD_LABEL" >/dev/null 2>&1 || true
+    if launchctl submit \
+      -l "$WDA_LAUNCHD_LABEL" \
+      -o "$log_file" \
+      -e "$log_file" \
+      -- /usr/bin/env "DEVELOPER_DIR=${DEVELOPER_DIR:-$XCODE_DEVELOPER_DIR}" xcodebuild test \
+      -project "$WDA_PROJECT" \
+      -scheme "$WDA_SCHEME" \
+      -destination "id=$udid" \
+      -allowProvisioningUpdates; then
+      sleep 1
+      local pid
+      pid="$(pgrep -f "xcodebuild .*${WDA_SCHEME}" | head -n 1 || true)"
+      if [[ -n "$pid" ]]; then
+        printf '%s\n' "$pid" >"$pid_file"
+        log "[ok] xcodebuild submitted to launchd (label $WDA_LAUNCHD_LABEL, pid $pid, log $log_file)"
+        return 0
+      fi
+    fi
+  fi
+
+  nohup xcodebuild test \
+    -project "$WDA_PROJECT" \
+    -scheme "$WDA_SCHEME" \
+    -destination "id=$udid" \
+    -allowProvisioningUpdates \
+    >>"$log_file" 2>&1 &
+  local pid=$!
+  printf '%s\n' "$pid" >"$pid_file"
+  log "[ok] xcodebuild started (pid $pid, log $log_file)"
 }
 
 detect_ios_udid() {
@@ -426,16 +467,7 @@ ensure_wda_runner() {
     log "[ok] xcodebuild for $WDA_SCHEME is already running"
   else
     log "[info] starting WebDriverAgentRunner through xcodebuild"
-    : >"$log_file"
-    nohup xcodebuild test \
-      -project "$WDA_PROJECT" \
-      -scheme "$WDA_SCHEME" \
-      -destination "id=$udid" \
-      -allowProvisioningUpdates \
-      >>"$log_file" 2>&1 &
-    local pid=$!
-    printf '%s\n' "$pid" >"$pid_file"
-    log "[ok] xcodebuild started (pid $pid, log $log_file)"
+    start_wda_xcodebuild "$udid" "$pid_file" "$log_file"
   fi
 
   local wait_status=0
