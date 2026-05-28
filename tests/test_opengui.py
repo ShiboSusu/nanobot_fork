@@ -214,6 +214,63 @@ async def test_ios_compound_app_task_prelaunches_resolved_app(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_ios_prelaunch_dismisses_visible_skip_control_before_llm(tmp_path: Path) -> None:
+    class SplashBackend(_RecordingIosBackend):
+        async def find_text_controls(self, texts: list[str]) -> list[dict[str, object]]:
+            assert "跳过" in texts
+            if self.foreground_app == "tv.danmaku.bilianime":
+                return [{
+                    "label": "跳过 5",
+                    "x": 300,
+                    "y": 785,
+                    "width": 88,
+                    "height": 44,
+                }]
+            return []
+
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            observation = await super().observe(screenshot_path, timeout=timeout)
+            if screenshot_path.name == "prelaunch_dismiss_001.png":
+                observation.extra["screen"] = "bilibili_home"
+            return observation
+
+    backend = SplashBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Bilibili home is ready.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-prelaunch-dismiss"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        installed_apps=["哔哩哔哩: tv.danmaku.bilianime"],
+    )
+
+    result = await agent.run("在B站播放罗翔的刑法课视频", max_retries=1)
+
+    assert backend.executed_actions[:2] == [
+        Action(action_type="open_app", text="tv.danmaku.bilianime"),
+        Action(action_type="tap", x=344, y=807),
+    ]
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "prelaunch_overlay_dismissed" for event in trace_events)
+
+
+@pytest.mark.asyncio
 async def test_ios_prelaunch_sets_expected_app_hint_for_monitor(tmp_path: Path) -> None:
     class RedirectingIosBackend(_RecordingIosBackend):
         async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:

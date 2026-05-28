@@ -2145,7 +2145,124 @@ class GuiAgent:
             platform=next_observation.platform,
             duration_s=time.monotonic() - start,
         )
+        dismissed_observation = await self._try_dismiss_prelaunch_overlay(
+            run_dir=run_dir,
+            launch_action=action,
+            current_observation=next_observation,
+        )
+        if dismissed_observation is not None:
+            return dismissed_observation
         return next_observation
+
+    async def _try_dismiss_prelaunch_overlay(
+        self,
+        *,
+        run_dir: Path,
+        launch_action: Action,
+        current_observation: Observation,
+    ) -> Observation | None:
+        if self.backend.platform != "ios":
+            return None
+        if launch_action.action_type != "open_app" or not launch_action.text:
+            return None
+        if current_observation.foreground_app != launch_action.text:
+            return None
+
+        dismiss_action = await self._prelaunch_dismiss_action(current_observation)
+        if dismiss_action is None:
+            return None
+
+        start = time.monotonic()
+        try:
+            tool_result = await self.backend.execute(dismiss_action, timeout=self.step_timeout)
+        except Exception as exc:
+            await self._write_trace(
+                run_dir / "trace.jsonl",
+                {
+                    "event": "prelaunch_overlay_dismiss_failed",
+                    "action": self._serialize_action(dismiss_action),
+                    "error": str(exc),
+                    "timestamp": time.time(),
+                },
+            )
+            return None
+
+        settle_seconds = self._post_action_settle_seconds(dismiss_action)
+        if settle_seconds > 0:
+            await asyncio.sleep(settle_seconds)
+        next_observation = await self.backend.observe(
+            run_dir / "screenshots" / "prelaunch_dismiss_001.png",
+            timeout=self.step_timeout,
+        )
+        action_summary = "Dismissed a visible launch overlay before handing control to the GUI model."
+        await self._write_trace(
+            run_dir / "trace.jsonl",
+            self._scrub_for_artifact({
+                "event": "prelaunch_overlay_dismissed",
+                "action": self._serialize_action(dismiss_action),
+                "action_summary": action_summary,
+                "tool_result": tool_result,
+                "current_observation": self._serialize_observation(current_observation),
+                "next_observation": self._serialize_observation(next_observation),
+                "screenshot_path": next_observation.screenshot_path,
+                "timestamp": time.time(),
+            }),
+        )
+        self._trajectory_recorder.record_step(
+            action=self._scrub_for_artifact(self._serialize_action(dismiss_action)),
+            model_output=action_summary,
+            screenshot_path=next_observation.screenshot_path,
+            foreground_app=next_observation.foreground_app,
+            screen_width=next_observation.screen_width,
+            screen_height=next_observation.screen_height,
+            platform=next_observation.platform,
+            duration_s=time.monotonic() - start,
+        )
+        return next_observation
+
+    async def _prelaunch_dismiss_action(self, observation: Observation) -> Action | None:
+        finder = getattr(self.backend, "find_text_controls", None)
+        if not callable(finder):
+            return None
+        labels = ["跳过", "跳過", "略过", "略過", "关闭", "關閉", "skip", "close"]
+        try:
+            controls = await finder(labels)
+        except Exception:
+            logger.debug("Failed to inspect iOS accessibility controls for launch overlay", exc_info=True)
+            return None
+        for control in controls:
+            action = self._dismiss_control_to_action(control, observation)
+            if action is not None:
+                return action
+        return None
+
+    @staticmethod
+    def _dismiss_control_to_action(
+        control: Any,
+        observation: Observation,
+    ) -> Action | None:
+        if not isinstance(control, dict):
+            return None
+        label = str(control.get("label") or control.get("name") or "").strip().casefold()
+        if not label:
+            return None
+        dismiss_terms = ("跳过", "跳過", "略过", "略過", "关闭", "關閉", "skip", "close")
+        if not any(term in label for term in dismiss_terms):
+            return None
+        try:
+            x = float(control["x"])
+            y = float(control["y"])
+            width = float(control.get("width") or 0)
+            height = float(control.get("height") or 0)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if width < 1 or height < 1:
+            return None
+        center_x = round(x + width / 2)
+        center_y = round(y + height / 2)
+        if not (0 <= center_x < observation.screen_width and 0 <= center_y < observation.screen_height):
+            return None
+        return Action(action_type="tap", x=center_x, y=center_y)
 
     def _direct_system_action_for_task(self, task: str) -> Action | None:
         if self.backend.platform != "ios":

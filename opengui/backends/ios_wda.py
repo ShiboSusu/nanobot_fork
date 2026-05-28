@@ -18,6 +18,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Callable
+from xml.etree import ElementTree
 
 from opengui.action import Action, describe_action, resolve_coordinate
 from opengui.observation import Observation
@@ -428,6 +429,64 @@ class WdaBackend:
             raise ValueError(f"Unsupported action type: {t!r}")
 
         return describe_action(action)
+
+    async def find_text_controls(self, texts: list[str]) -> list[dict[str, Any]]:
+        """Return visible accessibility controls whose label/name contains text.
+
+        This is intentionally backend-specific and compact; the agent uses it
+        for deterministic launch overlay dismissal without adding full UI trees
+        to every model prompt.
+        """
+        needles = [str(text).strip().casefold() for text in texts if str(text).strip()]
+        if not needles:
+            return []
+
+        session = await self._wda_call(self._client.session)
+        source = await self._wda_call(session.source)
+        if not isinstance(source, str) or not source.strip():
+            return []
+
+        try:
+            root = ElementTree.fromstring(source)
+        except ElementTree.ParseError:
+            logger.debug("Failed to parse WDA source while finding text controls", exc_info=True)
+            return []
+
+        matches: list[dict[str, Any]] = []
+        for element in root.iter():
+            if element.attrib.get("visible") != "true":
+                continue
+            label = (
+                element.attrib.get("label")
+                or element.attrib.get("name")
+                or element.attrib.get("value")
+                or ""
+            )
+            label_text = str(label).strip()
+            if not label_text:
+                continue
+            folded = label_text.casefold()
+            if not any(needle in folded for needle in needles):
+                continue
+            try:
+                x = float(element.attrib["x"])
+                y = float(element.attrib["y"])
+                width = float(element.attrib["width"])
+                height = float(element.attrib["height"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if width <= 0 or height <= 0:
+                continue
+            matches.append({
+                "type": element.attrib.get("type"),
+                "label": label_text,
+                "name": element.attrib.get("name"),
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+            })
+        return matches
 
     # ------------------------------------------------------------------
     # Coordinate helpers  (mirror AdbBackend)
