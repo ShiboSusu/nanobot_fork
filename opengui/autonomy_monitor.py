@@ -286,14 +286,25 @@ class AutonomyMonitor:
                 reason="Backend reported post-action observation failure.",
             ))
 
+        unchanged_screen = _screen_unchanged(step.current_observation, step.next_observation)
         no_progress_action = step.action.action_type not in {"done", "request_intervention", "wait"}
-        if no_progress_action and _screen_unchanged(step.current_observation, step.next_observation):
+        if no_progress_action and unchanged_screen:
             signals.append(RiskSignal(
                 key="screen_unchanged",
                 category="transition",
                 value=1.0,
                 weight=0.28,
                 reason="Post-action screenshot and foreground app match the pre-action state.",
+            ))
+
+        wait_loading_loop = step.action.action_type == "wait" and _wait_looks_like_loading_loop(step)
+        if wait_loading_loop and unchanged_screen:
+            signals.append(RiskSignal(
+                key="wait_no_change",
+                category="transition",
+                value=1.0,
+                weight=0.25,
+                reason="Waiting did not change the visible screen or foreground app.",
             ))
 
         if no_progress_action and self._last_action_signature == _action_signature(step.action):
@@ -303,6 +314,19 @@ class AutonomyMonitor:
                 value=1.0,
                 weight=0.30,
                 reason="The same GUI action was proposed on consecutive steps.",
+            ))
+        elif (
+            step.action.action_type == "wait"
+            and wait_loading_loop
+            and unchanged_screen
+            and self._last_action_signature == _action_signature(step.action)
+        ):
+            signals.append(RiskSignal(
+                key="repeated_wait",
+                category="progress",
+                value=1.0,
+                weight=0.35,
+                reason="The model is repeatedly waiting on an unchanged screen instead of recovering or choosing another action.",
             ))
 
         if step.max_steps > 0 and step.action.action_type not in {"done", "request_intervention"}:
@@ -498,6 +522,39 @@ def _task_requires_observable_gui_progress(task: str) -> bool:
         re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text)
         for term in english_terms
     )
+
+
+def _wait_looks_like_loading_loop(step: StepMonitorInput) -> bool:
+    text = " ".join(
+        part
+        for part in (
+            step.action_summary or "",
+            step.state_summary or "",
+            step.tool_result or "",
+        )
+        if part
+    ).casefold()
+    cjk_terms = (
+        "加载",
+        "启动页",
+        "开屏",
+        "闪屏",
+        "主界面",
+        "启动中",
+        "等待页面",
+    )
+    if any(term in text for term in cjk_terms):
+        return True
+    english_terms = (
+        "loading",
+        "launch screen",
+        "splash",
+        "startup",
+        "wait for app",
+        "main screen",
+        "home screen to load",
+    )
+    return any(term in text for term in english_terms)
 
 
 def _observation_text(observation: Observation | None) -> str:

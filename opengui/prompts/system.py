@@ -15,6 +15,7 @@ from opengui.agent_profiles import (
     prompt_contract_for_profile,
 )
 
+
 def build_system_prompt(
     *,
     platform: str = "unknown",
@@ -66,6 +67,7 @@ def build_system_prompt(
         "- For size/quantity constraints, prefer exact match; small near-matches may be used only with explicit disclosure in the final response.",
         "- If only a far mismatch is available, do not substitute silently; ask for confirmation via request_intervention or report failure.",
         "- Do not call done(status=\"success\") unless key constraints are satisfied and any near-match is clearly disclosed.",
+        "- On onboarding/profile-completion popups, prefer Skip/Later/Close/Back when available; do not fill personal attributes such as gender, age, birthday, phone, address, or real name unless the user explicitly asked for that specific update.",
         coordinate_rules,
     ]
 

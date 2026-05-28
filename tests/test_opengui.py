@@ -610,6 +610,15 @@ def test_build_system_prompt_supports_general_e2e_profile() -> None:
     assert "Do not use native tool calling" in prompt
 
 
+def test_build_system_prompt_warns_against_filling_onboarding_personal_data() -> None:
+    prompt = build_system_prompt(platform="ios")
+
+    assert "onboarding/profile-completion" in prompt
+    assert "gender" in prompt
+    assert "age" in prompt
+    assert "Skip/Later/Close/Back" in prompt
+
+
 def test_annotate_android_apps_filters_unmapped_packages() -> None:
     from opengui.skills.normalization import annotate_android_apps
 

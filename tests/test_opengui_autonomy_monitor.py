@@ -78,6 +78,45 @@ def test_monitor_accumulates_unchanged_repeated_action_risk(tmp_path: Path) -> N
     assert "repeated_action" in second_decision.signal_keys
 
 
+def test_monitor_escalates_repeated_wait_on_unchanged_screen(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor(horizon_threshold=0.50)
+    action = Action(action_type="wait", duration_ms=3000)
+    first = _observation(tmp_path / "first.png", app="Bilibili")
+    second = _observation(tmp_path / "second.png", app="Bilibili")
+    third = _observation(tmp_path / "third.png", app="Bilibili")
+
+    first_decision = monitor.assess_step(
+        StepMonitorInput(
+            task="在B站播放罗翔的刑法课视频",
+            step_index=1,
+            max_steps=15,
+            action=action,
+            current_observation=first,
+            next_observation=second,
+            tool_result="wait 3000 ms",
+            action_summary="wait for app loading launch screen",
+            state_summary="Bilibili is still on splash/loading screen",
+        )
+    )
+    second_decision = monitor.assess_step(
+        StepMonitorInput(
+            task="在B站播放罗翔的刑法课视频",
+            step_index=2,
+            max_steps=15,
+            action=action,
+            current_observation=second,
+            next_observation=third,
+            tool_result="wait 3000 ms",
+            action_summary="wait for app loading launch screen again",
+            state_summary="Bilibili is still on splash/loading screen",
+        )
+    )
+
+    assert "wait_no_change" in first_decision.signal_keys
+    assert second_decision.decision == AutonomyDecisionKind.HALT
+    assert "repeated_wait" in second_decision.signal_keys
+
+
 def test_monitor_failed_observation_is_red_halt(tmp_path: Path) -> None:
     monitor = AutonomyMonitor()
     current = _observation(tmp_path / "current.png")
