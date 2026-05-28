@@ -278,7 +278,13 @@ class MainPlanner:
         if isinstance(subtasks, list):
             for index, item in enumerate(subtasks, start=1):
                 if isinstance(item, dict):
-                    parsed.append(self._parse_subtask(item, index=index))
+                    parsed.append(
+                        self._parse_subtask(
+                            item,
+                            index=index,
+                            fallback_task=original_task,
+                        )
+                    )
         if parsed:
             return tuple(parsed)
         return (
@@ -305,13 +311,21 @@ class MainPlanner:
         payload: dict[str, Any],
         *,
         index: int,
+        fallback_task: str,
     ) -> PlannerSubtask:
         risk_level = str(payload.get("risk_level") or "low").strip().casefold()
         if risk_level not in _RISK_LEVELS:
             risk_level = "medium"
         task = self._optional_text(payload.get("task"))
         if not task:
-            raise ValueError(f"subtask {index} missing task")
+            task = self._optional_text(
+                payload.get("description")
+                or payload.get("target")
+                or payload.get("query")
+                or payload.get("app")
+            )
+        if not task:
+            task = fallback_task
         return PlannerSubtask(
             id=self._subtask_id(payload, index=index),
             route=self._route_from_subtask(payload),

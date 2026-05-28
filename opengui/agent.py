@@ -1242,6 +1242,11 @@ class GuiAgent:
         )
         if direct_result is not None:
             return direct_result
+        obs = await self._try_initial_app_launch(
+            task=task,
+            run_dir=run_dir,
+            current_observation=obs,
+        )
 
         history: list[HistoryTurn] = []
         self._autonomy_monitor.reset()
@@ -2075,6 +2080,67 @@ class GuiAgent:
             error=None if success else "direct_system_action_unverified",
         )
 
+    async def _try_initial_app_launch(
+        self,
+        *,
+        task: str,
+        run_dir: Path,
+        current_observation: Observation,
+    ) -> Observation:
+        action = self._initial_ios_app_launch_for_task(task)
+        if action is None:
+            return current_observation
+        if current_observation.foreground_app == action.text:
+            return current_observation
+
+        start = time.monotonic()
+        try:
+            tool_result = await self.backend.execute(action, timeout=self.step_timeout)
+        except Exception as exc:
+            await self._write_trace(
+                run_dir / "trace.jsonl",
+                {
+                    "event": "prelaunch_failed",
+                    "action": self._serialize_action(action),
+                    "error": str(exc),
+                    "timestamp": time.time(),
+                },
+            )
+            return current_observation
+
+        settle_seconds = self._post_action_settle_seconds(action)
+        if settle_seconds > 0:
+            await asyncio.sleep(settle_seconds)
+        next_observation = await self.backend.observe(
+            run_dir / "screenshots" / "prelaunch_001.png",
+            timeout=self.step_timeout,
+        )
+        action_summary = f"Prelaunched iOS app {action.text} for compound GUI task."
+        await self._write_trace(
+            run_dir / "trace.jsonl",
+            self._scrub_for_artifact({
+                "event": "prelaunch",
+                "action": self._serialize_action(action),
+                "action_summary": action_summary,
+                "tool_result": tool_result,
+                "current_observation": self._serialize_observation(current_observation),
+                "next_observation": self._serialize_observation(next_observation),
+                "screenshot_path": next_observation.screenshot_path,
+                "timestamp": time.time(),
+            }),
+        )
+        self._trajectory_recorder.record_step(
+            action=self._scrub_for_artifact(self._serialize_action(action)),
+            model_output=action_summary,
+            screenshot_path=next_observation.screenshot_path,
+            foreground_app=next_observation.foreground_app,
+            screen_width=next_observation.screen_width,
+            screen_height=next_observation.screen_height,
+            platform=next_observation.platform,
+            duration_s=time.monotonic() - start,
+        )
+        return next_observation
+
     def _direct_system_action_for_task(self, task: str) -> Action | None:
         if self.backend.platform != "ios":
             return None
@@ -2102,17 +2168,37 @@ class GuiAgent:
             return None
         return Action(action_type="open_app", text=bundle_id)
 
+    def _initial_ios_app_launch_for_task(self, task: str) -> Action | None:
+        if self.backend.platform != "ios":
+            return None
+        normalized_task = self._normalize_system_action_task(task)
+        if not normalized_task or not self._ios_task_has_follow_up_gui_work(normalized_task):
+            return None
+        target = self._extract_ios_app_target(normalized_task)
+        if target is None:
+            return None
+        bundle_id = resolve_ios_bundle(target, self._installed_apps)
+        if bundle_id == target and "." not in bundle_id:
+            return None
+        return Action(action_type="open_app", text=bundle_id)
+
     @staticmethod
     def _normalize_system_action_task(task: str) -> str:
         return " ".join((task or "").strip().lower().split())
 
     @staticmethod
     def _ios_task_has_follow_up_gui_work(normalized_task: str) -> bool:
+        is_app_lookup = (
+            any(term in normalized_task for term in ("查找", "寻找", "找到", "搜索", "find", "search"))
+            and any(term in normalized_task for term in ("app", "应用", "软件"))
+        )
+        if is_app_lookup:
+            return False
         cjk_follow_up_terms = (
             "然后", "之后", "接着", "再", "并", "并且", "同时",
             "点击", "点一下", "输入", "搜索框", "填写", "发送", "发消息",
             "购买", "付款", "登录", "选择", "切换", "查看", "进入", "改成",
-            "调到", "滑动",
+            "调到", "滑动", "播放", "找",
         )
         english_follow_up_terms = (
             "then", "and then", "tap", "click", "type", "send", "pay",
@@ -2125,10 +2211,6 @@ class GuiAgent:
             for term in english_follow_up_terms
         ):
             return True
-        is_app_lookup = (
-            any(term in normalized_task for term in ("查找", "寻找", "找到", "搜索", "find", "search"))
-            and any(term in normalized_task for term in ("app", "应用", "软件"))
-        )
         if "搜索" in normalized_task and not is_app_lookup:
             return True
         return False
@@ -2143,6 +2225,7 @@ class GuiAgent:
         patterns = (
             r"(?:打开|开启|启动|open|launch)\s*(.+)",
             r"(?:查找|寻找|找到|搜索|find|search)\s*(.+)",
+            r"(?:在|用)\s*([^，,。；;\s]+?)(?:\s*(?:app|应用|软件))?(?:里|上|中)?\s*(?:搜索|播放|查看|检查|进入|打开|找到|找)",
         )
         for pattern in patterns:
             match = re.search(pattern, task)

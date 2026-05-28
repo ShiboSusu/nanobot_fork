@@ -224,15 +224,17 @@ def test_parse_full_plan_rejects_nested_plan_subtask_route() -> None:
         )
 
 
-def test_parse_full_plan_rejects_missing_subtask_task() -> None:
+def test_parse_full_plan_fills_missing_subtask_task_from_original_task() -> None:
     planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
 
-    with pytest.raises(ValueError, match="subtask 1 missing task"):
-        planner.parse_plan(
-            '{"route":"plan","confidence":0.9,"reason":"bad",'
-            '"subtasks":[{"route":"gui_task"}]}',
-            original_task="bad",
-        )
+    plan = planner.parse_plan(
+        '{"route":"plan","confidence":0.9,"reason":"bad",'
+        '"subtasks":[{"route":"gui_task"}]}',
+        original_task="在B站播放罗翔的刑法课视频",
+    )
+
+    assert len(plan.subtasks) == 1
+    assert plan.subtasks[0].task == "在B站播放罗翔的刑法课视频"
 
 
 def test_parse_full_plan_normalizes_invalid_risk_level_to_medium() -> None:

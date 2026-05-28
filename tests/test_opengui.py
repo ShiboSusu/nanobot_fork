@@ -181,6 +181,38 @@ def test_ios_compound_app_task_skips_direct_bundle_launch(tmp_path: Path) -> Non
     assert agent._direct_system_action_for_task("打开 Safari 搜索天气") is None
 
 
+@pytest.mark.asyncio
+async def test_ios_compound_app_task_prelaunches_resolved_app(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Bilibili is ready for the next GUI step.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-compound-prelaunch"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        installed_apps=["哔哩哔哩: tv.danmaku.bilianime"],
+    )
+
+    await agent.run("在B站播放罗翔的刑法课视频", max_retries=1)
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="tv.danmaku.bilianime")
+    ]
+
+
 def test_ios_app_lookup_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
     backend = _RecordingIosBackend()
     agent = GuiAgent(

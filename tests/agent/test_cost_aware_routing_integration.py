@@ -181,11 +181,11 @@ async def test_query_route_hint_is_injected_for_cli_and_telegram(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_35b_planner_gui_route_executes_gui_task_directly(tmp_path: Path) -> None:
+async def test_simple_gui_route_skips_35b_planner(tmp_path: Path) -> None:
     loop = _make_loop_with_planner(
         tmp_path,
-        '{"route":"gui_task","confidence":0.92,"reason":"App internal task",'
-        '"subtasks":[{"route":"gui_task","task":"在抖音里搜索旅行Vlog"}]}',
+        '{"route":"plan","confidence":0.92,"reason":"Should not be needed",'
+        '"subtasks":[{"route":"gui_task","task":"unwanted planner task"}]}',
     )
     gui_tool = _FakeGuiTaskTool()
     loop.tools.register(gui_tool)
@@ -203,17 +203,17 @@ async def test_35b_planner_gui_route_executes_gui_task_directly(tmp_path: Path) 
     assert "system action completed" in response.content
     assert gui_tool.calls == [{"task": "在抖音里搜索旅行Vlog"}]
     loop.provider.chat_with_retry.assert_not_awaited()
-    loop._main_planner.provider.chat_with_retry.assert_awaited_once()
+    loop._main_planner.provider.chat_with_retry.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_35b_planner_subtask_queue_executes_system_then_gui(tmp_path: Path) -> None:
     loop = _make_loop_with_planner(
         tmp_path,
-        '{"route":"plan","confidence":0.92,"reason":"App playback",'
+        '{"route":"plan","confidence":0.92,"reason":"Cross-app GUI task",'
         '"subtasks":['
         '{"id":"open_bilibili","route":"system_action","task":"Open Bilibili","system_action":"open_app"},'
-        '{"id":"search_video","route":"gui_task","task":"Search Bilibili for 罗翔 刑法课"}'
+        '{"id":"send_wechat","route":"gui_task","task":"把B站罗翔刑法课视频分享给微信好友苏"}'
         "]}",
     )
     assert loop._gui_config is not None
@@ -226,7 +226,7 @@ async def test_35b_planner_subtask_queue_executes_system_then_gui(tmp_path: Path
             channel="cli",
             sender_id="u1",
             chat_id="cli-chat",
-            content="在B站播放罗翔的刑法课视频",
+            content="在B站找到罗翔刑法课视频，然后发给微信好友苏",
         )
     )
 
@@ -234,7 +234,7 @@ async def test_35b_planner_subtask_queue_executes_system_then_gui(tmp_path: Path
     assert "2/2 subtasks completed" in response.content
     assert gui_tool.calls == [
         {"task": "Open Bilibili"},
-        {"task": "Search Bilibili for 罗翔 刑法课"},
+        {"task": "把B站罗翔刑法课视频分享给微信好友苏"},
     ]
 
 
@@ -255,7 +255,7 @@ async def test_planner_subtask_policy_block_stops_before_gui(tmp_path: Path) -> 
             channel="cli",
             sender_id="u1",
             chat_id="cli-chat",
-            content="继续执行刚才那个账户信息检查计划",
+            content="在微信和京东里检查账户信息",
         )
     )
 
@@ -269,7 +269,7 @@ async def test_planner_subtask_policy_block_stops_before_gui(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_planner_subtasks_enabled_tool_plan_uses_route_hint(tmp_path: Path) -> None:
+async def test_planner_subtasks_enabled_simple_tool_query_skips_planner(tmp_path: Path) -> None:
     loop = _make_loop_with_planner(
         tmp_path,
         '{"route":"plan","confidence":0.9,"reason":"Public lookup",'
@@ -297,7 +297,7 @@ async def test_planner_subtasks_enabled_tool_plan_uses_route_hint(tmp_path: Path
     assert "Cost-Aware Router" in user_message
     assert "Recommended route: tool_call" in user_message
     assert gui_tool.calls == []
-    loop._main_planner.provider.chat_with_retry.assert_awaited_once()
+    loop._main_planner.provider.chat_with_retry.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -322,7 +322,7 @@ async def test_planner_subtask_gui_failure_blocks_plan(tmp_path: Path) -> None:
             channel="cli",
             sender_id="u1",
             chat_id="cli-chat",
-            content="在B站播放罗翔的刑法课视频",
+            content="在B站找到罗翔刑法课视频，然后发给微信好友苏",
         )
     )
 
@@ -354,7 +354,7 @@ async def test_planner_subtask_gui_failure_with_summary_blocks_plan(tmp_path: Pa
             channel="cli",
             sender_id="u1",
             chat_id="cli-chat",
-            content="在B站播放罗翔的刑法课视频",
+            content="在B站找到罗翔刑法课视频，然后发给微信好友苏",
         )
     )
 
@@ -365,7 +365,7 @@ async def test_planner_subtask_gui_failure_with_summary_blocks_plan(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_35b_planner_tool_route_injects_route_hint(tmp_path: Path) -> None:
+async def test_simple_tool_query_skips_35b_planner_and_injects_route_hint(tmp_path: Path) -> None:
     loop = _make_loop_with_planner(
         tmp_path,
         '{"route":"tool_call","confidence":0.9,"reason":"Public lookup",'
@@ -387,11 +387,11 @@ async def test_35b_planner_tool_route_injects_route_hint(tmp_path: Path) -> None
     user_message = initial_messages[-1]["content"]
     assert "Cost-Aware Router" in user_message
     assert "Recommended route: tool_call" in user_message
-    loop._main_planner.provider.chat_with_retry.assert_awaited_once()
+    loop._main_planner.provider.chat_with_retry.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_malformed_35b_planner_output_falls_back_to_deterministic_system_route(
+async def test_simple_system_route_skips_malformed_35b_planner(
     tmp_path: Path,
 ) -> None:
     loop = _make_loop_with_planner(tmp_path, "not json")
@@ -410,11 +410,11 @@ async def test_malformed_35b_planner_output_falls_back_to_deterministic_system_r
     assert response is not None
     assert "system action completed" in response.content
     assert gui_tool.calls == [{"task": "打开设置"}]
-    loop._main_planner.provider.chat_with_retry.assert_awaited_once()
+    loop._main_planner.provider.chat_with_retry.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_low_confidence_35b_planner_output_falls_back_to_deterministic_tool_route(
+async def test_simple_tool_route_skips_low_confidence_35b_planner(
     tmp_path: Path,
 ) -> None:
     loop = _make_loop_with_planner(
@@ -437,4 +437,4 @@ async def test_low_confidence_35b_planner_output_falls_back_to_deterministic_too
     user_message = initial_messages[-1]["content"]
     assert "Cost-Aware Router" in user_message
     assert "Recommended route: tool_call" in user_message
-    loop._main_planner.provider.chat_with_retry.assert_awaited_once()
+    loop._main_planner.provider.chat_with_retry.assert_not_awaited()

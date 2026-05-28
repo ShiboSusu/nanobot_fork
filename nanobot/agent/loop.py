@@ -529,8 +529,57 @@ class AgentLoop:
             available_tools=set(self.tools.tool_names),
         )
 
-    async def _plan_problem_route(self, content: str) -> RouteDecision:
-        if self._main_planner is not None:
+    def _should_use_main_planner(
+        self,
+        content: str,
+        deterministic_decision: RouteDecision,
+    ) -> bool:
+        if self._main_planner is None:
+            return False
+        if deterministic_decision.route != RouteKind.GUI:
+            return False
+
+        normalized = " ".join((content or "").casefold().split())
+        if not normalized:
+            return False
+
+        app_terms = {
+            term
+            for term in self._problem_router._COMMON_APP_TERMS  # noqa: SLF001
+            if term != "天气" and term in normalized
+        }
+        if len(app_terms) >= 2:
+            return True
+
+        handoff_terms = (
+            "发给", "发送", "发消息", "分享", "转发", "告诉", "群发",
+            "send", "share", "forward",
+        )
+        query_terms = (
+            "查", "查询", "搜索", "天气", "新闻", "汇率", "价格", "最新",
+            "火车", "高铁", "动车", "列车", "车次", "航班", "机票",
+            "search", "look up", "weather", "news",
+        )
+        if (
+            any(term in normalized for term in handoff_terms)
+            and any(term in normalized for term in query_terms)
+        ):
+            return True
+
+        high_planning_terms = (
+            "预订", "预约", "订票", "买票", "下单", "打车", "路线规划",
+            "比较", "筛选", "排序后", "如果", "再决定", "book", "reserve",
+        )
+        return any(term in normalized for term in high_planning_terms)
+
+    async def _plan_problem_route(
+        self,
+        content: str,
+        *,
+        deterministic_decision: RouteDecision | None = None,
+    ) -> RouteDecision:
+        base_decision = deterministic_decision or self._classify_problem_route(content)
+        if self._should_use_main_planner(content, base_decision):
             try:
                 return await self._main_planner.plan(
                     content,
@@ -538,7 +587,7 @@ class AgentLoop:
                 )
             except Exception as exc:
                 logger.warning("35B planner failed; falling back to deterministic router: {}", exc)
-        return self._classify_problem_route(content)
+        return base_decision
 
     async def _execute_planner_plan(self, plan: PlannerPlan) -> str:
         executor = PlanExecutor(
@@ -1276,6 +1325,7 @@ class AgentLoop:
                 self._main_planner is not None
                 and self._gui_config is not None
                 and self._gui_config.planner_subtasks_enabled
+                and self._should_use_main_planner(msg.content, route_decision)
             ):
                 try:
                     plan = await self._main_planner.plan_full(
@@ -1300,7 +1350,10 @@ class AgentLoop:
             route_decision = (
                 planner_route_decision
                 if planner_route_decision is not None
-                else await self._plan_problem_route(msg.content)
+                else await self._plan_problem_route(
+                    msg.content,
+                    deterministic_decision=route_decision,
+                )
             )
             if route_decision.route == RouteKind.HUMAN_CONFIRM:
                 content = self._policy_confirmation_message(route_decision)
