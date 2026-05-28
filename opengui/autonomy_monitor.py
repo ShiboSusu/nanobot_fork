@@ -353,7 +353,7 @@ class AutonomyMonitor:
                 key="app_mismatch",
                 category="capability",
                 value=1.0,
-                weight=0.45,
+                weight=0.75,
                 reason="The foreground app does not match the expected app.",
             ))
 

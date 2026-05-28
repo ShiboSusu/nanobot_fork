@@ -213,6 +213,56 @@ async def test_ios_compound_app_task_prelaunches_resolved_app(tmp_path: Path) ->
     ]
 
 
+@pytest.mark.asyncio
+async def test_ios_prelaunch_sets_expected_app_hint_for_monitor(tmp_path: Path) -> None:
+    class RedirectingIosBackend(_RecordingIosBackend):
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            observation = await super().observe(screenshot_path, timeout=timeout)
+            if screenshot_path.name == "step_001.png":
+                return Observation(
+                    screenshot_path=observation.screenshot_path,
+                    screen_width=observation.screen_width,
+                    screen_height=observation.screen_height,
+                    foreground_app="com.apple.ScreenshotServicesService",
+                    platform=observation.platform,
+                )
+            return observation
+
+    backend = RedirectingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="wait",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "wait",
+                        "duration_ms": 3000,
+                        "intent": "wait for splash ad",
+                        "summary": "Bilibili splash ad is visible",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-prelaunch-expected-app"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        installed_apps=["哔哩哔哩: tv.danmaku.bilianime"],
+    )
+
+    result = await agent.run("在B站播放罗翔的刑法课视频", max_retries=1)
+
+    assert result.error == "autonomy_monitor_halt"
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    step_event = next(event for event in trace_events if event["event"] == "step")
+    assert "app_mismatch" in step_event["autonomy_monitor"]["signal_keys"]
+
+
 def test_ios_app_lookup_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
     backend = _RecordingIosBackend()
     agent = GuiAgent(

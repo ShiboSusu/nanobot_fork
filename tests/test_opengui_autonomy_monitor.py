@@ -139,6 +139,34 @@ def test_monitor_failed_observation_is_red_halt(tmp_path: Path) -> None:
     assert "observe_failed" in decision.signal_keys
 
 
+def test_monitor_expected_app_mismatch_is_red_halt(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor()
+    current = _observation(tmp_path / "current.png", app="tv.danmaku.bilianime")
+    next_observation = _observation(
+        tmp_path / "next.png",
+        app="com.apple.ScreenshotServicesService",
+        data=b"taobao-ad-redirect",
+    )
+
+    decision = monitor.assess_step(
+        StepMonitorInput(
+            task="在B站播放罗翔的刑法课视频",
+            step_index=1,
+            max_steps=15,
+            action=Action(action_type="wait", duration_ms=3000),
+            current_observation=current,
+            next_observation=next_observation,
+            tool_result="wait 3000 ms",
+            action_summary="wait for splash ad",
+            expected_app="tv.danmaku.bilianime",
+        )
+    )
+
+    assert decision.decision == AutonomyDecisionKind.HALT
+    assert decision.tier == "red"
+    assert "app_mismatch" in decision.signal_keys
+
+
 def test_monitor_flags_safety_keywords_before_action(tmp_path: Path) -> None:
     monitor = AutonomyMonitor()
     current = _observation(

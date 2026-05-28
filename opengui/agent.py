@@ -1235,6 +1235,7 @@ class GuiAgent:
             run_dir / "screenshots" / "step_000.png",
             timeout=self.step_timeout,
         )
+        effective_app_hint = app_hint
         direct_result = await self._try_direct_system_action(
             task=task,
             run_dir=run_dir,
@@ -1242,10 +1243,14 @@ class GuiAgent:
         )
         if direct_result is not None:
             return direct_result
+        launch_action = self._initial_ios_app_launch_for_task(task)
+        if effective_app_hint is None and launch_action is not None:
+            effective_app_hint = launch_action.text
         obs = await self._try_initial_app_launch(
             task=task,
             run_dir=run_dir,
             current_observation=obs,
+            action=launch_action,
         )
 
         history: list[HistoryTurn] = []
@@ -1268,7 +1273,7 @@ class GuiAgent:
                 task=task,
                 current_observation=obs,
                 history=history,
-                app_hint=app_hint,
+                app_hint=effective_app_hint,
                 memory_context=memory_context,
                 skill_context=skill_context,
                 s2_guidance=s2_guidance,
@@ -1466,7 +1471,7 @@ class GuiAgent:
                     tool_result=result.tool_result,
                     action_summary=result.action_summary,
                     state_summary=result.state_summary,
-                    expected_app=app_hint,
+                    expected_app=effective_app_hint,
                 )
             )
             monitor_payload = monitor_decision.to_trace()
@@ -2086,8 +2091,9 @@ class GuiAgent:
         task: str,
         run_dir: Path,
         current_observation: Observation,
+        action: Action | None = None,
     ) -> Observation:
-        action = self._initial_ios_app_launch_for_task(task)
+        action = action or self._initial_ios_app_launch_for_task(task)
         if action is None:
             return current_observation
         if current_observation.foreground_app == action.text:
