@@ -119,6 +119,17 @@ class PolicyStore:
             reason="Account security changes require user confirmation.",
         ),
         PolicyRule(
+            category="account_profile_update",
+            action=PolicyAction.ASK_HUMAN_CONFIRM,
+            terms=(
+                "修改昵称", "改昵称", "更改昵称", "修改简介", "改简介",
+                "更改简介", "编辑个人资料", "更新个人资料",
+                "change nickname", "edit bio", "update bio",
+                "edit profile", "profile update", "update profile",
+            ),
+            reason="Account profile changes require user confirmation.",
+        ),
+        PolicyRule(
             category="financial_or_account_read",
             action=PolicyAction.ASK_HUMAN_CONFIRM,
             terms=(

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from opengui.action import ActionError, parse_action
-from opengui.agent import GuiAgent, _COMPUTER_USE_TOOL
+from opengui.agent import _COMPUTER_USE_TOOL, GuiAgent
 from opengui.backends.dry_run import DryRunBackend
 from opengui.interfaces import LLMResponse, ToolCall
 from opengui.observation import Observation
@@ -327,6 +327,146 @@ async def test_policy_gate_requests_intervention_before_sensitive_action(tmp_pat
     handler.request_intervention.assert_awaited_once()
     request = handler.request_intervention.await_args.args[0]
     assert request.reason.startswith("Policy gate requires human confirmation")
+
+
+@pytest.mark.asyncio
+async def test_policy_allows_benign_search_input_text_with_delete_summary(tmp_path: Path) -> None:
+    search_summary = (
+        "当前屏幕显示搜索框中已输入“runningmen2013”，但任务目标是搜索“罗翔的刑法课”。"
+        "因此，需要删除当前错误关键词，并输入正确的搜索词。键盘已弹出，可直接进行文本输入操作。"
+    )
+    llm = _RecordingLLM([
+        LLMResponse(
+            content=f"Action: {search_summary}",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "input_text",
+                    "text": "罗翔的刑法课",
+                    "intent": search_summary,
+                    "summary": "搜索框已聚焦，准备输入查询词。",
+                },
+            )],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
+    ])
+    backend = _BackendDouble([
+        {"foreground_app": "哔哩哔哩"},
+        {"foreground_app": "哔哩哔哩搜索结果"},
+    ])
+    handler = SimpleNamespace(request_intervention=AsyncMock())
+
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "bilibili search"),
+        intervention_handler=handler,
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        include_date_context=False,
+    )
+
+    result = await agent.run("在B站播放罗翔的刑法课视频。", max_retries=1)
+
+    assert result.success
+    backend.execute.assert_awaited_once()
+    handler.request_intervention.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_policy_still_blocks_message_input_text(tmp_path: Path) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="Action: input comment",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "input_text",
+                    "text": "这个视频很不错",
+                    "intent": "在评论框输入评论内容，下一步将发送评论。",
+                    "summary": "评论输入框已聚焦。",
+                },
+            )],
+        ),
+    ])
+    backend = _BackendDouble([
+        {"foreground_app": "Video App"},
+    ])
+    handler = SimpleNamespace(
+        request_intervention=AsyncMock(return_value=SimpleNamespace(
+            resume_confirmed=False,
+            note="comment requires approval",
+        ))
+    )
+
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "comment gate"),
+        intervention_handler=handler,
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        include_date_context=False,
+    )
+
+    result = await agent.run("给视频发一条评论", max_retries=1)
+
+    assert result.success is False
+    backend.execute.assert_not_awaited()
+    handler.request_intervention.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_policy_still_blocks_profile_update_input_text(tmp_path: Path) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="Action: input new nickname",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "input_text",
+                    "text": "新的昵称",
+                    "intent": "在个人资料页输入新的昵称，准备修改昵称。",
+                    "summary": "昵称输入框已聚焦。",
+                },
+            )],
+        ),
+    ])
+    backend = _BackendDouble([
+        {"foreground_app": "Profile"},
+    ])
+    handler = SimpleNamespace(
+        request_intervention=AsyncMock(return_value=SimpleNamespace(
+            resume_confirmed=False,
+            note="profile update requires approval",
+        ))
+    )
+
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "profile gate"),
+        intervention_handler=handler,
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        include_date_context=False,
+    )
+
+    result = await agent.run("把我的昵称改成新的昵称", max_retries=1)
+
+    assert result.success is False
+    backend.execute.assert_not_awaited()
+    handler.request_intervention.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,7 @@ from opengui.agent_profiles import (
 from opengui.autonomy_monitor import (
     AutonomyDecisionKind,
     AutonomyMonitor,
+    MonitorDecision,
     PreActionMonitorInput,
     StepMonitorInput,
 )
@@ -1474,6 +1475,25 @@ class GuiAgent:
                     expected_app=effective_app_hint,
                 )
             )
+            if (
+                monitor_decision.decision in {
+                    AutonomyDecisionKind.HALT,
+                    AutonomyDecisionKind.HUMAN_CONFIRM,
+                }
+                and self._is_benign_search_input_text_autonomy_exception(
+                    action=result.action,
+                    task=task,
+                    action_summary=result.action_summary,
+                    state_summary=result.state_summary,
+                )
+            ):
+                monitor_decision = MonitorDecision(
+                    decision=AutonomyDecisionKind.S1_EXECUTE,
+                    tier="green",
+                    risk=0.0,
+                    cumulative_risk=self._autonomy_monitor.cumulative_risk,
+                    reason="Benign search input text with destructive keyword in query-edit summary.",
+                )
             monitor_payload = monitor_decision.to_trace()
             self._trajectory_recorder.record_event(
                 "autonomy_monitor",
@@ -2547,7 +2567,15 @@ class GuiAgent:
                     state_summary=state_summary,
                 )
             )
-            if pre_action_decision.decision == AutonomyDecisionKind.HUMAN_CONFIRM:
+            if (
+                pre_action_decision.decision == AutonomyDecisionKind.HUMAN_CONFIRM
+                and not self._is_benign_search_input_text_autonomy_exception(
+                    action=action,
+                    task=task,
+                    action_summary=action_summary,
+                    state_summary=state_summary,
+                )
+            ):
                 pre_action_payload = pre_action_decision.to_trace()
                 intervention_action = Action(
                     action_type="request_intervention",
@@ -2726,6 +2754,8 @@ class GuiAgent:
         )
         if decision.action == PolicyAction.ALLOW:
             return None
+        if self._is_benign_search_input_text(decision, action, task, action_summary, state_summary):
+            return None
         if self._is_generic_login_navigation(decision, action, action_summary, state_summary):
             return None
 
@@ -2735,6 +2765,84 @@ class GuiAgent:
             f"({categories}). {decision.reason}"
         ).strip()
         return Action(action_type="request_intervention", text=reason), reason
+
+    @staticmethod
+    def _is_benign_search_input_text(
+        decision: Any,
+        action: Action,
+        task: str,
+        action_summary: str | None,
+        state_summary: str | None,
+    ) -> bool:
+        if action.action_type != "input_text":
+            return False
+        if set(decision.categories) != {"delete_or_irreversible"}:
+            return False
+        return GuiAgent._is_benign_search_input_text_context(
+            action=action,
+            task=task,
+            action_summary=action_summary,
+            state_summary=state_summary,
+        )
+
+    def _is_benign_search_input_text_autonomy_exception(
+        self,
+        *,
+        action: Action,
+        task: str,
+        action_summary: str | None,
+        state_summary: str | None,
+    ) -> bool:
+        if not self._is_benign_search_input_text_context(
+            action=action,
+            task=task,
+            action_summary=action_summary,
+            state_summary=state_summary,
+        ):
+            return False
+        text = " ".join(
+            part
+            for part in (
+                task,
+                action.text or "",
+                action_summary or "",
+                state_summary or "",
+            )
+            if part
+        ).casefold()
+        matched_keywords = {
+            keyword.casefold()
+            for keyword in self._autonomy_monitor.safety_keywords
+            if keyword.casefold() in text
+        }
+        destructive_keywords = {"删除", "清空", "delete"}
+        return bool(matched_keywords) and matched_keywords <= destructive_keywords
+
+    @staticmethod
+    def _is_benign_search_input_text_context(
+        *,
+        action: Action,
+        task: str,
+        action_summary: str | None,
+        state_summary: str | None,
+    ) -> bool:
+        if action.action_type != "input_text":
+            return False
+        text = " ".join(
+            part
+            for part in (
+                task,
+                action.text or "",
+                action_summary or "",
+                state_summary or "",
+            )
+            if part
+        ).casefold()
+        search_terms = (
+            "搜索", "搜索框", "搜索词", "查询", "查找", "关键词",
+            "search", "query", "find",
+        )
+        return any(term in text for term in search_terms)
 
     @staticmethod
     def _is_generic_login_navigation(
