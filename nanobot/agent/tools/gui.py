@@ -247,6 +247,7 @@ class GuiSubagentTool(Tool):
         policy_context, memory_store = self._load_policy_context_and_memory_store(
             platform=active_backend.platform,
         )
+        memory_retriever = await self._build_memory_retriever()
         skill_library = None
         if self._gui_config.enable_skill_execution:
             self._refresh_cached_skill_stores()
@@ -331,6 +332,7 @@ class GuiSubagentTool(Tool):
             artifacts_root=run_dir,
             max_steps=self._gui_config.max_steps,
             policy_context=policy_context,
+            memory_retriever=memory_retriever,
             skill_library=skill_library,
             skill_threshold=self._gui_config.skill_threshold,
             skill_executor=skill_executor,
@@ -531,10 +533,10 @@ class GuiSubagentTool(Tool):
         return self._build_backend(backend)
 
     async def _build_memory_retriever(self) -> Any | None:
-        """Build a memory retriever indexed with POLICY entries only.
+        """Build a memory retriever indexed with non-policy GUI memory entries.
 
-        Guide entries (os_guide, app_guide, icon_guide) are not surfaced here;
-        nanobot no longer has a planner layer that consumes them.
+        Policy entries are injected in full through ``policy_context``.  OS, app,
+        and icon guides stay selective so they do not crowd out the GUI prompt.
         """
         if self._embedding_adapter is None:
             return None
@@ -545,11 +547,15 @@ class GuiSubagentTool(Tool):
 
         try:
             memory_store = MemoryStore(DEFAULT_OPENGUI_MEMORY_DIR)
-            policy_entries = memory_store.list_all(memory_type=MemoryType.POLICY)
-            if not policy_entries:
+            entries = [
+                entry
+                for entry in memory_store.list_all()
+                if entry.memory_type != MemoryType.POLICY
+            ]
+            if not entries:
                 return None
             memory_retriever = MemoryRetriever(embedding_provider=self._embedding_adapter, top_k=5)
-            await memory_retriever.index(policy_entries)
+            await memory_retriever.index(entries)
             return memory_retriever
         except Exception:
             logger.warning(
@@ -578,11 +584,11 @@ class GuiSubagentTool(Tool):
         *,
         platform: str | None = None,
     ) -> tuple[str | None, Any | None]:
-        """Load always-on GUI memory for direct injection into the GUI agent prompt.
+        """Load always-on GUI policy memory for direct injection into the prompt.
 
         Policies must always be present regardless of task relevance, so they are loaded
-        in full without embedding-based search filtering. OS guide entries are loaded
-        only for the active platform to avoid cross-platform navigation contamination.
+        in full without embedding-based search filtering.  Other memory types are
+        retrieved selectively by ``_build_memory_retriever``.
         """
         from opengui.memory.store import MemoryStore
         from opengui.memory.types import MemoryType
@@ -594,12 +600,7 @@ class GuiSubagentTool(Tool):
             policy_entries = memory_store.list_all(memory_type=MemoryType.POLICY)
             lines.extend(f"- [policy] {entry.content}" for entry in policy_entries)
 
-            if platform:
-                os_entries = memory_store.list_all(
-                    memory_type=MemoryType.OS_GUIDE,
-                    platform=platform,
-                )
-                lines.extend(f"- [os] {entry.content}" for entry in os_entries)
+            del platform
 
             return ("\n".join(lines) if lines else None), memory_store
         except Exception:

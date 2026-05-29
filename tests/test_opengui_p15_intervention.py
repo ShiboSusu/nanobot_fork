@@ -282,7 +282,7 @@ async def test_resume_uses_fresh_observation_after_intervention(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_policy_gate_requests_intervention_before_sensitive_action(tmp_path: Path) -> None:
+async def test_gui_action_layer_does_not_hard_gate_sensitive_keywords(tmp_path: Path) -> None:
     llm = _RecordingLLM([
         LLMResponse(
             content="Action: tap payment confirmation",
@@ -298,14 +298,23 @@ async def test_policy_gate_requests_intervention_before_sensitive_action(tmp_pat
                 },
             )],
         ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
     ])
     backend = _BackendDouble([
+        {"foreground_app": "Payment"},
         {"foreground_app": "Payment"},
     ])
     handler = SimpleNamespace(
         request_intervention=AsyncMock(return_value=SimpleNamespace(
             resume_confirmed=False,
-            note="human approval required",
+            note="hard gate should not run",
         ))
     )
 
@@ -315,18 +324,15 @@ async def test_policy_gate_requests_intervention_before_sensitive_action(tmp_pat
         trajectory_recorder=_make_recorder(tmp_path, "payment gate"),
         intervention_handler=handler,
         artifacts_root=tmp_path / "runs",
-        max_steps=1,
+        max_steps=2,
         include_date_context=False,
     )
 
     result = await agent.run("检查订单状态", max_retries=1)
 
-    assert result.success is False
-    assert result.error == "intervention_cancelled: human approval required"
-    backend.execute.assert_not_awaited()
-    handler.request_intervention.assert_awaited_once()
-    request = handler.request_intervention.await_args.args[0]
-    assert request.reason.startswith("Policy gate requires human confirmation")
+    assert result.success
+    backend.execute.assert_awaited_once()
+    handler.request_intervention.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -382,7 +388,115 @@ async def test_policy_allows_benign_search_input_text_with_delete_summary(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_policy_still_blocks_message_input_text(tmp_path: Path) -> None:
+async def test_policy_allows_navigation_away_from_comment_area(tmp_path: Path) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="Action: leave comment area",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 75,
+                    "y": 376,
+                    "intent": "点击左上角的返回按钮，离开评论区。",
+                    "summary": "当前屏幕显示的是B站的一个视频评论区，需要返回视频页继续任务。",
+                },
+            )],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
+    ])
+    backend = _BackendDouble([
+        {"foreground_app": "哔哩哔哩"},
+        {"foreground_app": "哔哩哔哩"},
+    ])
+    handler = SimpleNamespace(
+        request_intervention=AsyncMock(return_value=SimpleNamespace(
+            resume_confirmed=False,
+            note="navigation away should not request approval",
+        ))
+    )
+
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "leave comment area"),
+        intervention_handler=handler,
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        include_date_context=False,
+    )
+
+    result = await agent.run("在B站播放罗翔的刑法课视频。", max_retries=1)
+
+    assert result.success
+    backend.execute.assert_awaited_once()
+    handler.request_intervention.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gui_action_layer_does_not_hard_gate_send_comment_tap(tmp_path: Path) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="Action: send comment",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 1180,
+                    "y": 640,
+                    "intent": "点击发送评论按钮，发表当前评论。",
+                    "summary": "评论输入框旁边的发送按钮可见。",
+                },
+            )],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
+    ])
+    backend = _BackendDouble([
+        {"foreground_app": "Video App"},
+        {"foreground_app": "Video App"},
+    ])
+    handler = SimpleNamespace(
+        request_intervention=AsyncMock(return_value=SimpleNamespace(
+            resume_confirmed=False,
+            note="hard gate should not run",
+        ))
+    )
+
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "send comment gate"),
+        intervention_handler=handler,
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        include_date_context=False,
+    )
+
+    result = await agent.run("给视频发一条评论", max_retries=1)
+
+    assert result.success
+    backend.execute.assert_awaited_once()
+    handler.request_intervention.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gui_action_layer_does_not_hard_gate_message_input_text(tmp_path: Path) -> None:
     llm = _RecordingLLM([
         LLMResponse(
             content="Action: input comment",
@@ -397,14 +511,23 @@ async def test_policy_still_blocks_message_input_text(tmp_path: Path) -> None:
                 },
             )],
         ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
     ])
     backend = _BackendDouble([
+        {"foreground_app": "Video App"},
         {"foreground_app": "Video App"},
     ])
     handler = SimpleNamespace(
         request_intervention=AsyncMock(return_value=SimpleNamespace(
             resume_confirmed=False,
-            note="comment requires approval",
+            note="hard gate should not run",
         ))
     )
 
@@ -414,19 +537,19 @@ async def test_policy_still_blocks_message_input_text(tmp_path: Path) -> None:
         trajectory_recorder=_make_recorder(tmp_path, "comment gate"),
         intervention_handler=handler,
         artifacts_root=tmp_path / "runs",
-        max_steps=1,
+        max_steps=2,
         include_date_context=False,
     )
 
     result = await agent.run("给视频发一条评论", max_retries=1)
 
-    assert result.success is False
-    backend.execute.assert_not_awaited()
-    handler.request_intervention.assert_awaited_once()
+    assert result.success
+    backend.execute.assert_awaited_once()
+    handler.request_intervention.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_policy_still_blocks_profile_update_input_text(tmp_path: Path) -> None:
+async def test_gui_action_layer_does_not_hard_gate_profile_update_input_text(tmp_path: Path) -> None:
     llm = _RecordingLLM([
         LLMResponse(
             content="Action: input new nickname",
@@ -441,14 +564,23 @@ async def test_policy_still_blocks_profile_update_input_text(tmp_path: Path) -> 
                 },
             )],
         ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
     ])
     backend = _BackendDouble([
+        {"foreground_app": "Profile"},
         {"foreground_app": "Profile"},
     ])
     handler = SimpleNamespace(
         request_intervention=AsyncMock(return_value=SimpleNamespace(
             resume_confirmed=False,
-            note="profile update requires approval",
+            note="hard gate should not run",
         ))
     )
 
@@ -458,15 +590,15 @@ async def test_policy_still_blocks_profile_update_input_text(tmp_path: Path) -> 
         trajectory_recorder=_make_recorder(tmp_path, "profile gate"),
         intervention_handler=handler,
         artifacts_root=tmp_path / "runs",
-        max_steps=1,
+        max_steps=2,
         include_date_context=False,
     )
 
     result = await agent.run("把我的昵称改成新的昵称", max_retries=1)
 
-    assert result.success is False
-    backend.execute.assert_not_awaited()
-    handler.request_intervention.assert_awaited_once()
+    assert result.success
+    backend.execute.assert_awaited_once()
+    handler.request_intervention.assert_not_awaited()
 
 
 @pytest.mark.asyncio

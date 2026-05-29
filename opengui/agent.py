@@ -49,7 +49,7 @@ from opengui.interfaces import (
     ToolCall,
 )
 from opengui.observation import Observation
-from opengui.policy import PolicyAction, PolicyStore
+from opengui.policy import PolicyStore
 from opengui.prompts.system import build_system_prompt
 from opengui.skills.normalization import normalize_app_identifier, resolve_ios_bundle
 from opengui.trajectory.recorder import ExecutionPhase, TrajectoryRecorder
@@ -2742,29 +2742,12 @@ class GuiAgent:
         action_summary: str | None,
         state_summary: str | None,
     ) -> tuple[Action, str] | None:
-        if action.action_type in {"done", "wait", "request_intervention"}:
-            return None
-
-        decision = self._policy_store.match_action(
-            task=task,
-            action=action,
-            observation=current_observation,
-            action_summary=action_summary,
-            state_summary=state_summary,
-        )
-        if decision.action == PolicyAction.ALLOW:
-            return None
-        if self._is_benign_search_input_text(decision, action, task, action_summary, state_summary):
-            return None
-        if self._is_generic_login_navigation(decision, action, action_summary, state_summary):
-            return None
-
-        categories = ", ".join(decision.categories) or "sensitive_action"
-        reason = (
-            "Policy gate requires human confirmation before action "
-            f"({categories}). {decision.reason}"
-        ).strip()
-        return Action(action_type="request_intervention", text=reason), reason
+        # GUI action policy is prompt/memory-driven.  Main-agent task routing
+        # still uses PolicyStore, but this step-level hook intentionally does
+        # not keyword-block actions such as search edits or navigation away
+        # from sensitive pages.
+        del task, action, current_observation, action_summary, state_summary
+        return None
 
     @staticmethod
     def _is_benign_search_input_text(
@@ -3942,16 +3925,23 @@ class GuiAgent:
         """Return memory context for the current task.
 
         When ``_policy_context`` is set (nanobot path), policy entries are injected
-        directly without embedding search — guaranteeing full policy coverage.  The
-        legacy ``_memory_retriever`` path (opengui CLI) is preserved for backward
+        directly — guaranteeing full policy coverage.  Other memory entries may still
+        be retrieved by embedding search and appended below the always-on policies.
+        The legacy ``_memory_retriever`` path (opengui CLI) is preserved for backward
         compatibility when ``_policy_context`` is not provided.
         """
         if self._policy_context is not None:
             self._log_policy_injection(self._policy_context)
+            relevant_context = await self._retrieve_relevant_memory(task, include_policy=False)
+            if relevant_context:
+                return f"{self._policy_context}\n{relevant_context}"
             return self._policy_context
 
         # Existing retriever-based path — used by the opengui CLI and any callers that
         # construct GuiAgent directly with a memory_retriever.
+        return await self._retrieve_relevant_memory(task, include_policy=True)
+
+    async def _retrieve_relevant_memory(self, task: str, *, include_policy: bool) -> str | None:
         if self._memory_retriever is None:
             return None
         from opengui.memory.types import MemoryType
@@ -3959,22 +3949,23 @@ class GuiAgent:
         # Fetch relevant entries by query
         results = await self._memory_retriever.search(task, top_k=self._memory_top_k + 10)
 
-        # Separate POLICY entries from search results
-        policies = [(e, s) for e, s in results if e.memory_type == MemoryType.POLICY]
+        policies: list[tuple[Any, float]] = []
+        if include_policy:
+            policies = [(e, s) for e, s in results if e.memory_type == MemoryType.POLICY]
         others = [(e, s) for e, s in results if e.memory_type != MemoryType.POLICY][
             : self._memory_top_k
         ]
 
-        # Also fetch all POLICY entries separately (they must always be included)
-        policy_results = await self._memory_retriever.search(
-            task, memory_type=MemoryType.POLICY, top_k=50,
-        )
-        # Merge: add any POLICY entries not already in the list
-        seen_ids = {e.entry_id for e, _ in policies}
-        for entry, score in policy_results:
-            if entry.entry_id not in seen_ids:
-                policies.append((entry, score))
-                seen_ids.add(entry.entry_id)
+        if include_policy:
+            # Also fetch all POLICY entries separately (they must always be included).
+            policy_results = await self._memory_retriever.search(
+                task, memory_type=MemoryType.POLICY, top_k=50,
+            )
+            seen_ids = {e.entry_id for e, _ in policies}
+            for entry, score in policy_results:
+                if entry.entry_id not in seen_ids:
+                    policies.append((entry, score))
+                    seen_ids.add(entry.entry_id)
 
         memory_entries = policies + others
         if not memory_entries:

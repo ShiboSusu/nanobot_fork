@@ -128,7 +128,7 @@ class AutonomyMonitor:
 
     The monitor intentionally uses only cheap signals available in the existing
     loop: backend failures, screenshots, action repetition, budget pressure,
-    and safety words. More expensive Amber/Red verifiers can hang off this
+    and app drift. More expensive Amber/Red verifiers can hang off this
     decision object later without changing the agent loop contract.
     """
 
@@ -174,17 +174,6 @@ class AutonomyMonitor:
     def assess_pre_action(self, step: PreActionMonitorInput) -> MonitorDecision:
         signals = tuple(self._signals_for_pre_action(step))
         risk = min(1.0, sum(signal.contribution for signal in signals))
-        safety = any(signal.key == "safety_keyword_flag" for signal in signals)
-
-        if safety:
-            return MonitorDecision(
-                decision=AutonomyDecisionKind.HUMAN_CONFIRM,
-                tier="red",
-                risk=risk,
-                cumulative_risk=self.cumulative_risk,
-                signals=signals,
-                reason="Safety keyword detected before action; require human confirmation before continuing.",
-            )
 
         return MonitorDecision(
             decision=AutonomyDecisionKind.S1_EXECUTE,
@@ -200,19 +189,14 @@ class AutonomyMonitor:
         risk = min(1.0, sum(signal.contribution for signal in signals))
         self.cumulative_risk = 1.0 - (1.0 - self.cumulative_risk) * (1.0 - risk)
 
-        safety = any(signal.key == "safety_keyword_flag" for signal in signals)
         cumulative_over_budget = (
             self.cumulative_risk >= self.horizon_threshold
             and step.action.action_type != "done"
         )
-        red = safety or risk >= self.red_threshold or cumulative_over_budget
+        red = risk >= self.red_threshold or cumulative_over_budget
         amber = risk >= self.mid_threshold
 
-        if safety:
-            decision = AutonomyDecisionKind.HUMAN_CONFIRM
-            tier = "red"
-            reason = "Safety keyword detected; require human confirmation before continuing."
-        elif red:
+        if red:
             decision = AutonomyDecisionKind.HALT
             tier = "red"
             if cumulative_over_budget:
@@ -239,21 +223,8 @@ class AutonomyMonitor:
         )
 
     def _signals_for_pre_action(self, step: PreActionMonitorInput) -> list[RiskSignal]:
+        del step
         signals: list[RiskSignal] = []
-        if self._has_safety_keyword(
-            action=step.action,
-            task=step.task,
-            action_summary=step.action_summary,
-            state_summary=step.state_summary,
-            current_observation=step.current_observation,
-        ):
-            signals.append(RiskSignal(
-                key="safety_keyword_flag",
-                category="safety",
-                value=1.0,
-                weight=0.90,
-                reason="Task, action, or visible state contains sensitive-action keywords.",
-            ))
         return signals
 
     def _signals_for_step(self, step: StepMonitorInput) -> list[RiskSignal]:
@@ -378,23 +349,6 @@ class AutonomyMonitor:
                     if requires_gui_progress
                     else "The model declared success before any verified GUI progress was recorded; treat as a review signal rather than a hard stop."
                 ),
-            ))
-
-        if self._has_safety_keyword(
-            action=step.action,
-            task=step.task,
-            action_summary=step.action_summary,
-            state_summary=step.state_summary,
-            tool_result=step.tool_result,
-            current_observation=step.current_observation,
-            next_observation=step.next_observation,
-        ):
-            signals.append(RiskSignal(
-                key="safety_keyword_flag",
-                category="safety",
-                value=1.0,
-                weight=0.90,
-                reason="Task, action, or visible state contains sensitive-action keywords.",
             ))
 
         return signals

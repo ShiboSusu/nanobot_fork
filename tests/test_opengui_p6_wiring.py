@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # 1. GuiConfig camelCase alias for embedding_model
 # ---------------------------------------------------------------------------
@@ -312,13 +311,19 @@ async def test_gui_tool_builds_memory_retriever_from_default_opengui_dir(
     from nanobot.agent.tools import gui as gui_module
     from nanobot.agent.tools.gui import GuiSubagentTool
     from nanobot.config.schema import Config
+    from opengui.memory.types import MemoryType
 
     provider = _FakeProvider()
     config = Config(gui={"backend": "dry-run", "embeddingModel": "embed-model"})
     assert config.gui is not None
 
     memory_dir = tmp_path / "opengui-memory"
-    indexed_entries = [SimpleNamespace(entry_id="oppo-notification-memory")]
+    indexed_entries = [
+        SimpleNamespace(entry_id="oppo-notification-memory", memory_type=MemoryType.OS_GUIDE),
+    ]
+    policy_entries = [
+        SimpleNamespace(entry_id="policy-memory", memory_type=MemoryType.POLICY),
+    ]
     retriever_instance = SimpleNamespace(index=AsyncMock())
     retriever_cls = MagicMock(return_value=retriever_instance)
     seen_store_dirs: list[Path] = []
@@ -328,8 +333,9 @@ async def test_gui_tool_builds_memory_retriever_from_default_opengui_dir(
             seen_store_dirs.append(Path(store_dir))
 
         def list_all(self, *, memory_type: Any | None = None) -> list[Any]:
-            del memory_type
-            return indexed_entries
+            if memory_type == MemoryType.POLICY:
+                return policy_entries
+            return indexed_entries + policy_entries
 
     with (
         patch.object(gui_module, "DEFAULT_OPENGUI_MEMORY_DIR", memory_dir),
@@ -357,10 +363,9 @@ async def test_gui_tool_passes_memory_store_to_gui_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from opengui.agent import AgentResult
-
     from nanobot.agent.tools.gui import GuiSubagentTool
     from nanobot.config.schema import Config
+    from opengui.agent import AgentResult
 
     provider = _FakeProvider()
     config = Config(gui={"backend": "dry-run", "embeddingModel": "embed-model"})
@@ -394,18 +399,21 @@ async def test_gui_tool_passes_memory_store_to_gui_agent(
             )
 
     memory_store = object()
+    memory_retriever = object()
     monkeypatch.setattr("nanobot.agent.tools.gui.GuiAgent", FakeGuiAgent)
     monkeypatch.setattr(
         type(tool),
         "_load_policy_context_and_memory_store",
         lambda *_args, **_kwargs: (None, memory_store),
     )
+    monkeypatch.setattr(tool, "_build_memory_retriever", AsyncMock(return_value=memory_retriever))
     monkeypatch.setattr(tool._postprocessor, "schedule", lambda *args, **kwargs: None)
 
     result = await tool._run_task(tool._backend, "Open notification shade")
 
     assert '"success": true' in result
     assert captured_kwargs["memory_store"] is memory_store
+    assert captured_kwargs["memory_retriever"] is memory_retriever
 
 
 # ---------------------------------------------------------------------------

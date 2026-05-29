@@ -167,7 +167,7 @@ def test_monitor_expected_app_mismatch_is_red_halt(tmp_path: Path) -> None:
     assert "app_mismatch" in decision.signal_keys
 
 
-def test_monitor_flags_safety_keywords_before_action(tmp_path: Path) -> None:
+def test_monitor_does_not_hard_gate_safety_keywords_before_action(tmp_path: Path) -> None:
     monitor = AutonomyMonitor()
     current = _observation(
         tmp_path / "current.png",
@@ -186,9 +186,9 @@ def test_monitor_flags_safety_keywords_before_action(tmp_path: Path) -> None:
         )
     )
 
-    assert decision.decision == AutonomyDecisionKind.HUMAN_CONFIRM
-    assert decision.tier == "red"
-    assert "safety_keyword_flag" in decision.signal_keys
+    assert decision.decision == AutonomyDecisionKind.S1_EXECUTE
+    assert decision.tier == "green"
+    assert "safety_keyword_flag" not in decision.signal_keys
 
 
 def test_monitor_can_discount_risk_after_s2_recovery(tmp_path: Path) -> None:
@@ -531,7 +531,7 @@ async def test_gui_agent_rejects_unverified_first_step_done(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_gui_agent_pre_action_monitor_pauses_before_unsafe_action(tmp_path: Path) -> None:
+async def test_gui_agent_pre_action_monitor_does_not_pause_on_safety_keywords(tmp_path: Path) -> None:
     monitor = AutonomyMonitor()
     backend = _StaticScreenBackend()
     s1 = _RecordingLLM([
@@ -592,15 +592,12 @@ async def test_gui_agent_pre_action_monitor_pauses_before_unsafe_action(tmp_path
     result = await agent.run(task, max_retries=1)
 
     assert result.success is True
-    assert backend.execute_calls == []
-    assert len(requests) == 1
-    assert "Safety keyword detected" in requests[0].reason
+    assert len(backend.execute_calls) == 1
+    assert requests == []
 
     trace_events = [
         json.loads(line)
         for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     first_step = next(event for event in trace_events if event["event"] == "step")
-    pre_action = first_step["execution"]["autonomy_monitor_pre_action"]
-    assert pre_action["decision"] == AutonomyDecisionKind.HUMAN_CONFIRM.value
-    assert "safety_keyword_flag" in pre_action["signal_keys"]
+    assert "autonomy_monitor_pre_action" not in first_step["execution"]

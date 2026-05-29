@@ -57,7 +57,7 @@ def test_gui_tool_load_policy_context(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 # ---------------------------------------------------------------------------
-def test_gui_tool_loads_policy_and_platform_os_guides(
+def test_gui_tool_loads_only_policy_as_direct_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -98,19 +98,19 @@ def test_gui_tool_loads_policy_and_platform_os_guides(
     assert context is not None
     assert "[policy]" in context
     assert "Do not approve sensitive permissions automatically." in context
-    assert "[os]" in context
-    assert "iOS Settings search field is at the bottom" in context
+    assert "[os]" not in context
+    assert "iOS Settings search field is at the bottom" not in context
     assert "Android quick settings" not in context
 
 
 # ---------------------------------------------------------------------------
-# Test 5: GuiAgent uses policy_context directly (no retriever search)
+# Test 5: GuiAgent uses policy_context directly when no retriever exists
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_gui_agent_uses_policy_context_directly(tmp_path: Path) -> None:
-    """GuiAgent._retrieve_memory returns policy_context directly without calling the retriever."""
+    """GuiAgent._retrieve_memory returns policy_context directly without a retriever."""
     from opengui.agent import GuiAgent
     from opengui.backends.dry_run import DryRunBackend
     from opengui.trajectory.recorder import TrajectoryRecorder
@@ -118,22 +118,56 @@ async def test_gui_agent_uses_policy_context_directly(tmp_path: Path) -> None:
     recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task="test task")
     recorder.start()
 
-    # Provide a mock retriever — it must NOT be called
-    mock_retriever = MagicMock()
-    mock_retriever.search = AsyncMock(side_effect=AssertionError("retriever.search must not be called"))
-
     agent = GuiAgent(
         llm=MagicMock(),
         backend=DryRunBackend(),
         trajectory_recorder=recorder,
         policy_context="test policy line",
-        memory_retriever=mock_retriever,
+        memory_retriever=None,
     )
 
     result = await agent._retrieve_memory("any task")
 
     assert result == "test policy line", f"Expected direct policy context, got: {result!r}"
-    mock_retriever.search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_combines_policy_context_with_selected_memory(tmp_path: Path) -> None:
+    """Policy is always injected while non-policy memory can be selected by search."""
+    from opengui.agent import GuiAgent
+    from opengui.backends.dry_run import DryRunBackend
+    from opengui.memory.types import MemoryEntry, MemoryType
+    from opengui.trajectory.recorder import TrajectoryRecorder
+
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task="test task")
+    recorder.start()
+
+    os_entry = MemoryEntry(
+        entry_id="ios-search",
+        memory_type=MemoryType.OS_GUIDE,
+        platform="ios",
+        content="Use Spotlight to search for apps.",
+    )
+    mock_retriever = MagicMock()
+    mock_retriever.search = AsyncMock(return_value=[(os_entry, 0.9)])
+    mock_retriever.format_context.return_value = "- [os] Use Spotlight to search for apps."
+
+    agent = GuiAgent(
+        llm=MagicMock(),
+        backend=DryRunBackend(),
+        trajectory_recorder=recorder,
+        policy_context="- [policy] Never pay automatically.",
+        memory_retriever=mock_retriever,
+    )
+
+    result = await agent._retrieve_memory("open bilibili")
+
+    assert result == (
+        "- [policy] Never pay automatically.\n"
+        "- [os] Use Spotlight to search for apps."
+    )
+    mock_retriever.search.assert_awaited_once()
+    assert mock_retriever.search.await_args.kwargs["top_k"] == 15
 
 
 # ---------------------------------------------------------------------------
