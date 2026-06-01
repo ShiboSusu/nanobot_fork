@@ -401,7 +401,7 @@ gui["plannerTimeoutSeconds"] = float("$PLANNER_TIMEOUT_SECONDS")
 gui["enableSkillExecution"] = False
 gui["enableSkillExtraction"] = False
 gui["stagnationLimit"] = int(gui.get("stagnationLimit", 3) or 3)
-gui["agentProfile"] = "${NANOBOT_GUI_AGENT_PROFILE:-default}"
+gui["agentProfile"] = "${NANOBOT_GUI_AGENT_PROFILE:-general_e2e}"
 gui.setdefault("ios", {})["wdaUrl"] = "$WDA_URL"
 gui.setdefault("evaluation", {})["enabled"] = "$GUI_EVALUATION_ENABLED" not in {"0", "false", "False", ""}
 
@@ -436,14 +436,19 @@ ensure_usbmux_forward() {
 
   log "[info] starting USB port forward: 127.0.0.1:$WDA_PORT -> $udid:$WDA_PORT"
   : >"$log_file"
-  nohup "$PYMOBILEDEVICE3_BIN" usbmux forward --serial "$udid" "$WDA_PORT" "$WDA_PORT" >>"$log_file" 2>&1 &
-  local pid=$!
-  printf '%s\n' "$pid" >"$pid_file"
+  "$PYMOBILEDEVICE3_BIN" usbmux forward \
+    --serial "$udid" \
+    --host 127.0.0.1 \
+    --daemonize \
+    "$WDA_PORT" "$WDA_PORT" >>"$log_file" 2>&1
   sleep 1
+  local pid
+  pid="$(pgrep -f "pymobiledevice3 usbmux forward --serial ${udid} .* ${WDA_PORT} ${WDA_PORT}" | head -n 1 || true)"
   if ! process_is_running "$pid"; then
     tail -n 40 "$log_file" >&2 || true
     die "failed to start usbmux forwarder; see $log_file"
   fi
+  printf '%s\n' "$pid" >"$pid_file"
   log "[ok] usbmux forwarder running (pid $pid)"
 }
 
