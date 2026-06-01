@@ -749,6 +749,18 @@ def test_build_system_prompt_supports_general_e2e_profile() -> None:
     assert "Do not use native tool calling" in prompt
 
 
+def test_general_e2e_prompt_includes_mobileworld_execution_principles() -> None:
+    prompt = build_system_prompt(
+        platform="ios",
+        agent_profile="general_e2e",
+    )
+
+    assert "MobileWorld-style execution principles" in prompt
+    assert "You MUST first click or focus the input box before using input_text" in prompt
+    assert "If an action fails twice" in prompt
+    assert "Analyze goal, history, and current screen" in prompt
+
+
 def test_build_system_prompt_warns_against_filling_onboarding_personal_data() -> None:
     prompt = build_system_prompt(platform="ios")
 
@@ -1359,6 +1371,128 @@ def test_qwen3vl_profile_preserves_action_summary() -> None:
         "relative": True,
         "summary": "tap login button",
     }
+
+
+@pytest.mark.asyncio
+async def test_general_e2e_summary_is_action_intent_not_state_summary(tmp_path: Path) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content=(
+                "Thought: I need to type in the search box.\n"
+                'Action: {"action_type": "input_text", "text": "罗翔 刑法课", "summary": "输入搜索词"}'
+            ),
+            tool_calls=None,
+        ),
+        LLMResponse(
+            content='Thought: done.\nAction: {"action_type": "status", "goal_status": "complete"}',
+            tool_calls=None,
+        ),
+    ])
+    agent = GuiAgent(
+        llm,
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "general e2e summary"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        history_image_window=1,
+        include_date_context=False,
+        agent_profile="general_e2e",
+    )
+
+    result = await agent.run("Search videos")
+
+    assert result.success
+    second_call = llm.calls[1]
+    history_text = "\n".join(
+        block["text"]
+        for block in second_call[1]["content"]
+        if block.get("type") == "text"
+    )
+    assert "Recent intents:\nStep 1: 输入搜索词" in history_text
+    assert "Latest state summary: 输入搜索词" not in history_text
+
+
+@pytest.mark.asyncio
+async def test_general_e2e_json_action_without_summary_does_not_use_thought_as_history(
+    tmp_path: Path,
+) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content=(
+                "Thought: I am on a search results page and should type the query.\n"
+                'Action: {"action_type": "input_text", "text": "罗翔 刑法课"}'
+            ),
+            tool_calls=None,
+        ),
+        LLMResponse(
+            content='Thought: done.\nAction: {"action_type": "status", "goal_status": "complete"}',
+            tool_calls=None,
+        ),
+    ])
+    agent = GuiAgent(
+        llm,
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "general e2e no summary"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        history_image_window=1,
+        include_date_context=False,
+        agent_profile="general_e2e",
+    )
+
+    result = await agent.run("Search videos")
+
+    assert result.success
+    second_call = llm.calls[1]
+    history_text = "\n".join(
+        block["text"]
+        for block in second_call[1]["content"]
+        if block.get("type") == "text"
+    )
+    assert "Step 1: Thought:" not in history_text
+    assert "Step 1: type" in history_text
+
+
+@pytest.mark.asyncio
+async def test_s2_guidance_prompt_references_mobileworld_execution_contract(tmp_path: Path) -> None:
+    s2_llm = _RecordingLLM([
+        LLMResponse(
+            content='{"route":"S2_HINT","hint":"click the search box before typing"}',
+            tool_calls=None,
+        )
+    ])
+    agent = GuiAgent(
+        _RecordingLLM([]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "s2 prompt"),
+        artifacts_root=tmp_path / "runs",
+        s2_llm=s2_llm,
+        s2_model="qwen3.5-397b-a17b",
+    )
+    obs = Observation(
+        screenshot_path=None,
+        screen_width=402,
+        screen_height=874,
+        foreground_app="tv.danmaku.bilianime",
+        platform="ios",
+    )
+
+    hint, _ = await agent._request_s2_guidance(
+        task="在B站播放罗翔的刑法课视频",
+        step_index=3,
+        action=Action(action_type="input_text", text="罗翔 刑法课"),
+        current_observation=obs,
+        next_observation=obs,
+        tool_result='type "<redacted:input_text>"',
+        action_summary="type query",
+        state_summary=None,
+        monitor_payload={"signal_keys": ["screen_unchanged", "repeated_action"]},
+    )
+
+    assert hint == "click the search box before typing"
+    system_prompt = s2_llm.calls[0][0]["content"]
+    assert "MobileWorld-style execution principles" in system_prompt
+    assert "click or focus the input box before using input_text" in system_prompt
 
 
 def test_qwen3vl_profile_prefers_content_contract_over_provider_tool_calls() -> None:

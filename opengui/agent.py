@@ -2470,7 +2470,10 @@ class GuiAgent:
                     f"LLM called unexpected tool '{tool_call.name}'.",
                     model_snapshot=assistant_snapshot,
                 )
-            action_intent, state_summary = self._tool_call_semantics(tool_call)
+            action_intent, state_summary = self._tool_call_semantics(
+                tool_call,
+                agent_profile=self.agent_profile,
+            )
 
             # Parse action
             try:
@@ -3155,6 +3158,12 @@ class GuiAgent:
                     "or outside its reliable autonomy boundary. Give one concise recovery "
                     "hint for the small model. Do not take unsafe actions; if the task is "
                     "already complete, say to verify completion and call done. "
+                    "The small model follows MobileWorld-style execution principles: "
+                    "analyze goal, history, and current screen; choose the simplest visible "
+                    "progress step; click or focus the input box before using input_text; "
+                    "after typing search text, submit it with keyboard_enter or a visible "
+                    "Search/搜索 button; avoid repeating failed action sequences when the "
+                    "screen does not change. "
                     "Respond only with JSON: {\"route\":\"S2_HINT\",\"hint\":\"...\"}. "
                     "Do not include thinking, rationale, markdown, or extra text."
                 ),
@@ -3581,10 +3590,12 @@ class GuiAgent:
             return f"Action: {summary}"
         text = content.strip() if content else ""
         if text:
+            action_line = GuiAgent._extract_non_json_action_line(text)
+            if action_line:
+                return action_line
             first_line = text.splitlines()[0].strip()
-            if first_line.lower().startswith("action:"):
-                return first_line
-            return f"Action: {first_line}"
+            if first_line and not first_line.casefold().startswith("thought:"):
+                return f"Action: {first_line}"
         return f"Action: {describe_action(action)}"
 
     @staticmethod
@@ -3593,10 +3604,20 @@ class GuiAgent:
         return intent or summary
 
     @staticmethod
-    def _tool_call_semantics(tool_call: ToolCall) -> tuple[str | None, str | None]:
+    def _tool_call_semantics(
+        tool_call: ToolCall,
+        *,
+        agent_profile: str | None = None,
+    ) -> tuple[str | None, str | None]:
         arguments = tool_call.arguments or {}
         intent = GuiAgent._clean_action_summary(arguments.get("intent"))
         summary = GuiAgent._clean_action_summary(arguments.get("summary"))
+        if canonicalize_agent_profile(agent_profile) == "general_e2e":
+            state_summary = (
+                GuiAgent._clean_action_summary(arguments.get("state_summary"))
+                or GuiAgent._clean_action_summary(arguments.get("ui_state"))
+            )
+            return intent or summary, state_summary
         return intent, summary
 
     @staticmethod
@@ -3611,6 +3632,16 @@ class GuiAgent:
             text = text.split(":", 1)[1].strip()
         text = text.strip("`\"'")
         return text or None
+
+    @staticmethod
+    def _extract_non_json_action_line(text: str) -> str | None:
+        matches = list(re.finditer(r"(?im)^Action:\s*(.+?)\s*$", text or ""))
+        if not matches:
+            return None
+        body = matches[-1].group(1).strip()
+        if not body or body.startswith("{") or body.startswith("["):
+            return None
+        return f"Action: {body}"
 
     @staticmethod
     def _action_summary(action_text: str) -> str:

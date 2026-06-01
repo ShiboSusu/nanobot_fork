@@ -248,6 +248,13 @@ def prompt_contract_for_profile(profile_name: str | None) -> dict[str, tuple[str
             "environment": (
                 "- This profile mirrors MobileWorld general_e2e / planner_executor style.",
                 "- Do not use native tool calling. Respond in plain text only.",
+                "- MobileWorld-style execution principles:",
+                "  1. Analyze goal, history, and current screen before choosing the next action.",
+                "  2. Choose the simplest path that can make visible progress toward the task.",
+                "  3. If an action fails twice or the screen does not change, try a different action instead of repeating it.",
+                "  4. You MUST first click or focus the input box before using input_text.",
+                "  5. After typing search text, submit it with keyboard_enter or a visible Search/搜索 button when the screen has not already updated.",
+                "  6. Use status only when the task is actually complete or infeasible.",
             ),
             "format": (
                 "1) `Thought:` followed by brief reasoning.",

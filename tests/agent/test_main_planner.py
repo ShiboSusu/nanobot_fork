@@ -10,6 +10,18 @@ from nanobot.agent.main_planner import MainPlanner, PlannerConfig
 from nanobot.providers.base import LLMResponse
 
 
+def test_planner_prompt_references_mobileworld_gui_executor_contract() -> None:
+    messages = MainPlanner._messages(
+        "在B站播放罗翔的刑法课视频",
+        available_tools={"gui_task", "web_search"},
+    )
+
+    system_prompt = messages[0]["content"]
+    assert "MobileWorld-style GUI executor" in system_prompt
+    assert "focus input fields before text entry" in system_prompt
+    assert "avoid repeating failed action sequences" in system_prompt
+
+
 def test_parse_gui_plan_to_route_decision() -> None:
     planner = MainPlanner(provider=None, model=None, config=PlannerConfig(enabled=True))
 

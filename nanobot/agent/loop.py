@@ -1228,6 +1228,7 @@ class AgentLoop:
                 chat_id=chat_id,
                 session_summary=pending,
                 current_role=current_role,
+                gui_backend=self._gui_config.backend if self._gui_config is not None else None,
             )
             final_content, _, all_msgs, stop_reason, _ = await self._run_agent_loop(
                 messages, session=session, channel=channel, chat_id=chat_id,
@@ -1385,7 +1386,10 @@ class AgentLoop:
 
         if pending_ask_id:
             initial_messages = ask_user_tool_result_messages(
-                self.context.build_system_prompt(channel=msg.channel),
+                self.context.build_system_prompt(
+                    channel=msg.channel,
+                    gui_backend=self._gui_config.backend if self._gui_config is not None else None,
+                ),
                 history,
                 pending_ask_id,
                 msg.content,
@@ -1398,6 +1402,7 @@ class AgentLoop:
                 media=msg.media if msg.media else None,
                 channel=msg.channel,
                 chat_id=self._runtime_chat_id(msg),
+                gui_backend=self._gui_config.backend if self._gui_config is not None else None,
             )
 
         async def _bus_progress(

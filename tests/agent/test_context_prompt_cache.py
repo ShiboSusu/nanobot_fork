@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import datetime as datetime_module
 import re
 from datetime import datetime as real_datetime
 from importlib.resources import files as pkg_files
 from pathlib import Path
-import datetime as datetime_module
 
 from nanobot.agent.context import ContextBuilder
 
@@ -87,6 +87,17 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     assert "Return exactly: OK" in user_content
 
 
+def test_system_prompt_with_gui_backend_references_mobileworld_executor_contract(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+
+    prompt = builder.build_system_prompt(gui_backend="ios")
+
+    assert "MobileWorld-style GUI executor" in prompt
+    assert "focus input fields before text entry" in prompt
+    assert "avoid repeating failed action sequences" in prompt
+
+
 def test_unprocessed_history_injected_into_system_prompt(tmp_path) -> None:
     """Entries in history.jsonl not yet consumed by Dream appear with timestamps."""
     workspace = _make_workspace(tmp_path)
@@ -147,7 +158,7 @@ def test_partial_dream_processing_shows_only_remainder(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
-    c1 = builder.memory.append_history("old conversation about Python")
+    builder.memory.append_history("old conversation about Python")
     c2 = builder.memory.append_history("old conversation about Rust")
     builder.memory.append_history("recent question about Docker")
     builder.memory.append_history("recent question about K8s")

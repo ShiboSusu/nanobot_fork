@@ -9,7 +9,12 @@ from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
-from nanobot.utils.helpers import build_assistant_message, current_time_str, detect_image_mime, truncate_text
+from nanobot.utils.helpers import (
+    build_assistant_message,
+    current_time_str,
+    detect_image_mime,
+    truncate_text,
+)
 from nanobot.utils.prompt_templates import render_template
 
 
@@ -52,6 +57,8 @@ class ContextBuilder:
                         "## GUI Runtime",
                         f"- Active GUI backend: `{gui_backend}`",
                         "- Use only skills/commands compatible with this backend.",
+                        "- GUI tasks are delegated to a MobileWorld-style GUI executor.",
+                        "- When planning or describing GUI work, assume the executor must focus input fields before text entry, submit search text explicitly, and avoid repeating failed action sequences.",
                     ]
                 )
             )
