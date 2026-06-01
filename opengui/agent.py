@@ -2570,6 +2570,31 @@ class GuiAgent:
                     state_summary=state_summary,
                 )
             )
+            if pre_action_decision.decision == AutonomyDecisionKind.S1_RESAMPLE:
+                pre_action_payload = pre_action_decision.to_trace()
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": (
+                        "Error: repeated input_text would append duplicate text. "
+                        "Do not type the same text again; choose the next visible "
+                        "progress action, such as tapping Send/发送 if the text is already present."
+                    ),
+                })
+                model_snapshot = {
+                    **(model_snapshot or {}),
+                    "autonomy_monitor_pre_action": {
+                        **pre_action_payload,
+                        "resample_requested": True,
+                        "original_action": self._serialize_action(action),
+                    },
+                }
+                if retries_left > 0:
+                    continue
+                raise _StepExecutionError(
+                    "Pre-action monitor rejected repeated input_text after retries.",
+                    model_snapshot=model_snapshot,
+                )
             if (
                 pre_action_decision.decision == AutonomyDecisionKind.HUMAN_CONFIRM
                 and not self._is_benign_search_input_text_autonomy_exception(

@@ -549,6 +549,86 @@ async def test_gui_action_layer_does_not_hard_gate_message_input_text(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_pre_action_monitor_resamples_duplicate_input_text(tmp_path: Path) -> None:
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="Action: input message",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "input_text",
+                    "text": "周末去这家",
+                    "intent": "在微信消息输入框输入给 Su4o_ 的留言。",
+                    "summary": "微信消息输入框已聚焦。",
+                },
+            )],
+        ),
+        LLMResponse(
+            content="Action: input message again",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={
+                    "action_type": "input_text",
+                    "text": "周末去这家",
+                    "intent": "再次输入留言。",
+                    "summary": "消息输入框里已经有留言。",
+                },
+            )],
+        ),
+        LLMResponse(
+            content="Action: send message",
+            tool_calls=[ToolCall(
+                id="call-3",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 1180,
+                    "y": 640,
+                    "intent": "点击发送按钮。",
+                    "summary": "留言已经输入，发送按钮可见。",
+                },
+            )],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[ToolCall(
+                id="call-4",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
+    ])
+    backend = _BackendDouble([
+        {"foreground_app": "WeChat"},
+        {"foreground_app": "WeChat"},
+        {"foreground_app": "WeChat"},
+    ])
+
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "wechat duplicate input"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=4,
+        include_date_context=False,
+    )
+
+    result = await agent.run("通过微信分享给 Su4o_，并告诉他“周末去这家”", max_retries=1)
+
+    assert result.success
+    executed_actions = [call.args[0] for call in backend.execute.await_args_list]
+    assert [action.action_type for action in executed_actions] == ["input_text", "tap"]
+    assert executed_actions[0].text == "周末去这家"
+    assert any(
+        "repeated input_text" in str(message.get("content", ""))
+        for call in llm.calls
+        for message in call
+    )
+
+
+@pytest.mark.asyncio
 async def test_gui_action_layer_does_not_hard_gate_profile_update_input_text(tmp_path: Path) -> None:
     llm = _RecordingLLM([
         LLMResponse(

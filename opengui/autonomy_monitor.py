@@ -174,6 +174,15 @@ class AutonomyMonitor:
     def assess_pre_action(self, step: PreActionMonitorInput) -> MonitorDecision:
         signals = tuple(self._signals_for_pre_action(step))
         risk = min(1.0, sum(signal.contribution for signal in signals))
+        if any(signal.key == "duplicate_input_text" for signal in signals):
+            return MonitorDecision(
+                decision=AutonomyDecisionKind.S1_RESAMPLE,
+                tier="amber",
+                risk=risk,
+                cumulative_risk=self.cumulative_risk,
+                signals=signals,
+                reason="The same text was just entered; resample instead of appending it again.",
+            )
 
         return MonitorDecision(
             decision=AutonomyDecisionKind.S1_EXECUTE,
@@ -223,8 +232,21 @@ class AutonomyMonitor:
         )
 
     def _signals_for_pre_action(self, step: PreActionMonitorInput) -> list[RiskSignal]:
-        del step
         signals: list[RiskSignal] = []
+        if (
+            step.action.action_type == "input_text"
+            and self._last_action_signature == _action_signature(step.action)
+        ):
+            signals.append(RiskSignal(
+                key="duplicate_input_text",
+                category="progress",
+                value=1.0,
+                weight=0.55,
+                reason=(
+                    "The model proposed the same input_text action as the previous "
+                    "executed step; executing it would append duplicate text."
+                ),
+            ))
         return signals
 
     def _signals_for_step(self, step: StepMonitorInput) -> list[RiskSignal]:
