@@ -271,6 +271,34 @@ class _StaticScreenBackend:
         return _observation(screenshot_path, data=b"unchanged-screen")
 
 
+class _ChangingScreenBackend:
+    platform = "ios"
+
+    def __init__(self) -> None:
+        self.execute_calls: list[Action] = []
+        self.observe_count = 0
+
+    async def preflight(self) -> None:
+        return None
+
+    async def list_apps(self) -> list[str]:
+        return []
+
+    async def execute(self, action: Action, timeout: float = 5.0) -> str:
+        del timeout
+        self.execute_calls.append(action)
+        return "ok"
+
+    async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+        del timeout
+        self.observe_count += 1
+        return _observation(
+            screenshot_path,
+            app="tv.danmaku.bilianime",
+            data=f"changing-screen-{self.observe_count}".encode(),
+        )
+
+
 @pytest.mark.asyncio
 async def test_gui_agent_records_monitor_decision_and_stops_on_red(tmp_path: Path) -> None:
     monitor = AutonomyMonitor(horizon_threshold=0.20)
@@ -325,6 +353,73 @@ async def test_gui_agent_records_monitor_decision_and_stops_on_red(tmp_path: Pat
     ]
     monitor_events = [event for event in trajectory_events if event["type"] == "autonomy_monitor"]
     assert monitor_events[-1]["decision"] == AutonomyDecisionKind.HALT.value
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_requests_s2_once_global_step_budget_reaches_twenty(tmp_path: Path) -> None:
+    backend = _ChangingScreenBackend()
+    s1_responses = [
+        LLMResponse(
+            content=f"Action: explore {i}",
+            tool_calls=[
+                ToolCall(
+                    id=f"call-{i}",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 10 + i,
+                        "y": 20 + i,
+                        "summary": f"继续查找设置入口 {i}",
+                    },
+                )
+            ],
+        )
+        for i in range(30)
+    ]
+    s1_responses.append(
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-done",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "summary": "按S2提示确认任务完成",
+                    },
+                )
+            ],
+        )
+    )
+    s1 = _RecordingLLM(s1_responses)
+    s2 = _RecordingLLM([
+        LLMResponse(content='{"route":"S2_HINT","hint":"停止继续盲目查找，先进入设置/隐私路线。"}')
+    ])
+    task = "检查B站里我的关注列表设置是不是‘不公开’。"
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task=task, platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=15,
+        include_date_context=False,
+        s2_llm=s2,
+        s2_model="qwen3.5-397b-a17b",
+        s2_max_hints=1,
+    )
+
+    await agent.run(task, max_retries=2, app_hint="tv.danmaku.bilianime")
+
+    assert len(s2.calls) == 1
+    trace_events = [
+        json.loads(line)
+        for line in recorder.path.read_text(encoding="utf-8").splitlines()
+    ]
+    s2_event = next(event for event in trace_events if event["type"] == "s2_guidance")
+    assert 20 <= s2_event["at_step"] <= 21
+    assert s2_event["monitor"]["signal_keys"] == ["global_step_budget_pressure"]
 
 
 @pytest.mark.asyncio

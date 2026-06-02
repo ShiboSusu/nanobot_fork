@@ -214,6 +214,141 @@ async def test_ios_compound_app_task_prelaunches_resolved_app(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_ios_check_app_task_prelaunches_resolved_app(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Bilibili is ready for privacy inspection.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-check-app-prelaunch"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        installed_apps=["哔哩哔哩: tv.danmaku.bilianime"],
+    )
+
+    await agent.run("检查B站里我的关注列表设置是不是‘不公开’。", max_retries=1)
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="tv.danmaku.bilianime")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ios_explicit_app_hint_prelaunches_before_free_exploration(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Target app is ready.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-explicit-app-hint-prelaunch"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+    )
+
+    await agent.run(
+        "检查我的关注列表设置是不是不公开。",
+        max_retries=1,
+        app_hint="tv.danmaku.bilianime",
+    )
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="tv.danmaku.bilianime")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ios_cross_app_share_task_does_not_treat_destination_as_app_mismatch(
+    tmp_path: Path,
+) -> None:
+    class ShareBackend(_RecordingIosBackend):
+        async def execute(self, action: Action, timeout: float = 5.0) -> str:
+            result = await super().execute(action, timeout=timeout)
+            if action.action_type == "tap" and action.x == 300:
+                self.foreground_app = "com.tencent.xin"
+            return result
+
+    backend = ShareBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="Action: share to WeChat",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 300,
+                        "y": 500,
+                        "summary": "点击微信分享入口",
+                    },
+                )],
+            ),
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-2",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "已经进入微信分享流程。",
+                    },
+                )],
+            ),
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-cross-app-share"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        installed_apps=[
+            "哔哩哔哩: tv.danmaku.bilianime",
+            "微信: com.tencent.xin",
+        ],
+    )
+
+    result = await agent.run(
+        "在B站找到视频后分享到微信好友。",
+        max_retries=1,
+        app_hint="tv.danmaku.bilianime",
+    )
+
+    assert result.success is True
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    monitor_events = [event for event in trace_events if event["event"] == "step"]
+    assert not any(
+        "app_mismatch" in event["autonomy_monitor"]["signal_keys"]
+        for event in monitor_events
+    )
+
+
+@pytest.mark.asyncio
 async def test_ios_go_to_app_task_prelaunches_resolved_app(tmp_path: Path) -> None:
     backend = _RecordingIosBackend()
     agent = GuiAgent(

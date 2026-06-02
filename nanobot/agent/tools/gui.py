@@ -19,7 +19,7 @@ from nanobot.agent.tools.base import Tool
 from opengui.agent import GuiAgent
 from opengui.interfaces import InterventionHandler, InterventionRequest, InterventionResolution
 from opengui.postprocessing import EvaluationConfig, PostRunProcessor
-from opengui.skills.normalization import get_gui_skill_store_root
+from opengui.skills.normalization import get_gui_skill_store_root, resolve_ios_bundle
 from opengui.trajectory.recorder import TrajectoryRecorder
 
 if TYPE_CHECKING:
@@ -248,6 +248,7 @@ class GuiSubagentTool(Tool):
             platform=active_backend.platform,
         )
         memory_retriever = await self._build_memory_retriever()
+        installed_apps = await self._load_installed_apps(active_backend)
         skill_library = None
         if self._gui_config.enable_skill_execution:
             self._refresh_cached_skill_stores()
@@ -342,11 +343,17 @@ class GuiSubagentTool(Tool):
             agent_profile=self._gui_config.agent_profile,
             image_scale_ratio=self._gui_config.image_scale_ratio,
             stagnation_limit=self._gui_config.stagnation_limit,
+            installed_apps=installed_apps,
             s2_llm=self._s2_llm_adapter,
             s2_model=self._s2_model,
         )
 
-        result = await agent.run(task=task)
+        app_hint = self._resolve_app_hint(
+            task,
+            platform=active_backend.platform,
+            installed_apps=installed_apps,
+        )
+        result = await agent.run(task=task, app_hint=app_hint)
         summary = result.summary
         error = result.error
         if error and error.startswith("intervention_cancelled:"):
@@ -372,6 +379,37 @@ class GuiSubagentTool(Tool):
             },
             ensure_ascii=False,
         )
+
+    async def _load_installed_apps(self, active_backend: Any) -> list[str] | None:
+        list_apps = getattr(active_backend, "list_apps", None)
+        if not callable(list_apps):
+            return None
+        try:
+            apps = await list_apps()
+        except Exception:
+            logger.debug("Failed to list GUI backend apps for app hint resolution", exc_info=True)
+            return None
+        if not isinstance(apps, list):
+            return None
+        return [str(app) for app in apps if str(app).strip()]
+
+    @staticmethod
+    def _resolve_app_hint(
+        task: str,
+        *,
+        platform: str,
+        installed_apps: list[str] | None,
+    ) -> str | None:
+        if platform != "ios":
+            return None
+        normalized_task = GuiAgent._normalize_system_action_task(task)
+        target = GuiAgent._extract_ios_app_target(normalized_task)
+        if target is None:
+            return None
+        bundle_id = resolve_ios_bundle(target, installed_apps)
+        if bundle_id == target and "." not in bundle_id:
+            return None
+        return bundle_id
 
     def _build_post_run_state(
         self,

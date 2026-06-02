@@ -37,6 +37,7 @@ from opengui.autonomy_monitor import (
     AutonomyMonitor,
     MonitorDecision,
     PreActionMonitorInput,
+    RiskSignal,
     StepMonitorInput,
 )
 from opengui.interfaces import (
@@ -968,6 +969,8 @@ class GuiAgent:
         except (TypeError, ValueError):
             parsed_s2_max_hints = 1
         self._s2_max_hints = max(0, parsed_s2_max_hints)
+        self._s2_global_step_hint_threshold = 20
+        self._global_s2_budget_hint_issued = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -988,6 +991,7 @@ class GuiAgent:
         """
         # 1. Start trajectory recording
         self._trajectory_recorder.start(phase=ExecutionPhase.AGENT)
+        self._global_s2_budget_hint_issued = False
 
         # 2. Retrieve memory context (once)
         memory_context = await self._retrieve_memory(task)
@@ -1248,6 +1252,8 @@ class GuiAgent:
         if direct_result is not None:
             return direct_result
         launch_action = self._initial_ios_app_launch_for_task(task)
+        if launch_action is None and effective_app_hint:
+            launch_action = self._initial_ios_app_launch_for_hint(effective_app_hint)
         if effective_app_hint is None and launch_action is not None:
             effective_app_hint = launch_action.text
         obs = await self._try_initial_app_launch(
@@ -1255,6 +1261,11 @@ class GuiAgent:
             run_dir=run_dir,
             current_observation=obs,
             action=launch_action,
+        )
+        strict_expected_app = (
+            None
+            if self._task_allows_cross_app_transition(task)
+            else effective_app_hint
         )
 
         history: list[HistoryTurn] = []
@@ -1471,7 +1482,7 @@ class GuiAgent:
             result = await self._refresh_transient_ios_system_observation(
                 run_dir=run_dir,
                 step_index=step_index,
-                expected_app=effective_app_hint,
+                expected_app=strict_expected_app,
                 current_observation=obs,
                 result=result,
             )
@@ -1488,7 +1499,7 @@ class GuiAgent:
                     tool_result=result.tool_result,
                     action_summary=result.action_summary,
                     state_summary=result.state_summary,
-                    expected_app=effective_app_hint,
+                    expected_app=strict_expected_app,
                 )
             )
             if (
@@ -1511,6 +1522,29 @@ class GuiAgent:
                     reason="Benign search input text with destructive keyword in query-edit summary.",
                 )
             monitor_payload = monitor_decision.to_trace()
+            global_step_count = self._trajectory_recorder.step_count
+            if self._should_force_s2_for_global_step_budget(
+                global_step_count=global_step_count,
+                action=result.action,
+                s2_guidance=s2_guidance,
+            ):
+                signal = RiskSignal(
+                    key="global_step_budget_pressure",
+                    category="progress",
+                    value=1.0,
+                    weight=0.50,
+                    reason="The GUI run reached the global S2 guidance step budget.",
+                )
+                monitor_decision = MonitorDecision(
+                    decision=AutonomyDecisionKind.CHEAP_VERIFY,
+                    tier="amber",
+                    risk=signal.contribution,
+                    cumulative_risk=self._autonomy_monitor.cumulative_risk,
+                    signals=(signal,),
+                    reason="Global step budget reached; request System 2 recovery guidance.",
+                )
+                monitor_payload = monitor_decision.to_trace()
+                self._global_s2_budget_hint_issued = True
             self._trajectory_recorder.record_event(
                 "autonomy_monitor",
                 step_index=step_index,
@@ -2515,6 +2549,35 @@ class GuiAgent:
             return None
         return Action(action_type="open_app", text=bundle_id)
 
+    def _initial_ios_app_launch_for_hint(self, app_hint: str) -> Action | None:
+        if self.backend.platform != "ios":
+            return None
+        hint = (app_hint or "").strip()
+        if not hint:
+            return None
+        bundle_id = resolve_ios_bundle(hint, self._installed_apps)
+        if bundle_id == hint and "." not in bundle_id:
+            return None
+        return Action(action_type="open_app", text=bundle_id)
+
+    @staticmethod
+    def _task_allows_cross_app_transition(task: str) -> bool:
+        normalized = GuiAgent._normalize_system_action_task(task)
+        if not normalized:
+            return False
+        transition_phrases = (
+            "分享到", "分享给", "通过微信分享", "用微信分享",
+            "发给微信", "发送到微信", "转发到", "转发给",
+            "share to", "share with", "send to", "forward to",
+        )
+        if not any(phrase in normalized for phrase in transition_phrases):
+            return False
+        destination_terms = (
+            "微信", "wechat", "qq", "短信", "信息", "messages",
+            "mail", "邮件",
+        )
+        return any(term in normalized for term in destination_terms)
+
     @staticmethod
     def _normalize_system_action_task(task: str) -> str:
         return " ".join((task or "").strip().lower().split())
@@ -2557,6 +2620,7 @@ class GuiAgent:
             normalized_task,
         )
         patterns = (
+            r"(?:检查|查看|确认|核对)\s*([^，,。；;\s]+?)(?:\s*(?:app|应用|软件))?(?:里|上|中)\s*",
             r"(?:打开|开启|启动|open|launch)\s*(.+)",
             r"(?:去|进入)\s*([^，,。；;\s]+?)(?:\s*(?:app|应用|软件))?(?:里|上|中)?\s*(?:把|将|给|搜索|播放|查看|检查|打开|找到|找|取消|设置|发送|分享|发布|进入)",
             r"(?:去|进入)\s*([^，,。；;\s]+?)(?:\s*(?:app|应用|软件))?(?:里|上|中)?(?:[，,。；;]|$)",
@@ -3399,6 +3463,23 @@ class GuiAgent:
             AutonomyDecisionKind.HALT,
             AutonomyDecisionKind.S2_TAKEOVER,
         }
+
+    def _should_force_s2_for_global_step_budget(
+        self,
+        *,
+        global_step_count: int,
+        action: Action,
+        s2_guidance: list[str],
+    ) -> bool:
+        if self._global_s2_budget_hint_issued:
+            return False
+        if action.action_type in {"done", "request_intervention"}:
+            return False
+        if self._s2_llm is None or self._s2_max_hints <= 0:
+            return False
+        if len(s2_guidance) >= self._s2_max_hints:
+            return False
+        return global_step_count >= self._s2_global_step_hint_threshold
 
     async def _record_s2_guidance(
         self,

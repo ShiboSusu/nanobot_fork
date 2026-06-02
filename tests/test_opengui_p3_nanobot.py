@@ -698,6 +698,77 @@ async def test_execute_creates_fresh_trajectory_recorder(
     assert first["trace_path"] != second["trace_path"]
 
 
+@pytest.mark.asyncio
+async def test_gui_tool_passes_resolved_ios_app_hint_to_agent(
+    tmp_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nanobot.agent.tools.gui import GuiSubagentTool
+    from opengui.agent import AgentResult
+    from opengui.observation import Observation
+
+    captured_app_hints: list[str | None] = []
+
+    class FakeIosBackend:
+        platform = "ios"
+
+        async def preflight(self) -> None:
+            return None
+
+        async def list_apps(self) -> list[str]:
+            return ["哔哩哔哩: tv.danmaku.bilianime"]
+
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            del timeout
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            screenshot_path.write_bytes(b"png")
+            return Observation(
+                screenshot_path=str(screenshot_path),
+                screen_width=402,
+                screen_height=874,
+                foreground_app="com.apple.springboard",
+                platform="ios",
+            )
+
+        async def execute(self, action, timeout: float = 5.0) -> str:
+            del action, timeout
+            return "ok"
+
+    async def fake_run(self, task: str, *, max_retries: int = 3, app_hint: str | None = None):
+        del max_retries
+        captured_app_hints.append(app_hint)
+        self._trajectory_recorder.start()
+        self._trajectory_recorder.record_step(action={"action_type": "done"}, model_output="done")
+        trace_path = self._trajectory_recorder.finish(success=True)
+        return AgentResult(
+            success=True,
+            summary=f"completed {task}",
+            trace_path=str(trace_path),
+            steps_taken=1,
+            error=None,
+        )
+
+    monkeypatch.setattr(GuiSubagentTool, "_build_backend", lambda self, backend: FakeIosBackend())
+    monkeypatch.setattr("opengui.agent.GuiAgent.run", fake_run)
+    monkeypatch.setattr(
+        "opengui.postprocessing.PostRunProcessor._summarize_trajectory",
+        AsyncMock(return_value=""),
+    )
+
+    provider = _MockNanobotProvider([])
+    tool = GuiSubagentTool(
+        gui_config=Config(gui={"backend": "ios"}).gui,
+        provider=provider,
+        model=provider.get_default_model(),
+        workspace=tmp_workspace,
+    )
+
+    result = json.loads(await tool.execute(task="检查B站里我的关注列表设置是不是‘不公开’。"))
+
+    assert result["success"] is True
+    assert captured_app_hints == ["tv.danmaku.bilianime"]
+
+
 def test_agent_loop_registers_gui_tool(tmp_workspace: Path) -> None:
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
