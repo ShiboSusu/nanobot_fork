@@ -1259,6 +1259,8 @@ class GuiAgent:
         if self._active_retry_summaries:
             self._autonomy_monitor.mark_prior_attempt_progress()
         s2_guidance: list[str] = []
+        loop_guidance: list[str] = []
+        stagnation_completion_probe_used = False
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
         stagnation_streak = 0
@@ -1278,6 +1280,7 @@ class GuiAgent:
                 memory_context=memory_context,
                 skill_context=skill_context,
                 s2_guidance=s2_guidance,
+                loop_guidance=loop_guidance,
             )
             prompt_snapshot = self._snapshot_step_prompt(
                 task=task,
@@ -1561,6 +1564,66 @@ class GuiAgent:
                 chat_latency_s=result.chat_latency_s,
                 ttft_s=result.ttft_s,
             )
+
+            if (
+                monitor_decision.decision in {
+                    AutonomyDecisionKind.HALT,
+                    AutonomyDecisionKind.HUMAN_CONFIRM,
+                }
+                and not stagnation_completion_probe_used
+                and self._monitor_decision_is_repeated_no_progress(monitor_payload)
+                and self._should_probe_completion_before_stagnation(task, result)
+            ):
+                stagnation_completion_probe_used = True
+                loop_guidance.append(self._completion_probe_guidance())
+                await self._log_attempt_event(
+                    run_dir,
+                    "stagnation_completion_probe",
+                    step_index=step_index,
+                    monitor=monitor_payload,
+                )
+                history.append(
+                    HistoryTurn(
+                        step_index=step_index,
+                        observation=obs,
+                        assistant_message=self._scrub_assistant_message_for_log(
+                            result.assistant_message,
+                            result.action,
+                        ),
+                        tool_result_message={
+                            "role": "tool",
+                            "tool_call_id": result.tool_call_id,
+                            "content": self._scrub_text_for_action(
+                                result.tool_result,
+                                result.action,
+                            ),
+                        },
+                        action_summary=(
+                            self._scrub_text_for_action(
+                                result.action_summary,
+                                result.action,
+                            )
+                            or result.action_summary
+                        ),
+                        action_intent=(
+                            self._scrub_text_for_action(
+                                result.action_intent,
+                                result.action,
+                            )
+                            or result.action_intent
+                        ),
+                        state_summary=(
+                            self._scrub_text_for_action(
+                                result.state_summary,
+                                result.action,
+                            )
+                            or result.state_summary
+                        ),
+                    )
+                )
+                if result.next_observation is not None:
+                    obs = result.next_observation
+                continue
 
             if (
                 monitor_decision.decision == AutonomyDecisionKind.CHEAP_VERIFY
@@ -1887,16 +1950,35 @@ class GuiAgent:
                             ),
                         )
                     ]
+                    if (
+                        not stagnation_completion_probe_used
+                        and self._should_probe_completion_before_stagnation(task, result)
+                    ):
+                        stagnation_completion_probe_used = True
+                        loop_guidance.append(self._completion_probe_guidance())
+                        await self._log_attempt_event(
+                            run_dir,
+                            "stagnation_completion_probe",
+                            step_index=step_index,
+                            stagnation_streak=stagnation_streak,
+                            stagnation_limit=self.stagnation_limit,
+                            foreground_app=app_label,
+                        )
+                        history = history_with_current_step
+                        obs = result.next_observation
+                        continue
+
                     termination_summary = await self._generate_termination_summary(
                         task=task,
                         termination_reason=(
-                            "Detected unchanged screen state for "
+                            "Similar-screen loop detector fired after "
                             f"{stagnation_streak} consecutive step(s) in app {app_label}; "
-                            "task stopped to avoid repeating the same action loop."
+                            "determine whether the task is completed, partial, or blocked."
                         ),
                         history=history_with_current_step,
                         run_dir=run_dir,
                     )
+                    termination_status = self._status_from_state_note(termination_summary)
                     await self._log_attempt_event(
                         run_dir,
                         "stagnation_detected",
@@ -1905,6 +1987,16 @@ class GuiAgent:
                         stagnation_limit=self.stagnation_limit,
                         foreground_app=app_label,
                     )
+                    if termination_status == "completed":
+                        return AgentResult(
+                            success=True,
+                            summary=termination_summary,
+                            model_summary=result.state_summary or result.action_summary,
+                            trace_path=str(run_dir),
+                            steps_taken=steps_taken,
+                            error=None,
+                            token_usage=total_usage,
+                        )
                     return AgentResult(
                         success=False,
                         summary=termination_summary or self._build_state_note(
@@ -2341,7 +2433,8 @@ class GuiAgent:
             "然后", "之后", "接着", "再", "并", "并且", "同时",
             "点击", "点一下", "输入", "搜索框", "填写", "发送", "发消息",
             "购买", "付款", "登录", "选择", "切换", "查看", "进入", "改成",
-            "调到", "滑动", "播放", "找",
+            "调到", "滑动", "播放", "找", "取消", "收藏", "关注", "点赞",
+            "分享", "发布", "提交", "保存", "删除", "移除",
         )
         english_follow_up_terms = (
             "then", "and then", "tap", "click", "type", "send", "pay",
@@ -2367,6 +2460,7 @@ class GuiAgent:
         )
         patterns = (
             r"(?:打开|开启|启动|open|launch)\s*(.+)",
+            r"(?:去|进入)\s*([^，,。；;\s]+?)(?:\s*(?:app|应用|软件))?(?:里|上|中)?\s*(?:把|将|给|搜索|播放|查看|检查|打开|找到|找|取消|设置|发送|分享|发布|进入)",
             r"(?:去|进入)\s*([^，,。；;\s]+?)(?:\s*(?:app|应用|软件))?(?:里|上|中)?(?:[，,。；;]|$)",
             r"(?:查找|寻找|找到|搜索|find|search)\s*(.+)",
             r"(?:在|用)\s*([^，,。；;\s]+?)(?:\s*(?:app|应用|软件))?(?:里|上|中)?\s*(?:搜索|播放|查看|检查|进入|打开|找到|找)",
@@ -3035,6 +3129,7 @@ class GuiAgent:
         memory_context: str | None = None,
         skill_context: str | None = None,
         s2_guidance: list[str] | None = None,
+        loop_guidance: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the prompt for the current step.
 
@@ -3062,6 +3157,7 @@ class GuiAgent:
             app_hint=app_hint,
             skill_context=skill_context,
             s2_guidance=s2_guidance,
+            loop_guidance=loop_guidance,
         )
         messages.append(
             self._current_user_message(
@@ -3084,6 +3180,7 @@ class GuiAgent:
         app_hint: str | None,
         skill_context: str | None = None,
         s2_guidance: list[str] | None = None,
+        loop_guidance: list[str] | None = None,
     ) -> str:
         """Build the text prompt that frames the current step."""
         recent_intents = self._format_recent_intents(
@@ -3134,6 +3231,15 @@ class GuiAgent:
                 "\n".join(f"- {hint}" for hint in s2_guidance[-2:]),
                 "",
                 "Use this guidance to avoid repeating the failed pattern. Continue with the cheapest safe next GUI action.",
+            ])
+
+        if loop_guidance:
+            lines.extend([
+                "",
+                "Loop recovery guidance:",
+                "\n".join(f"- {hint}" for hint in loop_guidance[-2:]),
+                "",
+                "Use this guidance before choosing the next action.",
             ])
 
         if skill_context:
@@ -3361,6 +3467,60 @@ class GuiAgent:
         if status == "blocked":
             return "Resolve the blocker, then continue from the current screen."
         return "Resume from the current screen."
+
+    @staticmethod
+    def _should_probe_completion_before_stagnation(task: str, result: StepResult) -> bool:
+        if result.action.action_type not in {"tap", "click", "double_tap", "open_app", "enter"}:
+            return False
+        text = " ".join(
+            part
+            for part in (
+                task,
+                result.action_summary,
+                result.action_intent,
+                result.state_summary,
+                result.action.text,
+            )
+            if part
+        ).casefold()
+        if not text:
+            return False
+        terminal_terms = (
+            "取消", "关闭", "开启", "打开", "启用", "保存", "完成", "确认",
+            "选择", "发送", "分享", "提交", "删除", "移除", "收藏", "关注",
+            "点赞", "播放", "设为", "设置",
+            "cancel", "close", "open", "enable", "disable", "save", "done",
+            "confirm", "select", "send", "share", "submit", "delete", "remove",
+            "favorite", "follow", "like", "play",
+        )
+        return any(term in text for term in terminal_terms)
+
+    @staticmethod
+    def _monitor_decision_is_repeated_no_progress(monitor_payload: dict[str, Any]) -> bool:
+        signal_keys = set(monitor_payload.get("signal_keys") or ())
+        allowed_keys = {"screen_unchanged", "repeated_action", "step_budget_pressure"}
+        return (
+            {"screen_unchanged", "repeated_action"}.issubset(signal_keys)
+            and signal_keys.issubset(allowed_keys)
+        )
+
+    @staticmethod
+    def _completion_probe_guidance() -> str:
+        return (
+            "Before repeating the same terminal action, inspect the latest screen carefully. "
+            "If the requested task is already complete, call done(status=\"success\"). "
+            "If it is not complete, choose a different visible action or report the blocker; "
+            "do not repeat the same tap again."
+        )
+
+    @staticmethod
+    def _status_from_state_note(summary: str | None) -> str | None:
+        if not summary:
+            return None
+        match = re.search(r"(?im)^\s*Status:\s*(completed|partial|blocked)\b", summary)
+        if not match:
+            return None
+        return match.group(1).lower()
 
     async def _generate_termination_summary(
         self,

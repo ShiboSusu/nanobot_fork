@@ -249,6 +249,38 @@ async def test_ios_go_to_app_task_prelaunches_resolved_app(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_ios_go_to_app_without_punctuation_prelaunches_resolved_app(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Xiaohongshu is ready for the next GUI step.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-go-to-app-no-punctuation"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        installed_apps=["小红书: com.xingin.discover"],
+    )
+
+    await agent.run("去小红书把我收藏的第一篇笔记取消收藏。", max_retries=1)
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="com.xingin.discover")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ios_prelaunch_dismisses_visible_skip_control_before_llm(tmp_path: Path) -> None:
     class SplashBackend(_RecordingIosBackend):
         async def find_text_controls(self, texts: list[str]) -> list[dict[str, object]]:
@@ -2909,6 +2941,85 @@ async def test_agent_stagnation_requires_same_action_type(tmp_path: Path) -> Non
 
     assert result.success
     assert result.error is None
+
+
+@pytest.mark.asyncio
+async def test_stagnation_prompts_completion_check_for_repeated_terminal_tap(tmp_path: Path) -> None:
+    class _StaticScreenshotBackend(DryRunBackend):
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            del timeout
+            from PIL import Image
+
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (64, 64), color=(90, 90, 90)).save(
+                screenshot_path,
+                format="PNG",
+            )
+            return Observation(
+                screenshot_path=str(screenshot_path),
+                screen_width=64,
+                screen_height=64,
+                foreground_app="com.example.app",
+                platform=self.platform,
+            )
+
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="点击收藏按钮取消收藏",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 10,
+                    "y": 10,
+                    "relative": True,
+                },
+            )],
+        ),
+        LLMResponse(
+            content="点击收藏按钮取消收藏",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 10,
+                    "y": 10,
+                    "relative": True,
+                },
+            )],
+        ),
+        LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(
+                id="call-3",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
+    ])
+    agent = GuiAgent(
+        llm,
+        _StaticScreenshotBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "stagnation completion check"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        stagnation_limit=2,
+    )
+
+    result = await agent.run("把收藏的第一篇内容取消收藏", max_retries=1)
+
+    assert result.success
+    assert result.error is None
+    assert len(llm.calls) == 3
+    third_prompt = "\n".join(
+        block["text"]
+        for block in llm.calls[2][-1]["content"]
+        if block.get("type") == "text"
+    )
+    assert "Before repeating the same terminal action" in third_prompt
+    assert "call done(status=\"success\")" in third_prompt
 
 
 @pytest.mark.asyncio
