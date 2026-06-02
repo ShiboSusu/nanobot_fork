@@ -41,8 +41,8 @@ def test_gui_config_disables_planner_subtasks_by_default() -> None:
     assert GuiConfig().planner_subtasks_enabled is False
 
 
-def test_gui_config_default_planner_timeout_is_large_enough_for_remote_35b() -> None:
-    assert GuiConfig().planner_timeout_seconds == 30.0
+def test_gui_config_default_planner_timeout_does_not_block_simple_gui_tasks() -> None:
+    assert GuiConfig().planner_timeout_seconds == 8.0
 
 
 def test_provider_snapshots_keep_main_gui_s1_and_gui_s2_separate() -> None:

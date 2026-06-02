@@ -214,6 +214,41 @@ async def test_ios_compound_app_task_prelaunches_resolved_app(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_ios_go_to_app_task_prelaunches_resolved_app(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Dianping is ready for the next GUI step.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-go-to-app-prelaunch"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        installed_apps=["大众点评: com.dianping.dpscope"],
+    )
+
+    await agent.run(
+        "去大众点评，把我收藏的第二家餐厅通过微信分享给Su4o_，并告诉他'周末去这家'",
+        max_retries=1,
+    )
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="com.dianping.dpscope")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ios_prelaunch_dismisses_visible_skip_control_before_llm(tmp_path: Path) -> None:
     class SplashBackend(_RecordingIosBackend):
         async def find_text_controls(self, texts: list[str]) -> list[dict[str, object]]:

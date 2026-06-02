@@ -261,7 +261,7 @@ class AgentLoop:
                         gui_config.planner_confidence_threshold if gui_config else 0.65
                     ),
                     max_tokens=gui_config.planner_max_tokens if gui_config else 512,
-                    timeout_seconds=gui_config.planner_timeout_seconds if gui_config else 30.0,
+                    timeout_seconds=gui_config.planner_timeout_seconds if gui_config else 8.0,
                 ),
             )
             if gui_config is not None and gui_config.planner_enabled and planner_provider is not None
@@ -548,9 +548,6 @@ class AgentLoop:
             for term in self._problem_router._COMMON_APP_TERMS  # noqa: SLF001
             if term != "天气" and term in normalized
         }
-        if len(app_terms) >= 2:
-            return True
-
         handoff_terms = (
             "发给", "发送", "发消息", "分享", "转发", "告诉", "群发",
             "send", "share", "forward",
@@ -560,16 +557,26 @@ class AgentLoop:
             "火车", "高铁", "动车", "列车", "车次", "航班", "机票",
             "search", "look up", "weather", "news",
         )
+        discovery_terms = ("找到", "寻找", "搜索", "查找", "找", "search", "find", "look up")
+        high_planning_terms = (
+            "预订", "预约", "订票", "买票", "下单", "打车", "路线规划",
+            "比较", "筛选", "排序后", "如果", "再决定", "book", "reserve",
+        )
         if (
             any(term in normalized for term in handoff_terms)
             and any(term in normalized for term in query_terms)
         ):
             return True
 
-        high_planning_terms = (
-            "预订", "预约", "订票", "买票", "下单", "打车", "路线规划",
-            "比较", "筛选", "排序后", "如果", "再决定", "book", "reserve",
-        )
+        has_handoff = any(term in normalized for term in handoff_terms)
+        has_discovery = any(term in normalized for term in discovery_terms)
+        has_high_planning = any(term in normalized for term in high_planning_terms)
+        if has_handoff and len(app_terms) >= 2 and not has_discovery and not has_high_planning:
+            return False
+
+        if len(app_terms) >= 2:
+            return True
+
         return any(term in normalized for term in high_planning_terms)
 
     async def _plan_problem_route(

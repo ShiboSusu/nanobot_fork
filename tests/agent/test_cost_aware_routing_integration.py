@@ -207,6 +207,32 @@ async def test_simple_gui_route_skips_35b_planner(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_app_share_message_task_skips_35b_planner(tmp_path: Path) -> None:
+    loop = _make_loop_with_planner(
+        tmp_path,
+        '{"route":"plan","confidence":0.92,"reason":"Should not be needed",'
+        '"subtasks":[{"route":"gui_task","task":"unwanted planner task"}]}',
+    )
+    gui_tool = _FakeGuiTaskTool()
+    loop.tools.register(gui_tool)
+
+    task = "去大众点评，把我收藏的第二家餐厅通过微信分享给Su4o_，并告诉他'周末去这家'"
+    response = await loop._process_message(
+        InboundMessage(
+            channel="cli",
+            sender_id="u1",
+            chat_id="cli-chat",
+            content=task,
+        )
+    )
+
+    assert response is not None
+    assert "system action completed" in response.content
+    assert gui_tool.calls == [{"task": task}]
+    loop._main_planner.provider.chat_with_retry.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_35b_planner_subtask_queue_executes_system_then_gui(tmp_path: Path) -> None:
     loop = _make_loop_with_planner(
         tmp_path,

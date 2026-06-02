@@ -285,7 +285,7 @@ class GuiConfig(Base):
     planner_subtasks_enabled: bool = False
     planner_confidence_threshold: float = Field(default=0.65, ge=0.0, le=1.0)
     planner_max_tokens: int = Field(default=512, ge=1)
-    planner_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    planner_timeout_seconds: float = Field(default=8.0, gt=0.0)
     agent_profile: str | None = None
     adb: AdbConfig = Field(default_factory=AdbConfig)
     scrcpy: ScrcpyConfig = Field(default_factory=ScrcpyConfig)
