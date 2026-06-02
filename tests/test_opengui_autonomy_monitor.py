@@ -470,7 +470,7 @@ async def test_gui_agent_uses_s2_hint_for_amber_monitor_decision(tmp_path: Path)
     assert result.success is True
     assert len(s2.calls) == 1
     assert len(s1.calls) == 2
-    assert monitor.cumulative_risk >= 0.20
+    assert monitor.cumulative_risk < 0.20
     second_prompt = json.dumps(s1.calls[1], ensure_ascii=False)
     assert "Do not repeat the tap; verify the current page first." in second_prompt
 

@@ -1683,25 +1683,13 @@ class GuiAgent:
                 )
                 for k, v in usage.items():
                     total_usage[k] = total_usage.get(k, 0) + v
-                s2_guidance.append(hint)
-                await self._log_attempt_event(
+                await self._record_s2_guidance(
                     run_dir,
-                    "s2_guidance",
                     step_index=step_index,
                     model=self._s2_model,
                     hint=hint,
                     monitor=monitor_payload,
-                )
-                await self._write_trace(
-                    run_dir / "trace.jsonl",
-                    self._scrub_for_artifact({
-                        "event": "s2_guidance",
-                        "step_index": step_index,
-                        "model": self._s2_model,
-                        "hint": hint,
-                        "monitor": monitor_payload,
-                        "timestamp": time.time(),
-                    }),
+                    s2_guidance=s2_guidance,
                 )
                 history = history_with_current_step
                 if result.next_observation is not None:
@@ -1766,25 +1754,13 @@ class GuiAgent:
                     )
                     for k, v in usage.items():
                         total_usage[k] = total_usage.get(k, 0) + v
-                    s2_guidance.append(hint)
-                    await self._log_attempt_event(
+                    await self._record_s2_guidance(
                         run_dir,
-                        "s2_guidance",
                         step_index=step_index,
                         model=self._s2_model,
                         hint=hint,
                         monitor=monitor_payload,
-                    )
-                    await self._write_trace(
-                        run_dir / "trace.jsonl",
-                        self._scrub_for_artifact({
-                            "event": "s2_guidance",
-                            "step_index": step_index,
-                            "model": self._s2_model,
-                            "hint": hint,
-                            "monitor": monitor_payload,
-                            "timestamp": time.time(),
-                        }),
+                        s2_guidance=s2_guidance,
                     )
                     history = history_with_current_step
                     if result.next_observation is not None:
@@ -3314,6 +3290,38 @@ class GuiAgent:
             AutonomyDecisionKind.HALT,
             AutonomyDecisionKind.S2_TAKEOVER,
         }
+
+    async def _record_s2_guidance(
+        self,
+        run_dir: Path,
+        *,
+        step_index: int,
+        model: str | None,
+        hint: str,
+        monitor: dict[str, Any],
+        s2_guidance: list[str],
+    ) -> None:
+        s2_guidance.append(hint)
+        self._autonomy_monitor.mark_s2_guidance_issued()
+        await self._log_attempt_event(
+            run_dir,
+            "s2_guidance",
+            step_index=step_index,
+            model=model,
+            hint=hint,
+            monitor=monitor,
+        )
+        await self._write_trace(
+            run_dir / "trace.jsonl",
+            self._scrub_for_artifact({
+                "event": "s2_guidance",
+                "step_index": step_index,
+                "model": model,
+                "hint": hint,
+                "monitor": monitor,
+                "timestamp": time.time(),
+            }),
+        )
 
     async def _request_s2_guidance(
         self,

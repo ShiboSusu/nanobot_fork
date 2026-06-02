@@ -1562,6 +1562,31 @@ async def test_s2_guidance_prompt_references_mobileworld_execution_contract(tmp_
     assert "click or focus the input box before using input_text" in system_prompt
 
 
+@pytest.mark.asyncio
+async def test_agent_discounts_autonomy_risk_after_s2_guidance(tmp_path: Path) -> None:
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "s2 discount"),
+        artifacts_root=tmp_path / "runs",
+    )
+    agent._autonomy_monitor.cumulative_risk = 0.75
+    agent._trajectory_recorder.start()
+    guidance: list[str] = []
+
+    await agent._record_s2_guidance(
+        run_dir=tmp_path / "runs",
+        step_index=1,
+        model="s2-test",
+        hint="Re-open the target app and continue.",
+        monitor={"decision": "HALT", "signal_keys": ["app_mismatch"]},
+        s2_guidance=guidance,
+    )
+
+    assert guidance == ["Re-open the target app and continue."]
+    assert agent._autonomy_monitor.cumulative_risk < agent._autonomy_monitor.horizon_threshold
+
+
 def test_qwen3vl_profile_prefers_content_contract_over_provider_tool_calls() -> None:
     response = LLMResponse(
         content=(
