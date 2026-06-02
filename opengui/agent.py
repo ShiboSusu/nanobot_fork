@@ -1705,6 +1705,10 @@ class GuiAgent:
                 history = history_with_current_step
                 if result.next_observation is not None:
                     obs = result.next_observation
+                    if self.stagnation_limit > 0:
+                        previous_fingerprint = self._build_screen_fingerprint(obs)
+                        previous_action_type = None
+                        stagnation_streak = 0
                 continue
 
             if monitor_decision.decision in {
@@ -1776,6 +1780,10 @@ class GuiAgent:
                     history = history_with_current_step
                     if result.next_observation is not None:
                         obs = result.next_observation
+                        if self.stagnation_limit > 0:
+                            previous_fingerprint = self._build_screen_fingerprint(obs)
+                            previous_action_type = None
+                            stagnation_streak = 0
                     continue
 
                 await self._log_attempt_event(

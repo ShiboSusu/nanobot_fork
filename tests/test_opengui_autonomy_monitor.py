@@ -483,6 +483,129 @@ async def test_gui_agent_uses_s2_hint_for_amber_monitor_decision(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_gui_agent_resets_stagnation_after_s2_recovery(tmp_path: Path) -> None:
+    class _RecoveringBackend:
+        platform = "ios"
+
+        def __init__(self) -> None:
+            self.execute_calls: list[Action] = []
+
+        async def preflight(self) -> None:
+            return None
+
+        async def list_apps(self) -> list[str]:
+            return []
+
+        async def execute(self, action: Action, timeout: float = 5.0) -> str:
+            del timeout
+            self.execute_calls.append(action)
+            return "ok"
+
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            del timeout
+            if screenshot_path.name in {"step_002.png", "step_002_reobserve_1.png"}:
+                return _observation(
+                    screenshot_path,
+                    app="com.apple.springboard",
+                    data=b"home-screen",
+                )
+            return _observation(
+                screenshot_path,
+                app="com.xingin.discover",
+                data=b"collection-list",
+            )
+
+    backend = _RecoveringBackend()
+    s1 = _RecordingLLM([
+        LLMResponse(
+            content="Action: tap first note",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 500,
+                        "y": 756,
+                        "summary": "点击收藏列表中的第一篇笔记",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: wait",
+            tool_calls=[
+                ToolCall(
+                    id="call-2",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "wait",
+                        "summary": "等待页面恢复",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: tap Xiaohongshu",
+            tool_calls=[
+                ToolCall(
+                    id="call-3",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 500,
+                        "y": 500,
+                        "summary": "重新打开小红书应用",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-4",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "summary": "已恢复并继续完成任务",
+                    },
+                )
+            ],
+        ),
+    ])
+    s2 = _RecordingLLM([
+        LLMResponse(content='{"route":"S2_HINT","hint":"重新打开小红书后继续，不要因为回到收藏列表就停止。"}')
+    ])
+    task = "去小红书把我收藏的第一篇笔记取消收藏。"
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task=task, platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=5,
+        include_date_context=False,
+        stagnation_limit=1,
+        s2_llm=s2,
+        s2_model="qwen3.5-397b-a17b",
+        s2_max_hints=1,
+    )
+
+    result = await agent.run(task, max_retries=1, app_hint="com.xingin.discover")
+
+    assert result.success is True
+    assert len(s2.calls) == 1
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "s2_guidance" for event in trace_events)
+    assert not any(event["event"] == "stagnation_detected" for event in trace_events)
+
+
+@pytest.mark.asyncio
 async def test_gui_agent_rejects_unverified_first_step_done(tmp_path: Path) -> None:
     monitor = AutonomyMonitor()
     backend = _StaticScreenBackend()
