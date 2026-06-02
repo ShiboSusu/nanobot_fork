@@ -246,6 +246,46 @@ async def test_ios_check_app_task_prelaunches_resolved_app(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_ios_open_app_then_read_content_prelaunches_without_direct_completion(
+    tmp_path: Path,
+) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Read the requested ranking item.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-open-then-read"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+        installed_apps=["微博: com.sina.weibo"],
+    )
+
+    result = await agent.run("打开微博,看看今天热搜榜的第三名是什么", max_retries=1)
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="com.sina.weibo")
+    ]
+    assert result.model_summary != "Directly opened iOS app com.sina.weibo."
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "prelaunch" for event in trace_events)
+
+
+@pytest.mark.asyncio
 async def test_ios_explicit_app_hint_prelaunches_before_free_exploration(tmp_path: Path) -> None:
     backend = _RecordingIosBackend()
     agent = GuiAgent(
