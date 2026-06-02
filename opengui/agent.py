@@ -891,6 +891,9 @@ class GuiAgent:
     _NO_SETTLE_ACTIONS = frozenset({"wait", "done", "request_intervention"})
     _STAGNATION_SSIM_SIZE = 64
     _STAGNATION_SSIM_THRESHOLD = 0.985
+    _IOS_TRANSIENT_SYSTEM_APPS = frozenset({
+        "com.apple.springboard",
+    })
 
     def __init__(
         self,
@@ -1464,6 +1467,14 @@ class GuiAgent:
                         )
                     ]
                     summary_observation = result.next_observation or obs
+
+            result = await self._refresh_transient_ios_system_observation(
+                run_dir=run_dir,
+                step_index=step_index,
+                expected_app=effective_app_hint,
+                current_observation=obs,
+                result=result,
+            )
 
             trace_observation = result.next_observation or obs
             monitor_decision = self._autonomy_monitor.assess_step(
@@ -2075,6 +2086,96 @@ class GuiAgent:
             ),
             token_usage=total_usage,
         )
+
+    async def _refresh_transient_ios_system_observation(
+        self,
+        *,
+        run_dir: Path,
+        step_index: int,
+        expected_app: str | None,
+        current_observation: Observation,
+        result: StepResult,
+    ) -> StepResult:
+        next_observation = result.next_observation
+        if not self._should_reobserve_transient_ios_system_app(
+            expected_app=expected_app,
+            current_observation=current_observation,
+            next_observation=next_observation,
+        ):
+            return result
+
+        await asyncio.sleep(0.25)
+        reobserve_path = run_dir / "screenshots" / f"step_{step_index:03d}_reobserve_1.png"
+        try:
+            refreshed = await self.backend.observe(
+                reobserve_path,
+                timeout=self.step_timeout,
+            )
+        except Exception as exc:
+            await self._log_attempt_event(
+                run_dir,
+                "transient_ios_system_observation_reobserve_failed",
+                step_index=step_index,
+                expected_app=expected_app,
+                current_observation=self._serialize_observation(current_observation),
+                next_observation=self._serialize_observation(next_observation),
+                error=str(exc),
+            )
+            return result
+
+        accepted = self._observation_matches_app(expected_app, refreshed)
+        await self._log_attempt_event(
+            run_dir,
+            "transient_ios_system_observation_reobserved",
+            step_index=step_index,
+            expected_app=expected_app,
+            current_observation=self._serialize_observation(current_observation),
+            next_observation=self._serialize_observation(next_observation),
+            refreshed_observation=self._serialize_observation(refreshed),
+            accepted=accepted,
+        )
+        if not accepted:
+            return result
+
+        execution_snapshot = {
+            **(result.execution_snapshot or {}),
+            "next_observation": self._serialize_observation(refreshed),
+            "transient_ios_system_observation": {
+                "original": self._serialize_observation(next_observation),
+                "refreshed": self._serialize_observation(refreshed),
+            },
+        }
+        return replace(
+            result,
+            next_observation=refreshed,
+            execution_snapshot=execution_snapshot,
+        )
+
+    def _should_reobserve_transient_ios_system_app(
+        self,
+        *,
+        expected_app: str | None,
+        current_observation: Observation,
+        next_observation: Observation | None,
+    ) -> bool:
+        if self.backend.platform != "ios":
+            return False
+        if not expected_app or next_observation is None:
+            return False
+        if not self._observation_matches_app(expected_app, current_observation):
+            return False
+        if self._observation_matches_app(expected_app, next_observation):
+            return False
+        actual = (next_observation.foreground_app or "").casefold()
+        return actual in self._IOS_TRANSIENT_SYSTEM_APPS
+
+    @staticmethod
+    def _observation_matches_app(expected_app: str | None, observation: Observation | None) -> bool:
+        if not expected_app or observation is None:
+            return False
+        actual = (observation.foreground_app or "").casefold()
+        expected = expected_app.casefold()
+        return bool(actual and expected and expected in actual)
 
     async def _try_direct_system_action(
         self,

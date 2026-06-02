@@ -387,6 +387,84 @@ async def test_ios_prelaunch_sets_expected_app_hint_for_monitor(tmp_path: Path) 
     assert "app_mismatch" in step_event["autonomy_monitor"]["signal_keys"]
 
 
+@pytest.mark.asyncio
+async def test_ios_transient_springboard_overlay_is_reobserved_before_app_mismatch(tmp_path: Path) -> None:
+    class TransientSpringboardBackend(_RecordingIosBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.step_one_observations = 0
+
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            observation = await super().observe(screenshot_path, timeout=timeout)
+            if screenshot_path.name == "step_001.png":
+                self.step_one_observations += 1
+                return Observation(
+                    screenshot_path=observation.screenshot_path,
+                    screen_width=observation.screen_width,
+                    screen_height=observation.screen_height,
+                    foreground_app="com.apple.springboard",
+                    platform=observation.platform,
+                )
+            if screenshot_path.name == "step_001_reobserve_1.png":
+                self.step_one_observations += 1
+            return observation
+
+    backend = TransientSpringboardBackend()
+    s1 = _ScriptedLLM([
+        LLMResponse(
+            content="tap first note",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 250,
+                    "y": 700,
+                    "summary": "点击收藏列表中的第一篇笔记",
+                },
+            )],
+        ),
+        LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={
+                    "action_type": "done",
+                    "status": "success",
+                    "summary": "第一篇笔记已取消收藏",
+                },
+            )],
+        ),
+    ])
+    s2 = _RecordingLLM([
+        LLMResponse(content='{"route":"S2_HINT","hint":"should not be called"}')
+    ])
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-transient-springboard"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        installed_apps=["小红书: com.xingin.discover"],
+        s2_llm=s2,
+        s2_model="qwen3.5-397b-a17b",
+    )
+
+    result = await agent.run("去小红书把我收藏的第一篇笔记取消收藏。", max_retries=1)
+
+    assert result.success is True
+    assert backend.step_one_observations == 2
+    assert s2.calls == []
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "transient_ios_system_observation_reobserved" for event in trace_events)
+    first_step = next(event for event in trace_events if event["event"] == "step")
+    assert "app_mismatch" not in first_step["autonomy_monitor"]["signal_keys"]
+
+
 def test_ios_app_lookup_task_uses_direct_bundle_launch(tmp_path: Path) -> None:
     backend = _RecordingIosBackend()
     agent = GuiAgent(
