@@ -1261,6 +1261,7 @@ class GuiAgent:
         s2_guidance: list[str] = []
         loop_guidance: list[str] = []
         stagnation_completion_probe_used = False
+        terminal_toggle_guard: tuple[Action, str | None, str | None] | None = None
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
         stagnation_streak = 0
@@ -1299,6 +1300,7 @@ class GuiAgent:
                         step_index=step_index,
                         total_steps=self.max_steps,
                         current_observation=obs,
+                        terminal_toggle_guard=terminal_toggle_guard,
                     ),
                     timeout=self.step_timeout * 3,
                 )
@@ -1890,6 +1892,17 @@ class GuiAgent:
                     ),
                     token_usage=total_usage,
                 )
+
+            if self._should_probe_completion_before_stagnation(task, result):
+                terminal_toggle_guard = (
+                    result.action,
+                    result.action_summary,
+                    result.action_intent or result.state_summary,
+                )
+                if self._completion_probe_guidance() not in loop_guidance:
+                    loop_guidance.append(self._completion_probe_guidance())
+            else:
+                terminal_toggle_guard = None
 
             if self.stagnation_limit > 0 and result.next_observation is not None:
                 current_fingerprint = self._build_screen_fingerprint(result.next_observation)
@@ -2490,6 +2503,7 @@ class GuiAgent:
         step_index: int,
         total_steps: int,
         current_observation: Observation,
+        terminal_toggle_guard: tuple[Action, str | None, str | None] | None = None,
     ) -> StepResult:
         """Execute a single vision-action step with retries on malformed calls."""
         _step_start = time.monotonic()
@@ -2652,6 +2666,38 @@ class GuiAgent:
                     duration_s=time.monotonic() - _step_start,
                     chat_latency_s=step_chat_latency_s or None,
                     ttft_s=step_ttft_s,
+                )
+
+            if self._is_duplicate_terminal_toggle_action(
+                task=task,
+                previous=terminal_toggle_guard,
+                action=action,
+                action_summary=action_summary,
+                state_summary=state_summary,
+            ):
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": (
+                        "Error: this terminal toggle action was just executed. "
+                        "Do not tap the same toggle again because it may reverse the "
+                        "completed state. Inspect the screen; if the requested state is "
+                        "already achieved, call done(status=\"success\"). Otherwise choose "
+                        "a different verification or recovery action."
+                    ),
+                })
+                model_snapshot = {
+                    **(model_snapshot or {}),
+                    "terminal_toggle_guard": {
+                        "resample_requested": True,
+                        "original_action": self._serialize_action(action),
+                    },
+                }
+                if retries_left > 0:
+                    continue
+                raise _StepExecutionError(
+                    "Terminal toggle guard rejected a duplicate final tap after retries.",
+                    model_snapshot=model_snapshot,
                 )
 
             pre_action_decision = self._autonomy_monitor.assess_pre_action(
@@ -3503,6 +3549,58 @@ class GuiAgent:
             {"screen_unchanged", "repeated_action"}.issubset(signal_keys)
             and signal_keys.issubset(allowed_keys)
         )
+
+    @classmethod
+    def _is_duplicate_terminal_toggle_action(
+        cls,
+        *,
+        task: str,
+        previous: tuple[Action, str | None, str | None] | None,
+        action: Action,
+        action_summary: str | None,
+        state_summary: str | None,
+    ) -> bool:
+        if previous is None:
+            return False
+        previous_action, previous_summary, previous_state = previous
+        if previous_action.action_type not in {"tap", "click", "double_tap"}:
+            return False
+        if action.action_type not in {"tap", "click", "double_tap"}:
+            return False
+        if not cls._actions_are_spatially_close(previous_action, action):
+            return False
+
+        previous_text = " ".join(
+            part for part in (task, previous_summary, previous_state, previous_action.text) if part
+        )
+        current_text = " ".join(
+            part for part in (task, action_summary, state_summary, action.text) if part
+        )
+        return (
+            cls._terminal_toggle_text(previous_text)
+            and cls._terminal_toggle_text(current_text)
+        )
+
+    @staticmethod
+    def _actions_are_spatially_close(previous: Action, current: Action) -> bool:
+        if previous.x is None or previous.y is None or current.x is None or current.y is None:
+            return False
+        if previous.relative != current.relative:
+            return False
+        return abs(previous.x - current.x) <= 80 and abs(previous.y - current.y) <= 80
+
+    @staticmethod
+    def _terminal_toggle_text(text: str | None) -> bool:
+        normalized = (text or "").casefold()
+        if not normalized:
+            return False
+        phrases = (
+            "取消收藏", "取消关注", "取消点赞", "取消喜欢", "关闭", "关掉",
+            "开启", "打开开关", "启用", "停用", "设为", "保存",
+            "unfavorite", "unfollow", "unlike", "turn off", "turn on",
+            "disable", "enable", "save",
+        )
+        return any(phrase in normalized for phrase in phrases)
 
     @staticmethod
     def _completion_probe_guidance() -> str:

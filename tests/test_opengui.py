@@ -3013,13 +3013,92 @@ async def test_stagnation_prompts_completion_check_for_repeated_terminal_tap(tmp
     assert result.success
     assert result.error is None
     assert len(llm.calls) == 3
-    third_prompt = "\n".join(
-        block["text"]
-        for block in llm.calls[2][-1]["content"]
-        if block.get("type") == "text"
+    third_prompt = json.dumps(llm.calls[2], ensure_ascii=False)
+    assert "terminal toggle action was just executed" in third_prompt
+    assert "done(status=" in third_prompt
+    assert "success" in third_prompt
+
+
+@pytest.mark.asyncio
+async def test_agent_resamples_duplicate_terminal_toggle_tap(tmp_path: Path) -> None:
+    class _RecordingStaticBackend(DryRunBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.actions: list[Action] = []
+
+        async def execute(self, action: Action, timeout: float = 5.0) -> str:
+            self.actions.append(action)
+            return await super().execute(action, timeout=timeout)
+
+        async def observe(self, screenshot_path: Path, timeout: float = 5.0) -> Observation:
+            del timeout
+            from PIL import Image
+
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (64, 64), color=(90, 90, 90)).save(
+                screenshot_path,
+                format="PNG",
+            )
+            return Observation(
+                screenshot_path=str(screenshot_path),
+                screen_width=64,
+                screen_height=64,
+                foreground_app="com.example.app",
+                platform=self.platform,
+            )
+
+    backend = _RecordingStaticBackend()
+    llm = _RecordingLLM([
+        LLMResponse(
+            content="点击收藏按钮取消收藏",
+            tool_calls=[ToolCall(
+                id="call-1",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 658,
+                    "y": 932,
+                    "relative": True,
+                },
+            )],
+        ),
+        LLMResponse(
+            content="点击收藏按钮取消收藏",
+            tool_calls=[ToolCall(
+                id="call-2",
+                name="computer_use",
+                arguments={
+                    "action_type": "tap",
+                    "x": 649,
+                    "y": 939,
+                    "relative": True,
+                },
+            )],
+        ),
+        LLMResponse(
+            content="done",
+            tool_calls=[ToolCall(
+                id="call-3",
+                name="computer_use",
+                arguments={"action_type": "done", "status": "success"},
+            )],
+        ),
+    ])
+    agent = GuiAgent(
+        llm,
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "duplicate terminal toggle"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        stagnation_limit=3,
     )
-    assert "Before repeating the same terminal action" in third_prompt
-    assert "call done(status=\"success\")" in third_prompt
+
+    result = await agent.run("把收藏的第一篇内容取消收藏", max_retries=1)
+
+    assert result.success
+    executed_taps = [action for action in backend.actions if action.action_type == "tap"]
+    assert len(executed_taps) == 1
+    assert len(llm.calls) == 3
 
 
 @pytest.mark.asyncio
