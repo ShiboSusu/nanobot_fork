@@ -134,6 +134,13 @@ The verifier should produce:
 }
 ```
 
+The first verifier version should be rule-first and template-based. S2 may
+assist by producing OCR summaries, candidate slots, or a proposed verdict for
+audit, but S2 should not be the only judge of S2's own task completion. The
+controller should prefer deterministic checks for dates, ranking markers,
+route fields, setting labels, status words, and requested answer slots wherever
+those checks are feasible.
+
 ### Controller
 
 The controller converts monitor evidence and verifier output into one route:
@@ -167,6 +174,19 @@ Initial route rules:
 `S2_GUIDE` is allowed at most once per attempt in the first version. Repeated
 hint loops are not allowed as the recovery strategy.
 
+`S2_TAKEOVER` also has hard prerequisites. A controller may only route to live
+takeover when:
+
+- the current screenshot exists;
+- either S2 is confirmed visual-capable or a reliable screen summary is
+  available;
+- the S2 action schema adapter is available;
+- the safety filter is available;
+- the task is not blocked by a policy requiring human confirmation.
+
+If any prerequisite is missing, the controller must route to `S2_VERIFY`,
+`HALT`, or `HUMAN_CONFIRM`, not live takeover.
+
 ### S2 Takeover Executor
 
 S2 takeover is an execution phase, not a prompt note. When the route is
@@ -187,6 +207,35 @@ S2 takeover must use a different control policy from S1:
 Once takeover starts, the task is not handed back to S1. S2 is responsible for
 verified completion, safe stop, human confirmation, or explicit failure.
 
+## S2 Action Output Schema
+
+Each S2 takeover step must return parseable action JSON. Natural-language hints
+are not accepted as takeover actions.
+
+Required schema:
+
+```json
+{
+  "route": "continue | done | halt | human_confirm",
+  "action": {
+    "type": "click | type | swipe | wait | back | home | done",
+    "arguments": {}
+  },
+  "reason": "short trace-grounded reason for this action",
+  "semantic_target": "constraint or subgoal this action advances",
+  "safety_check": {
+    "side_effect": false,
+    "requires_human_confirm": false
+  }
+}
+```
+
+The action schema is an interchange format. Before execution it must be adapted
+to the existing OpenGUI `Action` representation and pass parser, adapter, and
+safety-filter checks. If the JSON cannot be parsed or adapted, the controller
+must reject the step and halt or request a new S2 action within the takeover
+budget.
+
 ## S2 Capability Gate
 
 Before live takeover, the system must verify S2 capability.
@@ -200,10 +249,20 @@ Required checks:
 5. Schema parse success over repeated calls.
 6. Latency measurement.
 7. Confirmation that screenshot input is actually supported.
+8. Image-use contrast test: the same task with two materially different
+   screenshots should produce screenshot-sensitive actions or verdicts.
+9. `schema_parse_success >= 3/3`.
+10. `action_adapter_success >= 3/3`.
+11. `unsafe_action_filter_pass >= 3/3`.
 
 If S2 cannot consume screenshots, it cannot be treated as a GUI takeover actor.
 It may still serve as a text-only verifier/planner using OCR or screen
 summaries, but the live actor role should remain disabled.
+
+The image-use contrast test is required because an endpoint may accept image
+payloads without the model meaningfully using them. For example, a date-picker
+screenshot and a browser-page screenshot for the same date task should not yield
+the same next action.
 
 ## Handoff Packet
 
@@ -234,7 +293,20 @@ Packet schema:
         "result": "no semantic progress"
       }
     ],
-    "failure_pattern": "..."
+    "failure_pattern": "...",
+    "s1_failure_hypothesis": {
+      "likely_wrong_assumption": "...",
+      "do_not_repeat": [
+        "scroll down repeatedly without checking the visible month"
+      ],
+      "known_bad_actions": [
+        {
+          "step": 12,
+          "action": "scroll down",
+          "reason": "no semantic progress"
+        }
+      ]
+    }
   },
   "monitor_evidence": {
     "signals": ["repeated_action", "step_budget_pressure"],
@@ -276,7 +348,9 @@ S2 takeover must be bounded.
 
 Initial defaults:
 
-- `max_s2_takeover_steps`: 8 for normal U0/U1 tasks.
+- live smoke: `max_s2_takeover_steps = 3`.
+- U0/U1 pilot: `max_s2_takeover_steps = 6`.
+- broader pilot: `max_s2_takeover_steps = 8`.
 - `max_s2_takeover_tokens`: configured per deployment.
 - `max_s2_wall_time_s`: configured per deployment.
 - `max_repeated_action`: 1 repeated action unless the screen changed.
@@ -294,7 +368,7 @@ Minimum trace fields:
 ```json
 {
   "phase": "s1 | s2_takeover",
-  "actor_model": "qwen3-vl-9b | qwen3.5-397b-a17b",
+  "actor_model": "qwen3.5-9b | qwen3.5-397b-a17b",
   "controller_route": "S1_CONTINUE | S2_TAKEOVER | ...",
   "takeover_reason": "...",
   "monitor_evidence": {},
@@ -324,6 +398,9 @@ Primary metrics:
 - `cost_normalized_success`
 - `takeover_salvage_rate`
 - `false_done_rate`
+- `takeover_precision`
+- `takeover_recall_for_s1_failures`
+- `unnecessary_takeover_rate`
 
 Secondary metrics:
 
@@ -342,6 +419,12 @@ Secondary metrics:
 `takeover_salvage_rate` is defined as the fraction of tasks where S1 triggered
 a takeover condition and S2 takeover achieved verified success.
 
+`takeover_precision` is the fraction of takeover-triggered tasks where takeover
+was necessary or S2 successfully salvaged the task. `unnecessary_takeover_rate`
+tracks tasks where S1 likely would have completed without S2. These metrics are
+needed to ensure the controller is not improving raw success merely by calling
+S2 too often.
+
 ## Implementation Stages
 
 Stage 0: Baseline hygiene
@@ -354,6 +437,11 @@ Stage 1: S2 capability smoke
 - Use saved screenshots and tasks.
 - Do not operate the device.
 - Confirm S2 can emit parseable action JSON.
+- Run the image-use contrast test.
+- Confirm parser, action adapter, and safety filter success.
+- Do not modify the controller.
+- Do not run live takeover.
+- Do not run U0/U1 pilot tasks.
 
 Stage 2: Handoff packet and offline dry run
 
@@ -423,10 +511,13 @@ The first milestone is complete when:
 
 1. S2 capability smoke reports whether the 397B endpoint can act as a visual
    GUI executor.
-2. Failed traces can be converted into handoff packets.
-3. S2 can produce parseable offline recovery actions for at least three saved
+2. The image-use contrast test demonstrates screenshot-sensitive behavior.
+3. S2 action JSON passes parser, adapter, and safety-filter checks at least
+   three times in a row.
+4. Failed traces can be converted into handoff packets.
+5. S2 can produce parseable offline recovery actions for at least three saved
    traces.
-4. The trace schema can represent `phase=s2_takeover`, controller route,
+6. The trace schema can represent `phase=s2_takeover`, controller route,
    takeover reason, budgets, and verified success fields.
-5. No live S2 action is executed before passing the capability and offline dry
+7. No live S2 action is executed before passing the capability and offline dry
    run gates.
