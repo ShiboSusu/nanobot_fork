@@ -203,29 +203,24 @@ def actions_are_materially_different(
     if (first.action is None) != (second.action is None):
         return True
     if first.action is None and second.action is None:
-        return first.semantic_target != second.semantic_target
+        return False
 
     assert first.action is not None
     assert second.action is not None
-    return (
-        first.action.action_type,
-        first.action.x,
-        first.action.y,
-        first.action.x2,
-        first.action.y2,
-        first.action.text,
-        first.action.status,
-        first.semantic_target,
-    ) != (
-        second.action.action_type,
-        second.action.x,
-        second.action.y,
-        second.action.x2,
-        second.action.y2,
-        second.action.text,
-        second.action.status,
-        second.semantic_target,
-    )
+    return first.action != second.action
+
+
+def _messages_contain_image_url(messages: Sequence[Mapping[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(block, Mapping) and block.get("type") == "image_url"
+            for block in content
+        ):
+            return True
+    return False
 
 
 async def _run_case(
@@ -238,11 +233,14 @@ async def _run_case(
 ) -> tuple[S2SmokeCaseResult, S2ActionCandidate | None]:
     started = time.perf_counter()
     raw_content = ""
+    usage: dict[str, int] = {}
+    schema_parse_success = False
+    action_adapter_success = False
     try:
         messages = build_s2_action_messages(
             task=task,
             screenshot_path=case.screenshot_path,
-            case_name=case.name,
+            case_name="image_contrast",
         )
         response = await provider.chat_with_retry(
             messages=messages,
@@ -251,8 +249,17 @@ async def _run_case(
             temperature=0,
         )
         raw_content = response.content or ""
+        usage = dict(response.usage or {})
+        if response.finish_reason == "error":
+            raise S2CapabilityError("Provider returned finish_reason='error'.")
+        if not _messages_contain_image_url(messages):
+            raise S2CapabilityError(
+                "Provider retry/fallback completed without image content."
+            )
         payload = extract_json_object(raw_content)
+        schema_parse_success = True
         candidate = adapt_s2_action_output(payload)
+        action_adapter_success = True
         filter_pass = safety_filter_passed(candidate)
         result = S2SmokeCaseResult(
             name=case.name,
@@ -262,12 +269,12 @@ async def _run_case(
             action_type=candidate.action.action_type if candidate.action else None,
             reason=candidate.reason,
             semantic_target=candidate.semantic_target,
-            schema_parse_success=True,
-            action_adapter_success=True,
+            schema_parse_success=schema_parse_success,
+            action_adapter_success=action_adapter_success,
             unsafe_action_filter_pass=filter_pass,
             error=None,
             latency_s=time.perf_counter() - started,
-            usage=dict(response.usage or {}),
+            usage=usage,
         )
         return result, candidate
     except Exception as exc:
@@ -279,12 +286,12 @@ async def _run_case(
             action_type=None,
             reason="",
             semantic_target="",
-            schema_parse_success=False,
-            action_adapter_success=False,
+            schema_parse_success=schema_parse_success,
+            action_adapter_success=action_adapter_success,
             unsafe_action_filter_pass=False,
             error=f"{type(exc).__name__}: {exc}",
             latency_s=time.perf_counter() - started,
-            usage={},
+            usage=usage,
         )
         return result, None
 
@@ -336,6 +343,8 @@ async def run_s2_capability_smoke(
         len(candidates) == 2
         and candidates[0] is not None
         and candidates[1] is not None
+        and case_results[0].unsafe_action_filter_pass
+        and case_results[1].unsafe_action_filter_pass
         and actions_are_materially_different(candidates[0], candidates[1])
     )
 

@@ -37,6 +37,22 @@ class FakeProvider:
         return LLMResponse(content=response, usage={"total_tokens": 10})
 
 
+class ImageStrippingProvider:
+    async def chat_with_retry(self, **kwargs) -> LLMResponse:
+        messages = kwargs["messages"]
+        messages[1]["content"] = [
+            block for block in messages[1]["content"] if block["type"] != "image_url"
+        ]
+        return LLMResponse(
+            content="""{
+                "route": "continue",
+                "action": {"type": "back", "arguments": {}},
+                "safety_check": {}
+            }""",
+            usage={"total_tokens": 7},
+        )
+
+
 def test_extract_json_object_strips_markdown_wrapper() -> None:
     content = '```json\n{"route":"halt","reason":"blocked"}\n```'
 
@@ -245,6 +261,33 @@ def test_actions_are_materially_different() -> None:
     assert actions_are_materially_different(first, second) is True
 
 
+def test_actions_are_not_materially_different_for_same_action_with_different_prose() -> None:
+    first = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {
+                "type": "click",
+                "arguments": {"x": 100, "y": 200},
+            },
+            "semantic_target": "select_date",
+            "safety_check": {},
+        }
+    )
+    second = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {
+                "type": "click",
+                "arguments": {"x": 100, "y": 200},
+            },
+            "semantic_target": "different_description",
+            "safety_check": {},
+        }
+    )
+
+    assert actions_are_materially_different(first, second) is False
+
+
 async def test_run_s2_capability_smoke_passes_with_contrasting_actions(
     tmp_path: Path,
 ) -> None:
@@ -287,6 +330,33 @@ async def test_run_s2_capability_smoke_passes_with_contrasting_actions(
     assert len(provider.calls) == 2
 
 
+async def test_run_s2_capability_smoke_uses_identical_text_for_contrast_cases(
+    tmp_path: Path,
+) -> None:
+    screen_a = tmp_path / "date_picker.png"
+    screen_b = tmp_path / "wrong_page.png"
+    screen_a.write_bytes(PNG_1X1)
+    screen_b.write_bytes(PNG_1X1)
+    provider = FakeProvider(
+        [
+            '{"route":"continue","action":{"type":"back","arguments":{}},"safety_check":{}}',
+            '{"route":"continue","action":{"type":"home","arguments":{}},"safety_check":{}}',
+        ]
+    )
+
+    await run_s2_capability_smoke(
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen_a),
+        case_b=S2SmokeCase(name="wrong_page", screenshot_path=screen_b),
+    )
+
+    first_text = provider.calls[0]["messages"][1]["content"][1]["text"]
+    second_text = provider.calls[1]["messages"][1]["content"][1]["text"]
+    assert first_text == second_text
+
+
 async def test_run_s2_capability_smoke_fails_contrast_when_actions_match(
     tmp_path: Path,
 ) -> None:
@@ -312,3 +382,107 @@ async def test_run_s2_capability_smoke_fails_contrast_when_actions_match(
     )
 
     assert report.image_use_contrast_pass is False
+
+
+async def test_run_s2_capability_smoke_rejects_image_stripped_fallback(
+    tmp_path: Path,
+) -> None:
+    screen = tmp_path / "screen.png"
+    screen.write_bytes(PNG_1X1)
+
+    report = await run_s2_capability_smoke(
+        provider=ImageStrippingProvider(),
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen),
+    )
+
+    result = report.cases[0]
+    assert result.schema_parse_success is False
+    assert result.action_adapter_success is False
+    assert result.error is not None
+    assert "without image content" in result.error
+
+
+async def test_run_s2_capability_smoke_fails_contrast_for_unsafe_candidate(
+    tmp_path: Path,
+) -> None:
+    screen_a = tmp_path / "date_picker.png"
+    screen_b = tmp_path / "wrong_page.png"
+    screen_a.write_bytes(PNG_1X1)
+    screen_b.write_bytes(PNG_1X1)
+    provider = FakeProvider(
+        [
+            '{"route":"continue","action":{"type":"click","arguments":{"x":100,"y":200}},'
+            '"safety_check":{"side_effect":true}}',
+            '{"route":"continue","action":{"type":"back","arguments":{}},"safety_check":{}}',
+        ]
+    )
+
+    report = await run_s2_capability_smoke(
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen_a),
+        case_b=S2SmokeCase(name="wrong_page", screenshot_path=screen_b),
+    )
+
+    assert report.cases[0].schema_parse_success is True
+    assert report.cases[0].action_adapter_success is True
+    assert report.cases[0].unsafe_action_filter_pass is False
+    assert report.image_use_contrast_pass is False
+
+
+async def test_run_s2_capability_smoke_preserves_parse_success_and_usage_on_invalid_action(
+    tmp_path: Path,
+) -> None:
+    screen = tmp_path / "screen.png"
+    screen.write_bytes(PNG_1X1)
+    provider = FakeProvider(
+        [
+            '{"route":"continue","action":{"type":"click","arguments":{}},'
+            '"safety_check":{}}'
+        ]
+    )
+
+    report = await run_s2_capability_smoke(
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen),
+    )
+
+    result = report.cases[0]
+    assert result.schema_parse_success is True
+    assert result.action_adapter_success is False
+    assert result.usage == {"total_tokens": 10}
+    assert report.usage == {"total_tokens": 10}
+
+
+async def test_run_s2_capability_smoke_treats_error_finish_reason_as_provider_failure(
+    tmp_path: Path,
+) -> None:
+    screen = tmp_path / "screen.png"
+    screen.write_bytes(PNG_1X1)
+
+    class ErrorProvider:
+        async def chat_with_retry(self, **kwargs) -> LLMResponse:
+            return LLMResponse(
+                content='{"route":"continue","action":{"type":"back","arguments":{}}}',
+                finish_reason="error",
+                usage={"total_tokens": 3},
+            )
+
+    report = await run_s2_capability_smoke(
+        provider=ErrorProvider(),
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen),
+    )
+
+    result = report.cases[0]
+    assert result.schema_parse_success is False
+    assert result.action_adapter_success is False
+    assert result.usage == {"total_tokens": 3}
+    assert result.error is not None
+    assert "finish_reason" in result.error
