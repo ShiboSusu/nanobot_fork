@@ -11,6 +11,7 @@ from nanobot.agent.s2_capability_smoke import (
     adapt_s2_action_output,
     build_s2_action_messages,
     extract_json_object,
+    parse_args,
     run_s2_capability_smoke,
     safety_filter_passed,
 )
@@ -57,6 +58,33 @@ class ImageStrippingProvider:
             }""",
             usage={"total_tokens": 7},
         )
+
+
+def test_parse_args_accepts_required_smoke_inputs(tmp_path: Path) -> None:
+    screenshot_a = tmp_path / "a.png"
+    screenshot_b = tmp_path / "b.png"
+    output = tmp_path / "report.json"
+
+    args = parse_args(
+        [
+            "--task",
+            "选择 2026-06-05 的出发日期",
+            "--screenshot-a",
+            str(screenshot_a),
+            "--screenshot-b",
+            str(screenshot_b),
+            "--output",
+            str(output),
+            "--max-tokens",
+            "256",
+        ]
+    )
+
+    assert args.task == "选择 2026-06-05 的出发日期"
+    assert args.screenshot_a == screenshot_a
+    assert args.screenshot_b == screenshot_b
+    assert args.output == output
+    assert args.max_tokens == 256
 
 
 def test_extract_json_object_strips_markdown_wrapper() -> None:

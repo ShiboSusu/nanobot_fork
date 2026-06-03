@@ -1,18 +1,21 @@
-"""Offline S2 capability smoke utilities.
+"""Saved-screenshot S2 capability smoke utilities.
 
-This module adapts S2 action-schema output for tests only; it does not execute
-GUI actions, device commands, live endpoints, or backend calls.
+This module adapts S2 action-schema output without executing GUI actions,
+device commands, or backend commands. Its CLI may call the configured S2
+endpoint using saved screenshots only.
 """
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import copy
+import json
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-import json
 from pathlib import Path
-import re
 from typing import Any, Mapping
 
 from nanobot.providers.base import LLMProvider
@@ -108,6 +111,19 @@ class S2SmokeReport:
 
     def to_json_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run saved-screenshot S2 visual GUI executor capability smoke."
+    )
+    parser.add_argument("--task", required=True)
+    parser.add_argument("--screenshot-a", type=Path, required=True)
+    parser.add_argument("--screenshot-b", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--max-tokens", type=int, default=512)
+    return parser.parse_args(argv)
 
 
 def build_s2_action_messages(
@@ -419,3 +435,49 @@ def _coerce_bool(value: Any) -> bool:
         if normalized in {"false", "0", "no", ""}:
             return False
     return bool(value)
+
+
+async def _amain(argv: Sequence[str] | None = None) -> int:
+    from nanobot.config.loader import load_config, resolve_config_env_vars
+    from nanobot.providers.factory import build_gui_s2_provider_snapshot
+
+    args = parse_args(argv)
+    config = resolve_config_env_vars(load_config(args.config))
+    snapshot = build_gui_s2_provider_snapshot(config)
+    if snapshot is None:
+        raise SystemExit(
+            "No GUI S2 model configured. Set gui.s2Model and gui.s2Provider."
+        )
+
+    report = await run_s2_capability_smoke(
+        provider=snapshot.provider,
+        model=snapshot.model,
+        task=args.task,
+        case_a=S2SmokeCase(
+            name="screenshot_a",
+            screenshot_path=args.screenshot_a,
+        ),
+        case_b=(
+            S2SmokeCase(
+                name="screenshot_b",
+                screenshot_path=args.screenshot_b,
+            )
+            if args.screenshot_b is not None
+            else None
+        ),
+        max_tokens=args.max_tokens,
+    )
+    output = json.dumps(report.to_json_dict(), ensure_ascii=False, indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(output + "\n", encoding="utf-8")
+    print(output)
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return asyncio.run(_amain(argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
