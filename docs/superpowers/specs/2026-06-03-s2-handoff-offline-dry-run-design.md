@@ -77,13 +77,43 @@ The dry-run consumes at most three saved failed or stuck GUI traces.
 
 Input sources:
 
+- a trace selection manifest for deterministic reviewed runs;
 - saved `trace.jsonl` files under the GUI run artifacts directory;
 - saved screenshots referenced by those traces or found in the trace run
   directory;
-- optional user-provided trace paths for deterministic experiments.
+- optional automatic discovery output for candidate generation.
 
-The implementation may support automatic discovery, explicit trace paths, or
-both. It must not require a live device.
+The implementation must support a trace selection manifest. Automatic discovery
+may remain as an auxiliary way to propose candidates, but S2-2 should be able
+to run from a human-reviewed manifest without guessing failure modes from noisy
+trace evidence. It must not require a live device.
+
+## Trace Selection Manifest
+
+The first S2-2 implementation must accept a manifest with at most three traces:
+
+```json
+{
+  "traces": [
+    {
+      "trace_path": "/absolute/path/to/trace.jsonl",
+      "risk_level": "U0",
+      "failure_mode": "semantic_miss",
+      "success_criteria": "what the original task required",
+      "recovery_objective": "what the next recovery action should advance",
+      "notes": "optional human selection note"
+    }
+  ]
+}
+```
+
+Manifest annotations are selection metadata, not proof of success. They may
+provide missing failure labels or success criteria, but they must not override
+hard invalid conditions such as missing screenshots, U2/U3 risk, forbidden side
+effects, or absent task instructions.
+
+When both manifest and automatic discovery are supported, the report must record
+the source used for each attempted row as `manifest` or `automatic_discovery`.
 
 ## Valid Trace Criteria
 
@@ -95,11 +125,18 @@ Required:
 - current or final screenshot path that exists on disk;
 - current app, page, bundle id, foreground app, or a page summary when
   available;
-- at least three recent S1 action or event records, unless the trace is marked
-  `insufficient_history`;
+- at least three recent S1 action or event records for `history_quality:
+  sufficient`;
+- fewer than three recent S1 action or event records only when the trace is
+  explicitly marked `history_quality: insufficient`;
 - a failure or stuck label inferred from trace evidence or supplied by the
   trace selection manifest;
 - risk level no higher than U1.
+
+`history_quality: insufficient` traces can be attempted and reported, but they
+cannot count as the strong passing sample for S2-2 acceptance. Otherwise the
+stage could pass by asking S2 to act from a screenshot without proving that the
+handoff packet helped recover from S1's failed context.
 
 Allowed failure modes:
 
@@ -137,6 +174,7 @@ Required schema:
 {
   "packet_version": "s2_handoff_v1",
   "trace_id": "stable trace or run id",
+  "history_quality": "sufficient | insufficient",
   "task": {
     "instruction": "original user instruction",
     "success_criteria": "trace-grounded completion criteria",
@@ -149,6 +187,7 @@ Required schema:
     "visible_text": "short OCR or trace-visible text summary when available"
   },
   "s1_history_summary": {
+    "history_quality": "sufficient | insufficient",
     "recent_actions": [
       {
         "step": 12,
@@ -265,6 +304,10 @@ and `distance` are not accepted.
 S2 may choose `halt` or `human_confirm` instead of `continue` when safe
 recovery is not possible.
 
+S2 may syntactically return `route: done`, but S2-2 is a recovery next-action
+dry-run. A `done` route must be recorded and rejected as a passing recovery
+sample.
+
 ## Dry-Run Flow
 
 For each valid trace:
@@ -319,8 +362,14 @@ They may pass when:
 - no forbidden action category is hit;
 - the action is not a known bad repetition;
 - the route is compatible with the risk level;
-- the action is not an obviously invalid `done` on a failed/stuck state;
+- the route is not `done`;
 - the action has a trace-grounded `reason` and `semantic_target`.
+
+If S2 returns `route: done`, the row should keep the parsed route/action
+summary, set `automatic_plausibility_checks_pass: false`, and set
+`rejection_reason: "done_not_accepted_for_recovery_dry_run"`. This is not a
+safety violation by itself; it is rejected because S2-2 tests recovery action
+proposal, not final completion judgment.
 
 They must not claim final task success.
 
@@ -393,15 +442,19 @@ Required row fields:
 {
   "trace_id": "stable trace id",
   "trace_path": "/absolute/path/to/trace.jsonl",
+  "discovery_source": "manifest | automatic_discovery",
   "task_instruction": "original task",
   "risk_level": "U0 | U1",
   "failure_mode": "semantic_miss",
+  "history_quality": "sufficient | insufficient",
   "handoff_packet_built": true,
   "screenshot_exists": true,
   "screenshot_path": "/absolute/path/to/current.png",
   "s2_model": "qwen3.5-397b-a17b",
   "s2_output_raw": "{}",
   "s2_output_parse_success": true,
+  "route": "continue | done | halt | human_confirm | null",
+  "action_summary": "click(x=500,y=500) or null",
   "action_adapter_success": true,
   "safety_filter_pass": true,
   "forbidden_action_hit": false,
@@ -413,6 +466,7 @@ Required row fields:
   "human_audit_required": true,
   "human_audit_plausible": null,
   "human_audit_notes": "",
+  "rejection_reason": null,
   "error": null,
   "latency_s": 0.0,
   "usage": {
@@ -423,8 +477,12 @@ Required row fields:
 }
 ```
 
-Rows for invalid traces must still be written when discovery selects them, with
-`handoff_packet_built: false` and an explicit `error`.
+Rows for invalid traces must still be written when the manifest or discovery
+selects them, with `handoff_packet_built: false` and an explicit `error`.
+
+`stateful_recovery_plausible` and `recovery_objective_advanced` must remain
+`null` before human audit or a deterministic verifier updates them. S2 must not
+self-score these fields.
 
 ## Trace Selection
 
@@ -442,34 +500,62 @@ Preferred task families:
 Do not include U2/U3 traces or traces whose recovery requires a sensitive side
 effect.
 
+Manifest-selected traces are preferred for the first reviewed S2-2 run.
+Automatic discovery may be used to populate a candidate list or to run an
+unreviewed exploratory pass, but the report must make that source explicit.
+
 If more than three candidates exist, choose at most one per task family for the
 first run. The report should include a discovery summary with:
 
 - `candidate_traces_found`;
 - `valid_traces_attempted`;
 - `invalid_traces_skipped`;
-- invalid reason counts.
+- `invalid_reason_counts`.
 
 ## Acceptance Criteria
 
 S2-2 is accepted when:
 
-1. Up to three valid saved failed/stuck traces are attempted.
-2. If fewer than three valid traces are attempted, the report explains why.
+1. Three valid saved failed/stuck traces are attempted when three or more valid
+   candidates exist.
+2. If fewer than three valid traces are attempted, all available valid traces
+   are attempted and the report explains why the count is lower.
 3. Every attempted trace writes one JSONL row.
 4. No device action is executed.
 5. No live controller or monitor code is called.
 6. No controller or monitor files are modified.
 7. No U2/U3 trace is attempted.
 8. At least one attempted trace produces:
+   - `history_quality: sufficient`;
    - parseable S2 JSON;
+   - `route` other than `done`;
    - OpenGUI-adaptable action;
    - safety filter pass;
    - no forbidden action hit;
    - no known bad action repetition;
+   - automatic plausibility checks pass;
    - human audit placeholder ready for review.
 9. The report does not claim final task success.
 10. The implementation stops at offline dry-run and does not enter S2-3.
+
+## Implementation Scope For Next Plan
+
+The next implementation plan should keep the change surface narrow.
+
+Allowed future implementation files:
+
+- `nanobot/agent/s2_handoff_offline_dry_run.py`;
+- `tests/agent/test_s2_handoff_offline_dry_run.py`;
+- this S2-2 spec for typo or acceptance wording fixes.
+
+Forbidden implementation touch points:
+
+- `opengui/agent.py`;
+- controller files;
+- monitor files;
+- WDA, ADB, HDC, iOS, Android, or desktop GUI backends;
+- live takeover code;
+- phase0 controller routing.
 
 ## Completion Boundary
 
