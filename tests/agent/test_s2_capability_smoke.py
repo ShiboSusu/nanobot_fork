@@ -88,6 +88,55 @@ def test_safety_filter_blocks_side_effect_action() -> None:
     assert safety_filter_passed(candidate) is False
 
 
+def test_safety_filter_allows_false_string_flags() -> None:
+    candidate = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {
+                "type": "wait",
+                "arguments": {},
+            },
+            "safety_check": {
+                "side_effect": "false",
+                "requires_human_confirm": "false",
+            },
+        }
+    )
+
+    assert candidate.side_effect is False
+    assert candidate.requires_human_confirm is False
+    assert safety_filter_passed(candidate) is True
+
+
+def test_normalizes_route_case_and_whitespace() -> None:
+    candidate = adapt_s2_action_output(
+        {
+            "route": " Continue ",
+            "action": {
+                "type": "wait",
+                "arguments": {},
+            },
+            "safety_check": {},
+        }
+    )
+
+    assert candidate.route == "continue"
+
+
+def test_raw_is_copied_from_payload() -> None:
+    payload = {
+        "route": "halt",
+        "reason": "blocked",
+        "safety_check": {},
+    }
+
+    candidate = adapt_s2_action_output(payload)
+    payload["route"] = "continue"
+
+    assert candidate.raw is not payload
+    assert candidate.raw["route"] == "halt"
+
+
 def test_done_route_requires_done_action() -> None:
     candidate = adapt_s2_action_output(
         {

@@ -64,7 +64,7 @@ def extract_json_object(content: str) -> dict[str, Any]:
 
 
 def adapt_s2_action_output(payload: Mapping[str, Any]) -> S2ActionCandidate:
-    route = str(payload.get("route", "")).strip()
+    route = str(payload.get("route", "")).strip().lower()
     if route not in ALLOWED_ROUTES:
         raise S2CapabilityError(f"Unsupported S2 route: {route!r}.")
 
@@ -90,9 +90,11 @@ def adapt_s2_action_output(payload: Mapping[str, Any]) -> S2ActionCandidate:
         action=action,
         reason=_optional_string(payload.get("reason")),
         semantic_target=_optional_string(payload.get("semantic_target")),
-        side_effect=bool(safety_check.get("side_effect", False)),
-        requires_human_confirm=bool(safety_check.get("requires_human_confirm", False)),
-        raw=payload,
+        side_effect=_coerce_bool(safety_check.get("side_effect", False)),
+        requires_human_confirm=_coerce_bool(
+            safety_check.get("requires_human_confirm", False)
+        ),
+        raw=dict(payload),
     )
 
 
@@ -123,3 +125,15 @@ def _adapt_action_payload(payload: Mapping[str, Any]) -> Action:
 
 def _optional_string(value: Any) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no", ""}:
+            return False
+    return bool(value)
