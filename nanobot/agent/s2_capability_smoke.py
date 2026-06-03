@@ -52,13 +52,15 @@ The JSON schema is:
 }
 
 Use these exact canonical action argument fields:
-- click: {"x": 500, "y": 300, "relative": true}
-- swipe: {"x": 500, "y": 700, "x2": 500, "y2": 300, "relative": true}
-- type: {"text": "text to enter", "auto_enter": false}
-- wait: {"duration_ms": 1000}
-- done: {"status": "success"}
-- back and home: {}
-All coordinate fields must be relative integers in [0, 999] with relative=true.
+- click arguments must contain x, y, relative.
+- swipe arguments must contain x, y, x2, y2, relative.
+- type arguments must contain text, auto_enter; text is a string and auto_enter
+  is a boolean.
+- wait arguments must contain duration_ms as an integer.
+- done arguments must contain status as a string.
+- back and home arguments must be empty objects.
+All x, y, x2, and y2 values must be
+chosen from the screenshot as relative integers in [0, 999], and relative=true.
 Do not use aliases such as point, coordinate, direction, or distance in action
 arguments.
 
