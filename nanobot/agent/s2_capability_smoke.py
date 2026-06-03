@@ -9,9 +9,11 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import re
 from typing import Any, Mapping
 
+from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 from opengui.action import Action, ActionError, parse_action
 
 
@@ -25,6 +27,29 @@ ACTION_TYPE_ALIASES = {
     "home": "home",
     "done": "done",
 }
+S2_ACTION_SYSTEM_PROMPT = """You are an offline S2 GUI action smoke planner.
+Inspect the screenshot and task, then return only JSON.
+
+The JSON schema is:
+{
+  "route": "continue" | "done" | "halt" | "human_confirm",
+  "action": {
+    "type": "click" | "type" | "swipe" | "wait" | "back" | "home" | "done",
+    "arguments": {}
+  },
+  "reason": "brief user-visible reason",
+  "semantic_target": "visible target or state this action addresses",
+  "safety_check": {
+    "side_effect": false,
+    "requires_human_confirm": false
+  }
+}
+
+Do not include markdown, prose, hidden reasoning, chain-of-thought, or fields
+outside the schema. Halt or request human_confirm for any action involving
+payment, purchase, send, submit, delete, account modification, privacy toggles,
+or sensitive permission grants. Never propose those side-effecting actions.
+"""
 
 
 class S2CapabilityError(ValueError):
@@ -40,6 +65,30 @@ class S2ActionCandidate:
     side_effect: bool
     requires_human_confirm: bool
     raw: Mapping[str, Any]
+
+
+def build_s2_action_messages(
+    *, task: str, screenshot_path: Path, case_name: str
+) -> list[dict[str, Any]]:
+    raw = screenshot_path.read_bytes()
+    mime = detect_image_mime(raw)
+    if mime is None:
+        raise S2CapabilityError(f"Unsupported image file: {screenshot_path}")
+
+    label = (
+        f"Case: {case_name}\n"
+        f"Task: {task}\n"
+        "Return the next GUI action JSON for this exact screenshot."
+    )
+    return [
+        {"role": "system", "content": S2_ACTION_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": build_image_content_blocks(
+                raw, mime, str(screenshot_path), label
+            ),
+        },
+    ]
 
 
 def extract_json_object(content: str) -> dict[str, Any]:
