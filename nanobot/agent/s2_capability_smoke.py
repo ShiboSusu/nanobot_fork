@@ -51,6 +51,17 @@ The JSON schema is:
   }
 }
 
+Use these exact canonical action argument fields:
+- click: {"x": 500, "y": 300, "relative": true}
+- swipe: {"x": 500, "y": 700, "x2": 500, "y2": 300, "relative": true}
+- type: {"text": "text to enter", "auto_enter": false}
+- wait: {"duration_ms": 1000}
+- done: {"status": "success"}
+- back and home: {}
+All coordinate fields must be relative integers in [0, 999] with relative=true.
+Do not use aliases such as point, coordinate, direction, or distance in action
+arguments.
+
 Do not include markdown, prose, hidden reasoning, chain-of-thought, or fields
 outside the schema. Halt or request human_confirm for any action involving
 payment, purchase, send, submit, delete, account modification, privacy toggles,

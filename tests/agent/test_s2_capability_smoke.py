@@ -222,6 +222,33 @@ def test_build_s2_action_messages_include_image_block(tmp_path: Path) -> None:
     assert "datepicker" in user_content[1]["text"]
 
 
+def test_build_s2_action_messages_specify_canonical_executable_arguments(
+    tmp_path: Path,
+) -> None:
+    screenshot = tmp_path / "screen.png"
+    screenshot.write_bytes(PNG_1X1)
+
+    messages = build_s2_action_messages(
+        task="选择 2026-06-05 的出发日期",
+        screenshot_path=screenshot,
+        case_name="datepicker",
+    )
+
+    prompt = messages[0]["content"].lower()
+    assert 'click: {"x": 500, "y": 300, "relative": true}' in prompt
+    assert (
+        'swipe: {"x": 500, "y": 700, "x2": 500, "y2": 300, "relative": true}'
+        in prompt
+    )
+    assert 'type: {"text": "text to enter", "auto_enter": false}' in prompt
+    assert 'wait: {"duration_ms": 1000}' in prompt
+    assert 'done: {"status": "success"}' in prompt
+    assert "relative integers in [0, 999]" in prompt
+    assert "relative=true" in prompt
+    assert "point, coordinate, direction, or distance" in prompt
+    assert "do not use aliases" in prompt
+
+
 def test_build_s2_action_messages_rejects_non_image(tmp_path: Path) -> None:
     screenshot = tmp_path / "screen.txt"
     screenshot.write_text("not an image")
