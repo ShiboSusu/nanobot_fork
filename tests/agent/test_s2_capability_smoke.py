@@ -323,6 +323,8 @@ async def test_run_s2_capability_smoke_passes_with_contrasting_actions(
     )
 
     assert report.model == "qwen3.5-397b-a17b"
+    assert report.cases[0].finish_reason == "stop"
+    assert report.cases[1].finish_reason == "stop"
     assert report.schema_parse_success is True
     assert report.action_adapter_success is True
     assert report.unsafe_action_filter_pass is True
@@ -459,8 +461,10 @@ async def test_run_s2_capability_smoke_preserves_parse_success_and_usage_on_inva
     assert report.usage == {"total_tokens": 10}
 
 
-async def test_run_s2_capability_smoke_treats_error_finish_reason_as_provider_failure(
+@pytest.mark.parametrize("finish_reason", ["error", "content_filter"])
+async def test_run_s2_capability_smoke_treats_unsuccessful_finish_reason_as_provider_failure(
     tmp_path: Path,
+    finish_reason: str,
 ) -> None:
     screen = tmp_path / "screen.png"
     screen.write_bytes(PNG_1X1)
@@ -469,7 +473,7 @@ async def test_run_s2_capability_smoke_treats_error_finish_reason_as_provider_fa
         async def chat_with_retry(self, **kwargs) -> LLMResponse:
             return LLMResponse(
                 content='{"route":"continue","action":{"type":"back","arguments":{}}}',
-                finish_reason="error",
+                finish_reason=finish_reason,
                 usage={"total_tokens": 3},
             )
 
@@ -484,5 +488,23 @@ async def test_run_s2_capability_smoke_treats_error_finish_reason_as_provider_fa
     assert result.schema_parse_success is False
     assert result.action_adapter_success is False
     assert result.usage == {"total_tokens": 3}
+    assert result.finish_reason == finish_reason
     assert result.error is not None
-    assert "finish_reason" in result.error
+    assert finish_reason in result.error
+
+
+async def test_run_s2_capability_smoke_reports_no_finish_reason_without_response(
+    tmp_path: Path,
+) -> None:
+    screen = tmp_path / "screen.txt"
+    screen.write_text("not an image")
+    provider = FakeProvider([])
+
+    report = await run_s2_capability_smoke(
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen),
+    )
+
+    assert report.cases[0].finish_reason is None

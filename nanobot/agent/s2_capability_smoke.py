@@ -88,6 +88,7 @@ class S2SmokeCaseResult:
     schema_parse_success: bool
     action_adapter_success: bool
     unsafe_action_filter_pass: bool
+    finish_reason: str | None
     error: str | None
     latency_s: float
     usage: dict[str, int]
@@ -234,6 +235,7 @@ async def _run_case(
     started = time.perf_counter()
     raw_content = ""
     usage: dict[str, int] = {}
+    finish_reason: str | None = None
     schema_parse_success = False
     action_adapter_success = False
     try:
@@ -250,8 +252,11 @@ async def _run_case(
         )
         raw_content = response.content or ""
         usage = dict(response.usage or {})
-        if response.finish_reason == "error":
-            raise S2CapabilityError("Provider returned finish_reason='error'.")
+        finish_reason = response.finish_reason
+        if finish_reason != "stop":
+            raise S2CapabilityError(
+                f"Provider returned unsuccessful finish_reason={finish_reason!r}."
+            )
         if not _messages_contain_image_url(messages):
             raise S2CapabilityError(
                 "Provider retry/fallback completed without image content."
@@ -272,6 +277,7 @@ async def _run_case(
             schema_parse_success=schema_parse_success,
             action_adapter_success=action_adapter_success,
             unsafe_action_filter_pass=filter_pass,
+            finish_reason=finish_reason,
             error=None,
             latency_s=time.perf_counter() - started,
             usage=usage,
@@ -289,6 +295,7 @@ async def _run_case(
             schema_parse_success=schema_parse_success,
             action_adapter_success=action_adapter_success,
             unsafe_action_filter_pass=False,
+            finish_reason=finish_reason,
             error=f"{type(exc).__name__}: {exc}",
             latency_s=time.perf_counter() - started,
             usage=usage,
