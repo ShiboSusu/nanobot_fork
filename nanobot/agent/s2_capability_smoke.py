@@ -224,6 +224,13 @@ def _messages_contain_image_url(messages: Sequence[Mapping[str, Any]]) -> bool:
     return False
 
 
+def _screenshots_are_byte_distinct(first: Path, second: Path) -> bool:
+    try:
+        return first.read_bytes() != second.read_bytes()
+    except OSError:
+        return False
+
+
 async def _run_case(
     *,
     provider: LLMProvider,
@@ -350,6 +357,11 @@ async def run_s2_capability_smoke(
         len(candidates) == 2
         and candidates[0] is not None
         and candidates[1] is not None
+        and case_b is not None
+        and _screenshots_are_byte_distinct(
+            case_a.screenshot_path,
+            case_b.screenshot_path,
+        )
         and case_results[0].unsafe_action_filter_pass
         and case_results[1].unsafe_action_filter_pass
         and actions_are_materially_different(candidates[0], candidates[1])

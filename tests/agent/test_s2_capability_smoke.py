@@ -24,6 +24,12 @@ PNG_1X1 = (
     b"\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05"
     b"\xfe\x02\xfeA\xe2`\x82\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+PNG_1X1_ALT = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+    b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"
+    b"\x89\x00\x00\x00\rIDATx\x9cc\xf8\xcf\xc0\xf0\x1f\x00"
+    b"\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 class FakeProvider:
@@ -294,7 +300,7 @@ async def test_run_s2_capability_smoke_passes_with_contrasting_actions(
     screen_a = tmp_path / "date_picker.png"
     screen_b = tmp_path / "wrong_page.png"
     screen_a.write_bytes(PNG_1X1)
-    screen_b.write_bytes(PNG_1X1)
+    screen_b.write_bytes(PNG_1X1_ALT)
     provider = FakeProvider(
         [
             """{
@@ -330,6 +336,31 @@ async def test_run_s2_capability_smoke_passes_with_contrasting_actions(
     assert report.unsafe_action_filter_pass is True
     assert report.image_use_contrast_pass is True
     assert len(provider.calls) == 2
+
+
+async def test_run_s2_capability_smoke_fails_contrast_for_identical_screenshot_bytes(
+    tmp_path: Path,
+) -> None:
+    screen_a = tmp_path / "date_picker.png"
+    screen_b = tmp_path / "wrong_page.png"
+    screen_a.write_bytes(PNG_1X1)
+    screen_b.write_bytes(PNG_1X1)
+    provider = FakeProvider(
+        [
+            '{"route":"continue","action":{"type":"back","arguments":{}},"safety_check":{}}',
+            '{"route":"continue","action":{"type":"home","arguments":{}},"safety_check":{}}',
+        ]
+    )
+
+    report = await run_s2_capability_smoke(
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen_a),
+        case_b=S2SmokeCase(name="wrong_page", screenshot_path=screen_b),
+    )
+
+    assert report.image_use_contrast_pass is False
 
 
 async def test_run_s2_capability_smoke_uses_identical_text_for_contrast_cases(
