@@ -126,7 +126,10 @@ Required checks:
 7. Existing S2 action parser, adapter, and safety filter are importable.
 8. The selected task is classified as U0 and does not require sensitive side
    effects.
-9. A run directory is allocated before any live action is executed.
+9. The current screen is audited and is not already an order, passenger,
+   payment, checkout, coupon purchase, login-modification, account,
+   permission, or other sensitive-flow page.
+10. A run directory is allocated before any live action is executed.
 
 If any preflight check fails, S2-3 must stop with `preflight_failed` and no S2
 action execution.
@@ -141,6 +144,10 @@ The operator prepares or reaches a current Ctrip calendar/search state, then
 starts the S2 takeover smoke from that screen. The harness observes the current
 screen, builds the handoff packet, and starts S2. This mode tests live S2
 execution without adding production controller routing.
+
+The manual setup path is excluded from S2-3 metrics. The report must record the
+setup description and whether the takeover-start screen was audited, but manual
+setup steps, latency, and success do not count as S2 progress.
 
 Future modes are out of scope for the first smoke:
 
@@ -297,12 +304,28 @@ Budget exhaustion returns failure:
 
 ```json
 {
-  "verified_success": false,
+  "result": "failed",
+  "controller_verified_success": false,
   "failure_reason": "s2_budget_exhausted"
 }
 ```
 
 It must not be reported as partial success.
+
+## Progress Evidence
+
+`max_no_progress_steps = 1` must be backed by recorded evidence, not an
+operator impression. Progress exists if at least one of the following is true:
+
+- screenshot hash or perceptual hash changes meaningfully;
+- the target date becomes more visible or closer to selectable;
+- the flight or travel result list appears;
+- the page moves away from the known-bad calendar/search state;
+- verifier evidence improves.
+
+If none of these signals improves after an executed S2 action, the step is
+recorded as no progress. One no-progress step ends the first live smoke with
+`result = failed` and `failure_reason = no_progress`.
 
 ## Safety Rules
 
@@ -395,6 +418,9 @@ Required takeover-start fields:
   "task_family": "date_travel_search",
   "takeover_start_mode": "MANUAL_TAKEOVER_FROM_CURRENT_STATE",
   "takeover_reason": "manual_live_smoke",
+  "manual_setup_excluded_from_metrics": true,
+  "setup_description": "operator-created state before takeover; not counted as S2 progress",
+  "takeover_start_screen_audited": true,
   "s1_steps_before_takeover": 0,
   "screenshot_path": "...",
   "foreground_app": "...",
@@ -444,7 +470,8 @@ Required takeover-end fields:
   "model_reported_success": false,
   "controller_verified_success": false,
   "user_observed_success": null,
-  "failure_reason": "verified_success | false_done | safety_blocked_action | s2_budget_exhausted | no_progress | repeated_action | verifier_unknown | execution_error",
+  "result": "verified_success | failed | halted",
+  "failure_reason": "false_done | safety_blocked_action | s2_budget_exhausted | no_progress | repeated_action | verifier_unknown | execution_error | null",
   "final_answer": null,
   "trace_path": "..."
 }
@@ -459,6 +486,9 @@ The smoke report should include one summary JSON object:
   "task": "selected U0 instruction",
   "task_family": "date_travel_search",
   "result": "verified_success | failed | halted",
+  "manual_setup_excluded_from_metrics": true,
+  "setup_description": "operator-created state before takeover; not counted as S2 progress",
+  "takeover_start_screen_audited": true,
   "s2_takeover_started": true,
   "s2_called": true,
   "s2_steps": 0,
@@ -476,6 +506,7 @@ The smoke report should include one summary JSON object:
   "failure_reason": null,
   "takeover_reason": "manual_live_smoke",
   "trigger_evidence": [],
+  "progress_evidence": [],
   "verified_success": false,
   "model_reported_success": false,
   "final_answer": null,
@@ -486,6 +517,14 @@ The smoke report should include one summary JSON object:
 This report intentionally supports the same statistics table used in earlier
 manual task tracking: result, S2 usage, tokens, latency, model latency,
 cross-app status, total steps, failure reason, takeover trigger, and trace path.
+
+## Artifact Hygiene
+
+Trace and report artifacts are local ignored artifacts by default. Do not commit
+raw screenshots, full trace artifacts, or raw S2 outputs containing private page
+text. Reports shared for review should be summarized or scrubbed, and repository
+commits should contain only code, spec, or tests unless raw artifacts are
+explicitly approved.
 
 ## Acceptance Criteria
 
@@ -501,8 +540,13 @@ S2-3 spec is ready for implementation when:
 7. `route=done` requires verifier success.
 8. Information-query final-answer protocol is defined but excluded from the
    first live smoke.
-9. Trace and report schemas are sufficient to audit each S2 action.
-10. No S2-3 implementation starts until this spec is reviewed and approved.
+9. Manual setup is excluded from S2 metrics and the takeover-start screen audit
+   is recorded.
+10. Progress/no-progress evidence is defined and trace-recorded.
+11. Artifact hygiene rules prevent raw screenshots, private raw outputs, and
+   full traces from being committed by default.
+12. Trace and report schemas are sufficient to audit each S2 action.
+13. No S2-3 implementation starts until this spec is reviewed and approved.
 
 The S2-3 live smoke itself is accepted only when:
 
@@ -513,11 +557,16 @@ The S2-3 live smoke itself is accepted only when:
 5. Every S2 output parses and adapts before execution.
 6. No unsafe or forbidden action is executed.
 7. Trace rows include takeover start, per-step, and takeover end events.
-8. The final result is one of:
+8. Preflight confirms the current page is not a sensitive-flow page.
+9. Manual setup is excluded from S2 metrics.
+10. Progress or no-progress evidence is recorded.
+11. The final result is one of:
    - controller-verified success;
    - clean halt with a concrete failure reason.
-9. The report does not rely on model-reported success alone.
-10. No U1/U2/U3 task is attempted.
+12. The report does not rely on model-reported success alone.
+13. No U1/U2/U3 task is attempted.
+14. Raw screenshots, private raw outputs, and full trace artifacts are not
+    committed by default.
 
 ## Implementation Scope For Next Plan
 
