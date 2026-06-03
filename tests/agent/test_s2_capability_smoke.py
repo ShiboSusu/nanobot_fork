@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from nanobot.agent.s2_capability_smoke import (
     S2CapabilityError,
     S2SmokeCase,
+    _amain,
     actions_are_materially_different,
     adapt_s2_action_output,
     build_s2_action_messages,
@@ -85,6 +88,113 @@ def test_parse_args_accepts_required_smoke_inputs(tmp_path: Path) -> None:
     assert args.screenshot_b == screenshot_b
     assert args.output == output
     assert args.max_tokens == 256
+
+
+async def test_amain_rejects_explicit_missing_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_config = tmp_path / "missing.json"
+
+    def fail_load_config(_path: Path) -> None:
+        raise AssertionError("load_config should not be called")
+
+    monkeypatch.setattr("nanobot.config.loader.load_config", fail_load_config)
+
+    with pytest.raises(SystemExit, match=str(missing_config)):
+        await _amain(
+            [
+                "--task",
+                "选择 2026-06-05 的出发日期",
+                "--screenshot-a",
+                str(tmp_path / "a.png"),
+                "--config",
+                str(missing_config),
+            ]
+        )
+
+
+async def test_amain_converts_provider_snapshot_value_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}")
+    config = object()
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path: config)
+    monkeypatch.setattr(
+        "nanobot.config.loader.resolve_config_env_vars",
+        lambda value: value,
+    )
+
+    def raise_invalid_config(_config: object) -> None:
+        raise ValueError("unknown provider")
+
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_gui_s2_provider_snapshot",
+        raise_invalid_config,
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match="Invalid GUI S2 provider configuration: unknown provider",
+    ):
+        await _amain(
+            [
+                "--task",
+                "选择 2026-06-05 的出发日期",
+                "--screenshot-a",
+                str(tmp_path / "a.png"),
+                "--config",
+                str(config_path),
+            ]
+        )
+
+
+async def test_amain_writes_report_json_and_returns_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "reports" / "smoke.json"
+    config = object()
+    snapshot = SimpleNamespace(provider=object(), model="s2-model")
+    report_json = {
+        "model": "s2-model",
+        "task": "选择 2026-06-05 的出发日期",
+        "schema_parse_success": False,
+    }
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path: config)
+    monkeypatch.setattr(
+        "nanobot.config.loader.resolve_config_env_vars",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_gui_s2_provider_snapshot",
+        lambda _config: snapshot,
+    )
+
+    async def fake_run_s2_capability_smoke(**_kwargs):
+        return SimpleNamespace(to_json_dict=lambda: report_json)
+
+    monkeypatch.setattr(
+        "nanobot.agent.s2_capability_smoke.run_s2_capability_smoke",
+        fake_run_s2_capability_smoke,
+    )
+
+    result = await _amain(
+        [
+            "--task",
+            "选择 2026-06-05 的出发日期",
+            "--screenshot-a",
+            str(tmp_path / "a.png"),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(output_path.read_text(encoding="utf-8")) == report_json
+    assert output_path.read_text(encoding="utf-8").endswith("\n")
 
 
 def test_extract_json_object_strips_markdown_wrapper() -> None:

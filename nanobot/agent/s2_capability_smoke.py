@@ -442,8 +442,16 @@ async def _amain(argv: Sequence[str] | None = None) -> int:
     from nanobot.providers.factory import build_gui_s2_provider_snapshot
 
     args = parse_args(argv)
+    if args.config is not None and not args.config.is_file():
+        raise SystemExit(f"Config path is not a file: {args.config}")
+
     config = resolve_config_env_vars(load_config(args.config))
-    snapshot = build_gui_s2_provider_snapshot(config)
+    try:
+        snapshot = build_gui_s2_provider_snapshot(config)
+    except ValueError as exc:
+        raise SystemExit(
+            f"Invalid GUI S2 provider configuration: {exc}"
+        ) from None
     if snapshot is None:
         raise SystemExit(
             "No GUI S2 model configured. Set gui.s2Model and gui.s2Provider."
