@@ -22,7 +22,6 @@ from nanobot.providers.base import LLMProvider
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 from opengui.action import Action, ActionError, parse_action
 
-
 ALLOWED_ROUTES = {"continue", "done", "halt", "human_confirm"}
 ACTION_TYPE_ALIASES = {
     "click": "tap",

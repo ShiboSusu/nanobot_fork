@@ -21,7 +21,6 @@ from nanobot.agent.s2_capability_smoke import (
 from nanobot.providers.base import LLMResponse
 from opengui.action import Action
 
-
 PNG_1X1 = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
     b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"
