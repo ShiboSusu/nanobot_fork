@@ -6,11 +6,15 @@ import pytest
 
 from nanobot.agent.s2_capability_smoke import (
     S2CapabilityError,
+    S2SmokeCase,
+    actions_are_materially_different,
     adapt_s2_action_output,
     build_s2_action_messages,
     extract_json_object,
+    run_s2_capability_smoke,
     safety_filter_passed,
 )
+from nanobot.providers.base import LLMResponse
 from opengui.action import Action
 
 
@@ -20,6 +24,17 @@ PNG_1X1 = (
     b"\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05"
     b"\xfe\x02\xfeA\xe2`\x82\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+
+
+class FakeProvider:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls = []
+
+    async def chat_with_retry(self, **kwargs) -> LLMResponse:
+        self.calls.append(kwargs)
+        response = self.responses.pop(0)
+        return LLMResponse(content=response, usage={"total_tokens": 10})
 
 
 def test_extract_json_object_strips_markdown_wrapper() -> None:
@@ -201,3 +216,99 @@ def test_done_route_requires_done_action() -> None:
     )
 
     assert candidate.action == Action(action_type="done", status="success")
+
+
+def test_actions_are_materially_different() -> None:
+    first = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {
+                "type": "click",
+                "arguments": {"x": 100, "y": 200},
+            },
+            "semantic_target": "select_date",
+            "safety_check": {},
+        }
+    )
+    second = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {
+                "type": "back",
+                "arguments": {},
+            },
+            "semantic_target": "recover_page",
+            "safety_check": {},
+        }
+    )
+
+    assert actions_are_materially_different(first, second) is True
+
+
+async def test_run_s2_capability_smoke_passes_with_contrasting_actions(
+    tmp_path: Path,
+) -> None:
+    screen_a = tmp_path / "date_picker.png"
+    screen_b = tmp_path / "wrong_page.png"
+    screen_a.write_bytes(PNG_1X1)
+    screen_b.write_bytes(PNG_1X1)
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {"type": "click", "arguments": {"x": 100, "y": 200}},
+                "reason": "select the date",
+                "semantic_target": "select_date",
+                "safety_check": {"side_effect": false, "requires_human_confirm": false}
+            }""",
+            """{
+                "route": "continue",
+                "action": {"type": "back", "arguments": {}},
+                "reason": "recover from wrong page",
+                "semantic_target": "recover_page",
+                "safety_check": {"side_effect": false, "requires_human_confirm": false}
+            }""",
+        ]
+    )
+
+    report = await run_s2_capability_smoke(
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen_a),
+        case_b=S2SmokeCase(name="wrong_page", screenshot_path=screen_b),
+    )
+
+    assert report.model == "qwen3.5-397b-a17b"
+    assert report.schema_parse_success is True
+    assert report.action_adapter_success is True
+    assert report.unsafe_action_filter_pass is True
+    assert report.image_use_contrast_pass is True
+    assert len(provider.calls) == 2
+
+
+async def test_run_s2_capability_smoke_fails_contrast_when_actions_match(
+    tmp_path: Path,
+) -> None:
+    screen_a = tmp_path / "date_picker.png"
+    screen_b = tmp_path / "wrong_page.png"
+    screen_a.write_bytes(PNG_1X1)
+    screen_b.write_bytes(PNG_1X1)
+    response = """{
+        "route": "continue",
+        "action": {"type": "click", "arguments": {"x": 100, "y": 200}},
+        "reason": "select the date",
+        "semantic_target": "select_date",
+        "safety_check": {"side_effect": false, "requires_human_confirm": false}
+    }"""
+    provider = FakeProvider([response, response])
+
+    report = await run_s2_capability_smoke(
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        task="选择 2026-06-05 的出发日期",
+        case_a=S2SmokeCase(name="date_picker", screenshot_path=screen_a),
+        case_b=S2SmokeCase(name="wrong_page", screenshot_path=screen_b),
+    )
+
+    assert report.image_use_contrast_pass is False

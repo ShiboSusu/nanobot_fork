@@ -7,12 +7,15 @@ GUI actions, device commands, live endpoints, or backend calls.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+import time
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import re
 from typing import Any, Mapping
 
+from nanobot.providers.base import LLMProvider
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 from opengui.action import Action, ActionError, parse_action
 
@@ -65,6 +68,45 @@ class S2ActionCandidate:
     side_effect: bool
     requires_human_confirm: bool
     raw: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class S2SmokeCase:
+    name: str
+    screenshot_path: Path
+
+
+@dataclass(frozen=True)
+class S2SmokeCaseResult:
+    name: str
+    screenshot_path: str
+    raw_content: str
+    route: str | None
+    action_type: str | None
+    reason: str
+    semantic_target: str
+    schema_parse_success: bool
+    action_adapter_success: bool
+    unsafe_action_filter_pass: bool
+    error: str | None
+    latency_s: float
+    usage: dict[str, int]
+
+
+@dataclass(frozen=True)
+class S2SmokeReport:
+    model: str
+    task: str
+    cases: list[S2SmokeCaseResult]
+    schema_parse_success: bool
+    action_adapter_success: bool
+    unsafe_action_filter_pass: bool
+    image_use_contrast_pass: bool
+    duration_s: float
+    usage: dict[str, int]
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def build_s2_action_messages(
@@ -150,6 +192,168 @@ def adapt_s2_action_output(payload: Mapping[str, Any]) -> S2ActionCandidate:
 
 def safety_filter_passed(candidate: S2ActionCandidate) -> bool:
     return not (candidate.side_effect or candidate.requires_human_confirm)
+
+
+def actions_are_materially_different(
+    first: S2ActionCandidate,
+    second: S2ActionCandidate,
+) -> bool:
+    if first.route != second.route:
+        return True
+    if (first.action is None) != (second.action is None):
+        return True
+    if first.action is None and second.action is None:
+        return first.semantic_target != second.semantic_target
+
+    assert first.action is not None
+    assert second.action is not None
+    return (
+        first.action.action_type,
+        first.action.x,
+        first.action.y,
+        first.action.x2,
+        first.action.y2,
+        first.action.text,
+        first.action.status,
+        first.semantic_target,
+    ) != (
+        second.action.action_type,
+        second.action.x,
+        second.action.y,
+        second.action.x2,
+        second.action.y2,
+        second.action.text,
+        second.action.status,
+        second.semantic_target,
+    )
+
+
+async def _run_case(
+    *,
+    provider: LLMProvider,
+    model: str,
+    task: str,
+    case: S2SmokeCase,
+    max_tokens: int,
+) -> tuple[S2SmokeCaseResult, S2ActionCandidate | None]:
+    started = time.perf_counter()
+    raw_content = ""
+    try:
+        messages = build_s2_action_messages(
+            task=task,
+            screenshot_path=case.screenshot_path,
+            case_name=case.name,
+        )
+        response = await provider.chat_with_retry(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=0,
+        )
+        raw_content = response.content or ""
+        payload = extract_json_object(raw_content)
+        candidate = adapt_s2_action_output(payload)
+        filter_pass = safety_filter_passed(candidate)
+        result = S2SmokeCaseResult(
+            name=case.name,
+            screenshot_path=str(case.screenshot_path),
+            raw_content=raw_content,
+            route=candidate.route,
+            action_type=candidate.action.action_type if candidate.action else None,
+            reason=candidate.reason,
+            semantic_target=candidate.semantic_target,
+            schema_parse_success=True,
+            action_adapter_success=True,
+            unsafe_action_filter_pass=filter_pass,
+            error=None,
+            latency_s=time.perf_counter() - started,
+            usage=dict(response.usage or {}),
+        )
+        return result, candidate
+    except Exception as exc:
+        result = S2SmokeCaseResult(
+            name=case.name,
+            screenshot_path=str(case.screenshot_path),
+            raw_content=raw_content,
+            route=None,
+            action_type=None,
+            reason="",
+            semantic_target="",
+            schema_parse_success=False,
+            action_adapter_success=False,
+            unsafe_action_filter_pass=False,
+            error=f"{type(exc).__name__}: {exc}",
+            latency_s=time.perf_counter() - started,
+            usage={},
+        )
+        return result, None
+
+
+def _merge_usage(results: Sequence[S2SmokeCaseResult]) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for result in results:
+        for key, value in result.usage.items():
+            if isinstance(value, int):
+                merged[key] = merged.get(key, 0) + value
+    return merged
+
+
+async def run_s2_capability_smoke(
+    *,
+    provider: LLMProvider,
+    model: str,
+    task: str,
+    case_a: S2SmokeCase,
+    case_b: S2SmokeCase | None = None,
+    max_tokens: int = 512,
+) -> S2SmokeReport:
+    started = time.perf_counter()
+    case_results: list[S2SmokeCaseResult] = []
+    candidates: list[S2ActionCandidate | None] = []
+
+    result_a, candidate_a = await _run_case(
+        provider=provider,
+        model=model,
+        task=task,
+        case=case_a,
+        max_tokens=max_tokens,
+    )
+    case_results.append(result_a)
+    candidates.append(candidate_a)
+
+    if case_b is not None:
+        result_b, candidate_b = await _run_case(
+            provider=provider,
+            model=model,
+            task=task,
+            case=case_b,
+            max_tokens=max_tokens,
+        )
+        case_results.append(result_b)
+        candidates.append(candidate_b)
+
+    image_use_contrast_pass = (
+        len(candidates) == 2
+        and candidates[0] is not None
+        and candidates[1] is not None
+        and actions_are_materially_different(candidates[0], candidates[1])
+    )
+
+    return S2SmokeReport(
+        model=model,
+        task=task,
+        cases=case_results,
+        schema_parse_success=all(result.schema_parse_success for result in case_results),
+        action_adapter_success=all(
+            result.action_adapter_success for result in case_results
+        ),
+        unsafe_action_filter_pass=all(
+            result.unsafe_action_filter_pass for result in case_results
+        ),
+        image_use_contrast_pass=image_use_contrast_pass,
+        duration_s=time.perf_counter() - started,
+        usage=_merge_usage(case_results),
+    )
 
 
 def _adapt_action_payload(payload: Mapping[str, Any]) -> Action:
