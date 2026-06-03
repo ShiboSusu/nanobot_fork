@@ -6,6 +6,7 @@ GUI actions, device commands, live endpoints, or backend calls.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import json
 import re
@@ -94,7 +95,7 @@ def adapt_s2_action_output(payload: Mapping[str, Any]) -> S2ActionCandidate:
         requires_human_confirm=_coerce_bool(
             safety_check.get("requires_human_confirm", False)
         ),
-        raw=dict(payload),
+        raw=copy.deepcopy(payload),
     )
 
 

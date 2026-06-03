@@ -125,16 +125,25 @@ def test_normalizes_route_case_and_whitespace() -> None:
 
 def test_raw_is_copied_from_payload() -> None:
     payload = {
-        "route": "halt",
-        "reason": "blocked",
-        "safety_check": {},
+        "route": "continue",
+        "action": {
+            "type": "wait",
+            "arguments": {},
+        },
+        "safety_check": {
+            "side_effect": "false",
+        },
     }
 
     candidate = adapt_s2_action_output(payload)
-    payload["route"] = "continue"
+    payload["route"] = "halt"
+    payload["action"]["type"] = "back"
+    payload["safety_check"]["side_effect"] = "true"
 
     assert candidate.raw is not payload
-    assert candidate.raw["route"] == "halt"
+    assert candidate.raw["route"] == "continue"
+    assert candidate.raw["action"]["type"] == "wait"
+    assert candidate.raw["safety_check"]["side_effect"] == "false"
 
 
 def test_done_route_requires_done_action() -> None:
