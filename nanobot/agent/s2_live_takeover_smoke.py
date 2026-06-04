@@ -102,6 +102,10 @@ The JSON schema is:
 Use route=halt or human_confirm for any send, submit, payment, purchase,
 delete, account modification, privacy toggle, sensitive permission grant, or
 ambiguous confirmation flow. Never propose those side-effecting actions.
+If the current screen is already inside a passenger/order/payment-related
+modal, safe navigation away from that flow is allowed: use back, close,
+dismiss, or wait. Do not select passengers, edit identity fields, confirm,
+submit, book, or pay.
 """
 ROUTE_ORIGIN_KEYWORDS = ("上海", "shanghai", "pvg", "虹桥", "浦东")
 ROUTE_DESTINATION_KEYWORDS = ("广州", "guangzhou", "白云")
@@ -348,25 +352,13 @@ async def preflight_s2_live_smoke(
         )
 
     sensitive_hits = audit_start_screen(observation)
-    if sensitive_hits:
-        return PreflightResult(
-            passed=False,
-            failure_reason="sensitive_flow_start_screen",
-            screenshot_path=screenshot_path,
-            observation=observation,
-            takeover_start_screen_audited=True,
-            sensitive_flow_keywords_visible=sensitive_hits,
-            backend_preflight_passed=True,
-            live_smoke_id=config.live_smoke_id,
-        )
-
     return PreflightResult(
         passed=True,
         failure_reason=None,
         screenshot_path=screenshot_path,
         observation=observation,
         takeover_start_screen_audited=True,
-        sensitive_flow_keywords_visible=[],
+        sensitive_flow_keywords_visible=sensitive_hits,
         backend_preflight_passed=True,
         live_smoke_id=config.live_smoke_id,
     )
@@ -402,6 +394,7 @@ def build_live_handoff_packet(
             "foreground_app": observation.foreground_app or "unknown",
             "page_summary": _extra_string(observation, "state_summary")[:600],
             "visible_text": visible_text[:800],
+            "sensitive_flow_keywords_visible": audit_start_screen(observation),
         },
         "s1_history_summary": {
             "recent_actions": [
@@ -431,6 +424,18 @@ def build_live_handoff_packet(
                 "wall_time_s": config.max_s2_wall_time_s,
             },
             "forbidden_actions": list(FORBIDDEN_ACTIONS),
+            "sensitive_flow_policy": {
+                "safe_navigation_away_allowed": True,
+                "allowed_recovery_actions": ["back", "close", "dismiss", "wait"],
+                "forbidden_inside_sensitive_flow": [
+                    "select_passenger",
+                    "edit_identity",
+                    "confirm_passenger",
+                    "submit_order",
+                    "payment",
+                    "purchase",
+                ],
+            },
         },
         "required_output": {
             "schema": "s2_live_action_json",
@@ -459,7 +464,9 @@ def build_s2_live_messages(
         "S2 U0 Ctrip live takeover smoke.\n"
         "Task family: Ctrip/携程 date travel search recovery only.\n"
         "Risk: U0 read/search smoke; do not book, order, pay, submit, or "
-        "enter passenger/account/permission flows.\n"
+        "enter passenger/account/permission flows. If already inside such a "
+        "flow, safely navigate away with back/close/dismiss; do not select, "
+        "confirm, edit, submit, book, or pay.\n"
         "Use the screenshot and compact handoff packet below. Return exactly "
         "one action JSON matching the system schema.\n\n"
         f"{packet_json}"
@@ -672,6 +679,8 @@ def forbidden_action_hit_for_live_smoke(candidate: Any) -> bool:
             action.status or "",
         ])
     combined = " ".join(part for part in text_parts if part)
+    if _is_safe_sensitive_flow_escape_action(action, combined):
+        return False
     return _has_forbidden_action_intent(combined)
 
 
@@ -1175,6 +1184,33 @@ def _has_forbidden_action_intent(text: str) -> bool:
                 return True
             start = normalized.find(phrase_norm, start + len(phrase_norm))
     return False
+
+
+def _is_safe_sensitive_flow_escape_action(action: Action, text: str) -> bool:
+    normalized = text.casefold()
+    if action.action_type == "back":
+        return True
+    if action.action_type != "tap" or not action.relative:
+        return False
+    if action.x is None or action.y is None:
+        return False
+    escape_intent = _has_any_keyword(
+        normalized,
+        (
+            "back",
+            "close",
+            "dismiss",
+            "return",
+            "exit",
+            "关闭",
+            "返回",
+            "退出",
+            "收起",
+        ),
+    )
+    if not escape_intent:
+        return False
+    return float(action.x) <= 160 and float(action.y) <= 450
 
 
 def _is_negated_forbidden_phrase(normalized_text: str, phrase_start: int) -> bool:

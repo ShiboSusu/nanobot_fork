@@ -105,7 +105,7 @@ def _config(tmp_path: Path) -> S2LiveSmokeConfig:
 
 
 @pytest.mark.asyncio
-async def test_preflight_rejects_sensitive_start_screen_without_execution(
+async def test_preflight_records_sensitive_start_screen_without_execution(
     tmp_path: Path,
 ) -> None:
     backend = FakeBackend(
@@ -115,9 +115,11 @@ async def test_preflight_rejects_sensitive_start_screen_without_execution(
 
     result = await preflight_s2_live_smoke(backend=backend, config=config)
 
-    assert result.passed is False
-    assert result.failure_reason == "sensitive_flow_start_screen"
+    assert result.passed is True
+    assert result.failure_reason is None
     assert result.takeover_start_screen_audited is True
+    assert "支付" in result.sensitive_flow_keywords_visible
+    assert "乘机人" in result.sensitive_flow_keywords_visible
     assert backend.preflight_calls == 1
     assert backend.execute_calls == []
 
@@ -378,6 +380,39 @@ def test_forbidden_action_hit_for_live_smoke_allows_safe_avoidance_text() -> Non
     )
 
     assert forbidden_action_hit_for_live_smoke(candidate) is False
+
+
+def test_forbidden_action_hit_for_live_smoke_allows_safe_sensitive_flow_exit() -> None:
+    back_candidate = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {"type": "back", "arguments": {}},
+            "reason": "Back out of the passenger selection modal.",
+            "semantic_target": "return to search results without selecting passenger",
+            "safety_check": {
+                "side_effect": False,
+                "requires_human_confirm": False,
+            },
+        }
+    )
+    close_candidate = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {
+                "type": "click",
+                "arguments": {"x": 60, "y": 360, "relative": True},
+            },
+            "reason": "Close the 乘机人 modal to return to the search page.",
+            "semantic_target": "安全关闭乘机人弹层",
+            "safety_check": {
+                "side_effect": False,
+                "requires_human_confirm": False,
+            },
+        }
+    )
+
+    assert forbidden_action_hit_for_live_smoke(back_candidate) is False
+    assert forbidden_action_hit_for_live_smoke(close_candidate) is False
 
 
 def test_known_bad_action_repeated_for_live_smoke_detects_same_click() -> None:
