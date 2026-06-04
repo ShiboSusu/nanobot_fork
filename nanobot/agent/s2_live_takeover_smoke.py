@@ -840,7 +840,7 @@ async def run_s2_live_takeover_smoke(
                     f"Provider returned finish_reason={finish_reason!r}."
                 )
 
-            payload = extract_json_object(raw_content)
+            payload = _normalize_live_s2_payload(extract_json_object(raw_content))
             candidate = adapt_s2_action_output(payload)
             route = candidate.route
             action_summary = (
@@ -1017,6 +1017,81 @@ def _write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _scrub_raw_output(content: str) -> str:
     return content[:800]
+
+
+def _normalize_live_s2_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    action = normalized.get("action")
+    if not isinstance(action, Mapping):
+        return normalized
+
+    action_type = str(action.get("type", action.get("action_type", ""))).casefold()
+    arguments = action.get("arguments")
+    if not isinstance(arguments, Mapping):
+        return normalized
+
+    if action_type == "swipe" and "direction" in arguments and "x" not in arguments:
+        normalized_action = dict(action)
+        normalized_action["arguments"] = _swipe_direction_arguments(arguments)
+        normalized["action"] = normalized_action
+    if action_type in {"click", "tap"} and "point" in arguments and "x" not in arguments:
+        normalized_action = dict(action)
+        normalized_action["arguments"] = _point_click_arguments(arguments)
+        normalized["action"] = normalized_action
+    return normalized
+
+
+def _point_click_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    point = arguments.get("point")
+    if (
+        isinstance(point, Sequence)
+        and not isinstance(point, (str, bytes))
+        and len(point) >= 2
+    ):
+        return {"x": point[0], "y": point[1], "relative": True}
+    return dict(arguments)
+
+
+def _swipe_direction_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    direction = str(arguments.get("direction", "")).strip().casefold()
+    distance = str(arguments.get("distance", "medium")).strip().casefold()
+    span = 520 if distance in {"long", "large", "far", "大", "长"} else 320
+    center_x = 500
+    center_y = 500
+    half = span // 2
+    if direction in {"up", "向上", "上"}:
+        return {
+            "x": center_x,
+            "y": min(900, center_y + half),
+            "x2": center_x,
+            "y2": max(100, center_y - half),
+            "relative": True,
+        }
+    if direction in {"down", "向下", "下"}:
+        return {
+            "x": center_x,
+            "y": max(100, center_y - half),
+            "x2": center_x,
+            "y2": min(900, center_y + half),
+            "relative": True,
+        }
+    if direction in {"left", "向左", "左"}:
+        return {
+            "x": min(900, center_x + half),
+            "y": center_y,
+            "x2": max(100, center_x - half),
+            "y2": center_y,
+            "relative": True,
+        }
+    if direction in {"right", "向右", "右"}:
+        return {
+            "x": max(100, center_x - half),
+            "y": center_y,
+            "x2": min(900, center_x + half),
+            "y2": center_y,
+            "relative": True,
+        }
+    return dict(arguments)
 
 
 def _file_sha256(path: Path) -> str:
