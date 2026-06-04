@@ -79,6 +79,73 @@ def _json_payload_from_text(text: str) -> Any:
         return json.loads(text[start:end + 1])
 
 
+def _observation_extra_from_source(source: str) -> dict[str, Any]:
+    if not source.strip():
+        return {}
+    try:
+        root = ElementTree.fromstring(source)
+    except ElementTree.ParseError:
+        logger.debug("Failed to parse WDA source during observe()", exc_info=True)
+        return {}
+
+    labels: list[str] = []
+    ui_tree: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for element in root.iter():
+        if element.attrib.get("visible") != "true":
+            continue
+        label = _ios_accessibility_label(element.attrib)
+        if label and label not in seen_labels:
+            labels.append(label)
+            seen_labels.add(label)
+        if len(ui_tree) < _MAX_OBSERVATION_UI_TREE_ITEMS:
+            node = _ios_accessibility_node(element.attrib, label)
+            if node:
+                ui_tree.append(node)
+        if len(labels) >= _MAX_OBSERVATION_TEXT_ITEMS:
+            break
+
+    visible_text = "\n".join(labels)[:_MAX_OBSERVATION_TEXT_CHARS]
+    extra: dict[str, Any] = {}
+    if visible_text:
+        extra["visible_text"] = visible_text
+        extra["state_summary"] = visible_text
+    if ui_tree:
+        extra["ui_tree"] = ui_tree
+    return extra
+
+
+def _ios_accessibility_label(attributes: dict[str, str]) -> str:
+    for key in ("label", "name", "value"):
+        value = attributes.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _ios_accessibility_node(
+    attributes: dict[str, str],
+    label: str,
+) -> dict[str, Any] | None:
+    if not label:
+        return None
+    node: dict[str, Any] = {
+        "type": attributes.get("type"),
+        "label": label,
+        "name": attributes.get("name"),
+        "value": attributes.get("value"),
+    }
+    for key in ("x", "y", "width", "height"):
+        value = attributes.get(key)
+        if value is None:
+            continue
+        try:
+            node[key] = float(value)
+        except ValueError:
+            continue
+    return node
+
+
 def _import_wda() -> Any:
     """Lazily import the ``wda`` package with a helpful error on failure."""
     try:
@@ -101,6 +168,10 @@ _IOS_KEYCODE_MAP: dict[str, str] = {
     "volumedown": "volumeDown",
     "volume_down": "volumeDown",
 }
+
+_MAX_OBSERVATION_TEXT_ITEMS = 180
+_MAX_OBSERVATION_UI_TREE_ITEMS = 80
+_MAX_OBSERVATION_TEXT_CHARS = 6000
 
 
 # ---------------------------------------------------------------------------
@@ -340,13 +411,33 @@ class WdaBackend:
         else:
             bundle_id = "unknown"
 
+        source = await self._accessibility_source_for_observation(timeout=timeout)
+        extra = _observation_extra_from_source(source)
+
         return Observation(
             screenshot_path=str(screenshot_path),
             screen_width=width,
             screen_height=height,
             foreground_app=bundle_id,
             platform=self.platform,
+            extra=extra,
         )
+
+    async def _accessibility_source_for_observation(self, *, timeout: float) -> str:
+        source_timeout = max(0.5, min(float(timeout), 2.0))
+        try:
+            session = await asyncio.wait_for(
+                self._wda_call(self._client.session),
+                timeout=source_timeout,
+            )
+            source = await asyncio.wait_for(
+                self._wda_call(session.source),
+                timeout=source_timeout,
+            )
+        except Exception:
+            logger.debug("WDA source unavailable during observe()", exc_info=True)
+            return ""
+        return source if isinstance(source, str) else ""
 
     # ------------------------------------------------------------------
     # Execute
