@@ -4,10 +4,16 @@ from pathlib import Path
 
 import pytest
 
+from nanobot.agent.s2_capability_smoke import adapt_s2_action_output
 from nanobot.agent.s2_live_takeover_smoke import (
     S2LiveSmokeConfig,
     build_live_handoff_packet,
+    build_s2_live_messages,
+    ctrip_date_search_verifier,
+    forbidden_action_hit_for_live_smoke,
+    known_bad_action_repeated_for_live_smoke,
     preflight_s2_live_smoke,
+    progress_evidence,
 )
 from opengui.action import Action
 from opengui.observation import Observation
@@ -142,3 +148,159 @@ def test_build_live_handoff_packet_excludes_manual_setup_from_metrics(
         "halt",
         "human_confirm",
     ]
+
+
+def test_build_s2_live_messages_includes_image_packet_and_bounded_u0_prompt(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    screenshot_path = tmp_path / "screen.png"
+    screenshot_path.write_bytes(PNG_1X1)
+    packet = build_live_handoff_packet(
+        config=config,
+        observation=_obs(),
+        screenshot_path=screenshot_path,
+        recent_actions=[],
+        known_bad_actions=[],
+        s2_step_index=1,
+    )
+
+    messages = build_s2_live_messages(packet, screenshot_path)
+
+    assert messages[0]["role"] == "system"
+    assert "U0" in messages[0]["content"]
+    content = messages[1]["content"]
+    assert any(block["type"] == "image_url" for block in content)
+    text_blocks = [block["text"] for block in content if block["type"] == "text"]
+    assert text_blocks
+    prompt_text = "\n".join(text_blocks)
+    assert "S2 U0 Ctrip live takeover smoke" in prompt_text
+    assert "s2_live_handoff_v1" in prompt_text
+    assert "operator-created Ctrip calendar state" in prompt_text
+    assert "上海" in prompt_text
+    assert "广州" in prompt_text
+    assert len(prompt_text) < 6000
+
+
+def test_ctrip_date_search_verifier_requires_route_date_and_result_evidence() -> None:
+    success = ctrip_date_search_verifier(
+        _obs(
+            visible_text=(
+                "携程 机票 上海 到 广州 2026-06-05 "
+                "航班列表 MU1234 价格 ¥520 起飞 08:00 到达 10:20"
+            )
+        )
+    )
+    missing_result = ctrip_date_search_verifier(
+        _obs(visible_text="携程 机票 上海 到 广州 2026-06-05 选择日期")
+    )
+    sensitive = ctrip_date_search_verifier(
+        _obs(visible_text="携程 订单填写 乘机人 支付 提交订单")
+    )
+
+    assert success.verified_success is True
+    assert success.failure_reason is None
+    assert "route_shanghai_guangzhou" in success.evidence
+    assert "target_date_visible" in success.evidence
+    assert "flight_result_list_visible" in success.evidence
+    assert missing_result.verified_success is False
+    assert missing_result.failure_reason == "verifier_unknown"
+    assert sensitive.verified_success is False
+    assert sensitive.failure_reason == "sensitive_flow_page"
+
+
+def test_progress_evidence_detects_screenshot_hash_date_and_result_progress(
+    tmp_path: Path,
+) -> None:
+    before_screenshot = tmp_path / "before.png"
+    after_screenshot = tmp_path / "after.png"
+    before_screenshot.write_bytes(PNG_1X1)
+    after_screenshot.write_bytes(PNG_1X1 + b"changed")
+
+    progress = progress_evidence(
+        before_observation=_obs(visible_text="携程 机票 上海 广州 2027年6月"),
+        after_observation=_obs(
+            visible_text="携程 机票 上海 广州 6月5 航班列表 价格 起飞 到达"
+        ),
+        before_screenshot=before_screenshot,
+        after_screenshot=after_screenshot,
+    )
+
+    assert progress.has_progress is True
+    assert progress.screenshot_changed is True
+    assert progress.target_date_more_visible is True
+    assert progress.result_list_visible is True
+    assert "screenshot_hash_changed" in progress.evidence
+    assert "target_date_more_visible" in progress.evidence
+    assert "flight_result_list_visible" in progress.evidence
+
+
+def test_done_route_is_only_candidate_and_requires_verifier_success() -> None:
+    done_candidate = adapt_s2_action_output(
+        {
+            "route": "done",
+            "action": {"type": "done", "arguments": {"status": "success"}},
+            "reason": "The result list is visible.",
+            "semantic_target": "finish after verifying Ctrip results",
+            "safety_check": {
+                "side_effect": False,
+                "requires_human_confirm": False,
+            },
+        }
+    )
+
+    unknown = ctrip_date_search_verifier(
+        _obs(visible_text="携程 机票 上海 广州 2026-06-05 选择日期")
+    )
+    verified = ctrip_date_search_verifier(
+        _obs(visible_text="上海 广州 2026-06-05 航班 价格 起飞 到达")
+    )
+
+    assert done_candidate.route == "done"
+    assert done_candidate.action is not None
+    assert done_candidate.action.action_type == "done"
+    assert unknown.verified_success is False
+    assert verified.verified_success is True
+
+
+def test_forbidden_action_hit_for_live_smoke_blocks_booking_payment_language() -> None:
+    candidate = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {
+                "type": "click",
+                "arguments": {"x": 500, "y": 800, "relative": True},
+            },
+            "reason": "Click the booking button to submit the order.",
+            "semantic_target": "进入订单填写并支付",
+            "safety_check": {
+                "side_effect": False,
+                "requires_human_confirm": False,
+            },
+        }
+    )
+
+    assert forbidden_action_hit_for_live_smoke(candidate) is True
+
+
+def test_known_bad_action_repeated_for_live_smoke_detects_same_click() -> None:
+    candidate_action = Action("tap", x=502, y=798, relative=True)
+    known_bad_actions = [
+        Action("tap", x=500, y=800, relative=True),
+        Action("tap", x=200, y=200, relative=True),
+    ]
+
+    assert (
+        known_bad_action_repeated_for_live_smoke(
+            candidate_action,
+            known_bad_actions,
+        )
+        is True
+    )
+    assert (
+        known_bad_action_repeated_for_live_smoke(
+            Action("tap", x=650, y=650, relative=True),
+            known_bad_actions,
+        )
+        is False
+    )

@@ -7,14 +7,19 @@ DeviceBackend after explicit preflight has passed.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nanobot.agent.s2_capability_smoke import S2CapabilityError
 from nanobot.agent.s2_handoff_offline_dry_run import FORBIDDEN_ACTIONS
-from opengui.action import Action, describe_action
+from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
+from opengui.action import Action, describe_action, parse_action
 from opengui.interfaces import DeviceBackend
 from opengui.observation import Observation
 
@@ -77,6 +82,55 @@ Use route=halt or human_confirm for any send, submit, payment, purchase,
 delete, account modification, privacy toggle, sensitive permission grant, or
 ambiguous confirmation flow. Never propose those side-effecting actions.
 """
+ROUTE_ORIGIN_KEYWORDS = ("上海", "shanghai", "pvg", "虹桥", "浦东")
+ROUTE_DESTINATION_KEYWORDS = ("广州", "guangzhou", "白云")
+TARGET_DATE_KEYWORDS = ("2026-06-05", "06-05", "6月5")
+TARGET_DATE_PARTIAL_KEYWORDS = ("2026年6月", "2026/06", "2026-06", "6月")
+FLIGHT_RESULT_KEYWORDS = (
+    "航班",
+    "flight",
+    "价格",
+    "票价",
+    "起飞",
+    "到达",
+    "departure",
+    "arrival",
+    "price",
+    "¥",
+    "￥",
+)
+LIVE_SENSITIVE_PAGE_KEYWORDS = SENSITIVE_FLOW_KEYWORDS + (
+    "order",
+    "order form",
+    "booking form",
+    "passenger info",
+    "checkout",
+    "submit order",
+    "订单",
+    "订单页",
+    "填写乘机人",
+    "去支付",
+)
+LIVE_FORBIDDEN_ACTION_KEYWORDS = (
+    "booking",
+    "book ",
+    "submit",
+    "order",
+    "checkout",
+    "payment",
+    "pay",
+    "passenger",
+    "purchase",
+    "下单",
+    "预订",
+    "提交",
+    "订单",
+    "支付",
+    "付款",
+    "乘机人",
+    "旅客",
+    "购买",
+)
 
 
 @dataclass(frozen=True)
@@ -122,11 +176,12 @@ class ProgressEvidence:
     result_list_visible: bool = False
     moved_away_from_known_bad_state: bool = False
     verifier_evidence_improved: bool = False
+    evidence: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
 
     @property
     def has_progress(self) -> bool:
-        return any(
+        return bool(self.evidence) or any(
             (
                 self.screenshot_changed,
                 self.target_date_more_visible,
@@ -307,6 +362,171 @@ def build_live_handoff_packet(
     }
 
 
+def build_s2_live_messages(
+    packet: Mapping[str, Any],
+    screenshot_path: Path,
+) -> list[dict[str, Any]]:
+    raw = screenshot_path.read_bytes()
+    mime = detect_image_mime(raw)
+    if mime is None:
+        raise S2CapabilityError(f"Unsupported image file: {screenshot_path}")
+
+    packet_json = json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)
+    if len(packet_json) > 4800:
+        packet_json = f"{packet_json[:4800]}\n...<packet truncated for prompt bound>"
+
+    label = (
+        "S2 U0 Ctrip live takeover smoke.\n"
+        "Task family: Ctrip/携程 date travel search recovery only.\n"
+        "Risk: U0 read/search smoke; do not book, order, pay, submit, or "
+        "enter passenger/account/permission flows.\n"
+        "Use the screenshot and compact handoff packet below. Return exactly "
+        "one action JSON matching the system schema.\n\n"
+        f"{packet_json}"
+    )
+    return [
+        {"role": "system", "content": S2_LIVE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": build_image_content_blocks(
+                raw,
+                mime,
+                str(screenshot_path),
+                label,
+            ),
+        },
+    ]
+
+
+def ctrip_date_search_verifier(observation: Observation) -> CtripVerifierResult:
+    text = _observation_text(observation)
+    if _has_any_keyword(text, LIVE_SENSITIVE_PAGE_KEYWORDS):
+        return CtripVerifierResult(
+            verified_success=False,
+            evidence=[],
+            failure_reason="sensitive_flow_page",
+        )
+
+    evidence: list[str] = []
+    if _has_route_evidence(text):
+        evidence.append("route_shanghai_guangzhou")
+    if _has_target_date_evidence(text):
+        evidence.append("target_date_visible")
+    if _has_flight_result_evidence(text):
+        evidence.append("flight_result_list_visible")
+
+    verified_success = {
+        "route_shanghai_guangzhou",
+        "target_date_visible",
+        "flight_result_list_visible",
+    }.issubset(evidence)
+    return CtripVerifierResult(
+        verified_success=verified_success,
+        evidence=evidence,
+        failure_reason=None if verified_success else "verifier_unknown",
+    )
+
+
+def progress_evidence(
+    *,
+    before_observation: Observation,
+    after_observation: Observation,
+    before_screenshot: Path,
+    after_screenshot: Path,
+) -> ProgressEvidence:
+    evidence: list[str] = []
+    screenshot_changed = _file_sha256(before_screenshot) != _file_sha256(
+        after_screenshot
+    )
+    if screenshot_changed:
+        evidence.append("screenshot_hash_changed")
+
+    before_text = _observation_text(before_observation)
+    after_text = _observation_text(after_observation)
+    target_date_more_visible = _date_progress_score(after_text) > _date_progress_score(
+        before_text
+    )
+    if target_date_more_visible:
+        evidence.append("target_date_more_visible")
+
+    result_list_visible = _has_flight_result_evidence(after_text)
+    if result_list_visible:
+        evidence.append("flight_result_list_visible")
+
+    moved_away_from_known_bad_state = _moved_away_from_known_bad_state(
+        before_text,
+        after_text,
+    )
+    if moved_away_from_known_bad_state:
+        evidence.append("moved_away_from_known_bad_state")
+
+    before_verifier = ctrip_date_search_verifier(before_observation)
+    after_verifier = ctrip_date_search_verifier(after_observation)
+    verifier_evidence_improved = len(after_verifier.evidence) > len(
+        before_verifier.evidence
+    )
+    if verifier_evidence_improved:
+        evidence.append("verifier_evidence_improved")
+
+    return ProgressEvidence(
+        screenshot_changed=screenshot_changed,
+        target_date_more_visible=target_date_more_visible,
+        result_list_visible=result_list_visible,
+        moved_away_from_known_bad_state=moved_away_from_known_bad_state,
+        verifier_evidence_improved=verifier_evidence_improved,
+        evidence=tuple(evidence),
+    )
+
+
+def forbidden_action_hit_for_live_smoke(candidate: Any) -> bool:
+    action = getattr(candidate, "action", None)
+    text_parts = [
+        getattr(candidate, "route", ""),
+        getattr(candidate, "reason", ""),
+        getattr(candidate, "semantic_target", ""),
+    ]
+    if action is not None:
+        text_parts.extend([
+            action.action_type,
+            action.text or "",
+            action.status or "",
+        ])
+    raw = getattr(candidate, "raw", None)
+    if isinstance(raw, Mapping):
+        text_parts.append(json.dumps(raw, ensure_ascii=False, sort_keys=True))
+    combined = " ".join(part for part in text_parts if part)
+    return _has_any_keyword(combined, LIVE_FORBIDDEN_ACTION_KEYWORDS)
+
+
+def known_bad_action_repeated_for_live_smoke(
+    candidate_action: Action | None,
+    known_bad_actions: Sequence[Action | Mapping[str, Any]],
+) -> bool:
+    if candidate_action is None:
+        return False
+    for entry in known_bad_actions:
+        bad_action = _coerce_known_bad_action(entry)
+        if bad_action is not None and _actions_repeat(candidate_action, bad_action):
+            return True
+    return False
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _date_progress_score(text: str) -> int:
+    if _has_any_keyword(text, TARGET_DATE_KEYWORDS):
+        return 3
+    normalized = text.casefold()
+    score = 0
+    if "2026" in normalized:
+        score += 1
+    if _has_any_keyword(normalized, TARGET_DATE_PARTIAL_KEYWORDS):
+        score += 1
+    return score
+
+
 def _extra_string(observation: Observation, key: str) -> str:
     value = observation.extra.get(key)
     return value if isinstance(value, str) else ""
@@ -326,3 +546,106 @@ def _packet_action(action: Action | Mapping[str, Any]) -> dict[str, Any]:
             "relative": action.relative,
         }
     return dict(action)
+
+
+def _has_any_keyword(text: str, keywords: Sequence[str]) -> bool:
+    normalized = text.casefold()
+    return any(keyword.casefold() in normalized for keyword in keywords)
+
+
+def _has_route_evidence(text: str) -> bool:
+    return _has_any_keyword(text, ROUTE_ORIGIN_KEYWORDS) and _has_any_keyword(
+        text,
+        ROUTE_DESTINATION_KEYWORDS,
+    )
+
+
+def _has_target_date_evidence(text: str) -> bool:
+    return _has_any_keyword(text, TARGET_DATE_KEYWORDS)
+
+
+def _has_flight_result_evidence(text: str) -> bool:
+    return _has_any_keyword(text, FLIGHT_RESULT_KEYWORDS)
+
+
+def _moved_away_from_known_bad_state(before_text: str, after_text: str) -> bool:
+    before = before_text.casefold()
+    after = after_text.casefold()
+    was_bad_calendar = "2027" in before or "wrong date" in before
+    if not was_bad_calendar:
+        return False
+    return "2027" not in after or _has_target_date_evidence(after_text)
+
+
+def _coerce_known_bad_action(value: Action | Mapping[str, Any]) -> Action | None:
+    if isinstance(value, Action):
+        return value
+    if not isinstance(value, Mapping):
+        return None
+
+    if isinstance(value.get("action"), Mapping):
+        return _coerce_known_bad_action(value["action"])
+
+    action_type = value.get("action_type", value.get("type", value.get("action")))
+    if action_type is None:
+        return None
+
+    arguments = value.get("arguments", {})
+    if not isinstance(arguments, Mapping):
+        arguments = {}
+    payload = dict(arguments)
+    payload["action_type"] = action_type
+    for key in (
+        "x",
+        "y",
+        "x2",
+        "y2",
+        "text",
+        "duration_ms",
+        "relative",
+        "status",
+        "auto_enter",
+    ):
+        if key in value and key not in payload:
+            payload[key] = value[key]
+
+    try:
+        return parse_action(payload)
+    except Exception:
+        return None
+
+
+def _actions_repeat(first: Action, second: Action) -> bool:
+    if first.action_type != second.action_type:
+        return False
+    if first.action_type in {"back", "home", "wait", "done"}:
+        return True
+    if first.action_type == "tap":
+        if None in {first.x, first.y, second.x, second.y}:
+            return False
+        return (
+            math.dist(
+                (float(first.x), float(first.y)),
+                (float(second.x), float(second.y)),
+            )
+            <= 25
+        )
+    if first.action_type == "swipe":
+        return all(
+            _near(a, b, threshold=50)
+            for a, b in (
+                (first.x, second.x),
+                (first.y, second.y),
+                (first.x2, second.x2),
+                (first.y2, second.y2),
+            )
+        )
+    if first.action_type == "input_text":
+        return (first.text or "").strip() == (second.text or "").strip()
+    return first == second
+
+
+def _near(first: float | None, second: float | None, *, threshold: float) -> bool:
+    if first is None or second is None:
+        return False
+    return abs(float(first) - float(second)) <= threshold
