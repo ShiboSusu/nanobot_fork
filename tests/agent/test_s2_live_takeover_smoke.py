@@ -826,6 +826,55 @@ async def test_run_loop_normalizes_click_point_payload(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_loop_normalizes_click_coordinate_payload(tmp_path: Path) -> None:
+    backend = FakeBackend(
+        [
+            _obs(visible_text="携程 选择乘机人"),
+            _obs(visible_text="携程 上海 广州 2026-06-05 航班列表 价格 起飞 到达"),
+        ]
+    )
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"coordinate": [58, 333]}
+                },
+                "reason": "Close the passenger selection modal.",
+                "semantic_target": "return to the safe result list",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }"""
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=S2LiveSmokeConfig(
+            task_instruction="在携程查询2026年6月5日上海到广州的机票",
+            success_criteria="Must show route, date, and result list.",
+            recovery_objective="Close passenger modal and return to result list.",
+            setup_description="operator-created passenger modal state",
+            run_dir=tmp_path / "s2_live",
+            max_s2_steps=1,
+        ),
+    )
+
+    assert backend.execute_calls
+    assert backend.execute_calls[0].action_type == "tap"
+    assert backend.execute_calls[0].x == 58
+    assert backend.execute_calls[0].y == 333
+    assert backend.execute_calls[0].relative is True
+    assert report["failure_reason"] == "s2_budget_exhausted"
+
+
+@pytest.mark.asyncio
 async def test_run_loop_defaults_coordinate_click_payload_to_relative(
     tmp_path: Path,
 ) -> None:
