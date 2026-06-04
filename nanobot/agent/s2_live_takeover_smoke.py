@@ -1039,7 +1039,35 @@ def _normalize_live_s2_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         normalized_action = dict(action)
         normalized_action["arguments"] = _point_click_arguments(arguments)
         normalized["action"] = normalized_action
+    normalized_action = normalized.get("action")
+    if isinstance(normalized_action, Mapping):
+        normalized["action"] = _default_live_coordinates_to_relative(
+            normalized_action,
+        )
     return normalized
+
+
+def _default_live_coordinates_to_relative(action: Mapping[str, Any]) -> dict[str, Any]:
+    normalized_action = dict(action)
+    arguments = normalized_action.get("arguments")
+    if not isinstance(arguments, Mapping):
+        return normalized_action
+
+    action_type = str(
+        normalized_action.get("type", normalized_action.get("action_type", "")),
+    ).casefold()
+    if action_type not in {"click", "tap", "swipe"}:
+        return normalized_action
+
+    normalized_arguments = dict(arguments)
+    coordinate_keys = {"x", "y", "x2", "y2"}
+    if (
+        coordinate_keys.intersection(normalized_arguments)
+        and "relative" not in normalized_arguments
+    ):
+        normalized_arguments["relative"] = True
+        normalized_action["arguments"] = normalized_arguments
+    return normalized_action
 
 
 def _point_click_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:

@@ -790,6 +790,57 @@ async def test_run_loop_normalizes_click_point_payload(tmp_path: Path) -> None:
     assert report["failure_reason"] == "s2_budget_exhausted"
 
 
+@pytest.mark.asyncio
+async def test_run_loop_defaults_coordinate_click_payload_to_relative(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        [
+            _obs(visible_text="携程 2026年6月 6月5 上海 广州"),
+            _obs(visible_text="携程 2026年6月 6月5 上海 广州"),
+        ]
+    )
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 775, "y": 328}
+                },
+                "reason": "tap the visible June 5 date",
+                "semantic_target": "select 2026-06-05",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }"""
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=S2LiveSmokeConfig(
+            task_instruction="在携程查询2026年6月5日上海到广州的机票",
+            success_criteria="Must show route, date, and result list.",
+            recovery_objective="Recover from calendar to result list.",
+            setup_description="operator-created Ctrip calendar state",
+            run_dir=tmp_path / "s2_live",
+            max_s2_steps=1,
+        ),
+    )
+
+    assert backend.execute_calls
+    assert backend.execute_calls[0].action_type == "tap"
+    assert backend.execute_calls[0].x == 775
+    assert backend.execute_calls[0].y == 328
+    assert backend.execute_calls[0].relative is True
+    assert report["failure_reason"] == "no_progress"
+
+
 def test_parse_args_requires_manual_setup_description_and_run_dir(
     tmp_path: Path,
 ) -> None:
