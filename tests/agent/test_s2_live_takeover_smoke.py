@@ -12,6 +12,7 @@ from nanobot.agent.s2_live_takeover_smoke import (
     ctrip_date_search_verifier,
     forbidden_action_hit_for_live_smoke,
     known_bad_action_repeated_for_live_smoke,
+    parse_args,
     preflight_s2_live_smoke,
     progress_evidence,
     run_s2_live_takeover_smoke,
@@ -691,3 +692,86 @@ async def test_run_loop_enforces_three_step_budget(tmp_path: Path) -> None:
     assert report["result"] == "failed"
     assert report["failure_reason"] == "s2_budget_exhausted"
     assert len(backend.execute_calls) == 3
+
+
+def test_parse_args_requires_manual_setup_description_and_run_dir(
+    tmp_path: Path,
+) -> None:
+    args = parse_args(
+        [
+            "--task",
+            "在携程查询2026年6月5日上海到广州的机票，只看到结果列表即可",
+            "--success-criteria",
+            "Must show route, date, and result list.",
+            "--recovery-objective",
+            "Recover from calendar to result list.",
+            "--setup-description",
+            "operator-created Ctrip calendar state",
+            "--run-dir",
+            str(tmp_path / "run"),
+        ]
+    )
+
+    assert args.task.startswith("在携程查询")
+    assert args.setup_description == "operator-created Ctrip calendar state"
+    assert args.run_dir == tmp_path / "run"
+
+
+@pytest.mark.asyncio
+async def test_run_loop_writes_local_trace_and_report_artifacts(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        [
+            _obs(visible_text="携程 选择日期 2027年6月"),
+            _obs(visible_text="携程 上海 广州 2026-06-05 航班列表 价格 起飞 到达"),
+        ]
+    )
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 500, "y": 620, "relative": true}
+                },
+                "reason": "select target date",
+                "semantic_target": "2026-06-05",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }""",
+            """{
+                "route": "done",
+                "action": {"type": "done", "arguments": {"status": "success"}},
+                "reason": "target result list visible",
+                "semantic_target": "flight result list",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }""",
+        ]
+    )
+    config = _config(tmp_path)
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=config,
+    )
+
+    trace_path = Path(report["trace_path"])
+    report_path = config.run_dir / "report.json"
+    assert trace_path.is_file()
+    assert report_path.is_file()
+    trace_text = trace_path.read_text(encoding="utf-8")
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "s2_takeover_start" in trace_text
+    assert "s2_takeover_step" in trace_text
+    assert "s2_takeover_end" in trace_text
+    assert "verified_success" in report_text

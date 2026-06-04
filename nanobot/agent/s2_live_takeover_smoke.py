@@ -7,6 +7,8 @@ DeviceBackend after explicit preflight has passed.
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import hashlib
 import json
 import math
@@ -686,6 +688,22 @@ def known_bad_action_repeated_for_live_smoke(
     return False
 
 
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run a manual-gated U0 S2 live takeover smoke."
+    )
+    parser.add_argument("--task", required=True)
+    parser.add_argument("--success-criteria", required=True)
+    parser.add_argument("--recovery-objective", required=True)
+    parser.add_argument("--setup-description", required=True)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--backend", choices=["ios"], default="ios")
+    parser.add_argument("--model", default=S2_MODEL_DEFAULT)
+    parser.add_argument("--max-tokens", type=int, default=512)
+    return parser.parse_args(argv)
+
+
 async def run_s2_live_takeover_smoke(
     *,
     backend: DeviceBackend,
@@ -1156,3 +1174,44 @@ def _near(first: float | None, second: float | None, *, threshold: float) -> boo
     if first is None or second is None:
         return False
     return abs(float(first) - float(second)) <= threshold
+
+
+async def _amain(argv: Sequence[str] | None = None) -> int:
+    from nanobot.config.loader import load_config, resolve_config_env_vars
+    from nanobot.providers.factory import build_gui_s2_provider_snapshot
+    from opengui.backends.ios_wda import WdaBackend
+
+    args = parse_args(argv)
+    config_obj = resolve_config_env_vars(load_config(args.config))
+    snapshot = build_gui_s2_provider_snapshot(config_obj)
+    if snapshot is None:
+        raise SystemExit(
+            "No GUI S2 model configured. Set gui.s2Model and gui.s2Provider."
+        )
+
+    gui_config = getattr(config_obj, "gui")
+    backend = WdaBackend(wda_url=gui_config.ios.wda_url)
+    smoke_config = S2LiveSmokeConfig(
+        task_instruction=args.task,
+        success_criteria=args.success_criteria,
+        recovery_objective=args.recovery_objective,
+        setup_description=args.setup_description,
+        run_dir=args.run_dir,
+    )
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=snapshot.provider,
+        model=args.model or snapshot.model,
+        config=smoke_config,
+        max_tokens=args.max_tokens,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["result"] in {"verified_success", "failed", "halted"} else 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    return asyncio.run(_amain(argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
