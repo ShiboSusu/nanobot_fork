@@ -10,14 +10,21 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.s2_capability_smoke import S2CapabilityError
+from nanobot.agent.s2_capability_smoke import (
+    S2CapabilityError,
+    adapt_s2_action_output,
+    extract_json_object,
+    safety_filter_passed,
+)
 from nanobot.agent.s2_handoff_offline_dry_run import FORBIDDEN_ACTIONS
+from nanobot.providers.base import LLMProvider
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 from opengui.action import Action, describe_action, parse_action
 from opengui.interfaces import DeviceBackend
@@ -677,6 +684,321 @@ def known_bad_action_repeated_for_live_smoke(
         if bad_action is not None and _actions_repeat(candidate_action, bad_action):
             return True
     return False
+
+
+async def run_s2_live_takeover_smoke(
+    *,
+    backend: DeviceBackend,
+    provider: LLMProvider,
+    model: str,
+    config: S2LiveSmokeConfig,
+    known_bad_actions: Sequence[Action | Mapping[str, Any]] = (),
+    max_tokens: int = 512,
+) -> dict[str, Any]:
+    """Run a short manual-gated S2 takeover smoke through injected fakes/live IO."""
+
+    started = time.perf_counter()
+    run_dir = config.run_dir
+    screenshots_dir = run_dir / "screenshots"
+    trace_path = run_dir / "trace.jsonl"
+    report_path = run_dir / "report.json"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+    trace_rows: list[dict[str, Any]] = []
+    executed_actions: list[Action] = []
+    progress_labels: list[str] = []
+    usage = {"s1": 0, "s2": 0, "total": 0}
+    model_reported_success = False
+    verified_success = False
+
+    preflight = await preflight_s2_live_smoke(backend=backend, config=config)
+    if not preflight.passed:
+        report = _summary_report(
+            config=config,
+            result="failed",
+            verified_success=False,
+            failure_reason=preflight.failure_reason or "preflight_failed",
+            s2_steps=0,
+            usage=usage,
+            started=started,
+            model_reported_success=False,
+            trace_path=trace_path,
+            progress_evidence=progress_labels,
+        )
+        trace_rows.append(
+            {
+                "event": "s2_takeover_end",
+                "phase": "s2_takeover",
+                "result": report["result"],
+                "failure_reason": report["failure_reason"],
+            }
+        )
+        _write_jsonl(trace_path, trace_rows)
+        _write_json_file(report_path, report)
+        return report
+
+    if preflight.observation is None or preflight.screenshot_path is None:
+        report = _summary_report(
+            config=config,
+            result="failed",
+            verified_success=False,
+            failure_reason="preflight_failed",
+            s2_steps=0,
+            usage=usage,
+            started=started,
+            model_reported_success=False,
+            trace_path=trace_path,
+            progress_evidence=progress_labels,
+        )
+        _write_jsonl(trace_path, [{"event": "s2_takeover_end", **report}])
+        _write_json_file(report_path, report)
+        return report
+
+    current_observation = preflight.observation
+    current_screenshot = preflight.screenshot_path
+    trace_rows.append(
+        {
+            "event": "s2_takeover_start",
+            "phase": "s2_takeover",
+            "live_smoke_id": config.live_smoke_id,
+            "actor_model": model,
+            "task_family": config.task_family,
+            "takeover_start_mode": TAKEOVER_START_MODE,
+            "takeover_reason": "manual_live_smoke",
+            "manual_setup_excluded_from_metrics": True,
+            "setup_description": config.setup_description,
+            "takeover_start_screen_audited": (
+                preflight.takeover_start_screen_audited
+            ),
+            "screenshot_path": str(current_screenshot),
+            "foreground_app": current_observation.foreground_app,
+            "budget": {
+                "max_s2_steps": config.max_s2_steps,
+                "max_s2_total_tokens": config.max_s2_total_tokens,
+                "max_s2_wall_time_s": config.max_s2_wall_time_s,
+            },
+        }
+    )
+
+    result = "failed"
+    failure_reason: str | None = None
+    s2_steps = 0
+
+    for step_index in range(1, config.max_s2_steps + 1):
+        step_started = time.perf_counter()
+        route: str | None = None
+        action_summary: str | None = None
+        raw_content = ""
+        finish_reason: str | None = None
+        step_usage: dict[str, Any] = {}
+        executed = False
+        screenshot_after: Path | None = None
+        step_progress = ProgressEvidence()
+
+        try:
+            packet = build_live_handoff_packet(
+                config=config,
+                observation=current_observation,
+                screenshot_path=current_screenshot,
+                recent_actions=executed_actions,
+                known_bad_actions=known_bad_actions,
+                s2_step_index=step_index - 1,
+            )
+            messages = build_s2_live_messages(packet, current_screenshot)
+            response = await provider.chat_with_retry(
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=0,
+            )
+            s2_steps += 1
+            raw_content = response.content or ""
+            finish_reason = response.finish_reason
+            step_usage = dict(response.usage or {})
+            usage["s2"] += _usage_total_tokens(step_usage)
+            usage["total"] = usage["s1"] + usage["s2"]
+            if finish_reason != "stop":
+                raise S2CapabilityError(
+                    f"Provider returned finish_reason={finish_reason!r}."
+                )
+
+            payload = extract_json_object(raw_content)
+            candidate = adapt_s2_action_output(payload)
+            route = candidate.route
+            action_summary = (
+                describe_action(candidate.action) if candidate.action else None
+            )
+
+            if route in {"halt", "human_confirm"}:
+                result = "halted"
+                failure_reason = route
+                break
+            if (
+                not safety_filter_passed(candidate)
+                or forbidden_action_hit_for_live_smoke(candidate)
+            ):
+                failure_reason = "safety_blocked_action"
+                break
+            if known_bad_action_repeated_for_live_smoke(
+                candidate.action,
+                known_bad_actions,
+            ):
+                failure_reason = "repeated_action"
+                break
+            if route == "done":
+                model_reported_success = True
+                verdict = ctrip_date_search_verifier(current_observation)
+                verified_success = verdict.verified_success
+                progress_labels.extend(verdict.evidence)
+                if verified_success:
+                    result = "verified_success"
+                    failure_reason = None
+                else:
+                    failure_reason = verdict.failure_reason or "false_done"
+                break
+            if route != "continue" or candidate.action is None:
+                failure_reason = "execution_error"
+                break
+
+            await backend.execute(candidate.action)
+            executed = True
+            executed_actions.append(candidate.action)
+            screenshot_after = screenshots_dir / f"step_{step_index:03d}_after.png"
+            next_observation = await backend.observe(
+                screenshot_path=screenshot_after,
+            )
+            step_progress = progress_evidence(
+                before_observation=current_observation,
+                after_observation=next_observation,
+                before_screenshot=current_screenshot,
+                after_screenshot=screenshot_after,
+            )
+            progress_labels.extend(step_progress.evidence)
+            current_observation = next_observation
+            current_screenshot = screenshot_after
+            if not step_progress.has_progress:
+                failure_reason = "no_progress"
+                break
+        except Exception as exc:
+            failure_reason = "execution_error"
+            if not raw_content:
+                raw_content = f"{type(exc).__name__}: {exc}"
+            break
+        finally:
+            trace_rows.append(
+                {
+                    "event": "s2_takeover_step",
+                    "phase": "s2_takeover",
+                    "s2_step_index": step_index,
+                    "actor_model": model,
+                    "route": route,
+                    "action_summary": action_summary,
+                    "executed": executed,
+                    "screenshot_after": (
+                        str(screenshot_after) if screenshot_after else None
+                    ),
+                    "finish_reason": finish_reason,
+                    "step_latency_s": time.perf_counter() - step_started,
+                    "usage": step_usage,
+                    "progress_evidence": list(step_progress.evidence),
+                    "s2_output_raw_preview": _scrub_raw_output(raw_content),
+                    "budget_remaining": {
+                        "steps": max(0, config.max_s2_steps - step_index),
+                    },
+                }
+            )
+
+    if failure_reason is None and not verified_success:
+        failure_reason = "s2_budget_exhausted"
+
+    report = _summary_report(
+        config=config,
+        result=result if verified_success else result,
+        verified_success=verified_success,
+        failure_reason=failure_reason,
+        s2_steps=s2_steps,
+        usage=usage,
+        started=started,
+        model_reported_success=model_reported_success,
+        trace_path=trace_path,
+        progress_evidence=progress_labels,
+    )
+    trace_rows.append(
+        {
+            "event": "s2_takeover_end",
+            "phase": "s2_takeover",
+            "result": report["result"],
+            "failure_reason": report["failure_reason"],
+            "model_reported_success": model_reported_success,
+            "controller_verified_success": verified_success,
+            "trace_path": str(trace_path),
+        }
+    )
+    _write_jsonl(trace_path, trace_rows)
+    _write_json_file(report_path, report)
+    return report
+
+
+def _summary_report(
+    *,
+    config: S2LiveSmokeConfig,
+    result: str,
+    verified_success: bool,
+    failure_reason: str | None,
+    s2_steps: int,
+    usage: Mapping[str, int],
+    started: float,
+    model_reported_success: bool,
+    trace_path: Path,
+    progress_evidence: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "task": config.task_instruction,
+        "task_family": config.task_family,
+        "result": result,
+        "verified_success": verified_success,
+        "failure_reason": failure_reason,
+        "s2_steps": s2_steps,
+        "total_steps": s2_steps,
+        "tokens": dict(usage),
+        "progress_evidence": list(dict.fromkeys(progress_evidence)),
+        "model_reported_success": model_reported_success,
+        "manual_setup_excluded_from_metrics": True,
+        "setup_description": config.setup_description,
+        "takeover_start_screen_audited": True,
+        "trace_path": str(trace_path),
+        "latency": {
+            "wall_clock_s": time.perf_counter() - started,
+        },
+    }
+
+
+def _usage_total_tokens(usage: Mapping[str, Any]) -> int:
+    value = usage.get("total_tokens", 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, default=str))
+            handle.write("\n")
+
+
+def _write_json_file(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
+def _scrub_raw_output(content: str) -> str:
+    return content[:800]
 
 
 def _file_sha256(path: Path) -> str:

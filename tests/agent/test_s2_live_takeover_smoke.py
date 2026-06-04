@@ -14,7 +14,9 @@ from nanobot.agent.s2_live_takeover_smoke import (
     known_bad_action_repeated_for_live_smoke,
     preflight_s2_live_smoke,
     progress_evidence,
+    run_s2_live_takeover_smoke,
 )
+from nanobot.providers.base import LLMResponse
 from opengui.action import Action
 from opengui.observation import Observation
 
@@ -54,6 +56,26 @@ class FakeBackend:
 
     async def list_apps(self) -> list[str]:
         return ["ctrip"]
+
+
+class FakeProvider:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.calls: list[dict] = []
+
+    async def chat_with_retry(self, **kwargs) -> LLMResponse:
+        self.calls.append(kwargs)
+        if not self.responses:
+            raise AssertionError("FakeProvider has no response queued.")
+        return LLMResponse(
+            content=self.responses.pop(0),
+            finish_reason="stop",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+        )
 
 
 def _obs(
@@ -378,3 +400,294 @@ def test_known_bad_action_repeated_for_live_smoke_detects_same_click() -> None:
         )
         is False
     )
+
+
+@pytest.mark.asyncio
+async def test_run_loop_executes_safe_continue_then_verifies_done(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        [
+            _obs(visible_text="携程 选择日期 2027年6月"),
+            _obs(visible_text="携程 上海 广州 2026-06-05 航班列表 价格 起飞 到达"),
+        ]
+    )
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 500, "y": 620, "relative": true}
+                },
+                "reason": "select the visible target date cell",
+                "semantic_target": "2026-06-05 date selection",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }""",
+            """{
+                "route": "done",
+                "action": {"type": "done", "arguments": {"status": "success"}},
+                "reason": "flight results for the target date are visible",
+                "semantic_target": "verified flight result list",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }""",
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=_config(tmp_path),
+    )
+
+    assert report["result"] == "verified_success"
+    assert report["verified_success"] is True
+    assert report["failure_reason"] is None
+    assert report["s2_steps"] == 2
+    assert len(backend.execute_calls) == 1
+    assert backend.execute_calls[0].action_type == "tap"
+    assert report["tokens"] == {"s1": 0, "s2": 30, "total": 30}
+    assert report["manual_setup_excluded_from_metrics"] is True
+    assert report["takeover_start_screen_audited"] is True
+    assert report["model_reported_success"] is True
+    assert report["progress_evidence"]
+    assert Path(report["trace_path"]).is_file()
+
+
+@pytest.mark.asyncio
+async def test_run_loop_blocks_unsafe_action_without_execution(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend([_obs(visible_text="携程 选择日期 2027年6月")])
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 500, "y": 900, "relative": true}
+                },
+                "reason": "tap submit order",
+                "semantic_target": "提交订单",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }"""
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=_config(tmp_path),
+    )
+
+    assert report["result"] == "failed"
+    assert report["verified_success"] is False
+    assert report["failure_reason"] == "safety_blocked_action"
+    assert report["s2_steps"] == 1
+    assert backend.execute_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_human_confirm_stops_cleanly_without_execution(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend([_obs(visible_text="携程 选择日期 2027年6月")])
+    provider = FakeProvider(
+        [
+            """{
+                "route": "human_confirm",
+                "action": null,
+                "reason": "booking confirmation might be needed",
+                "semantic_target": "ambiguous booking boundary",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": true,
+                    "requires_human_confirm": true
+                }
+            }"""
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=_config(tmp_path),
+    )
+
+    assert report["result"] == "halted"
+    assert report["failure_reason"] == "human_confirm"
+    assert report["s2_steps"] == 1
+    assert backend.execute_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_rejects_known_bad_repeated_action(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend([_obs(visible_text="携程 选择日期 2027年6月")])
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 500, "y": 600, "relative": true}
+                },
+                "reason": "tap same failed date",
+                "semantic_target": "same failed calendar cell",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }"""
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=_config(tmp_path),
+        known_bad_actions=[
+            {
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 500, "y": 600, "relative": True},
+                }
+            }
+        ],
+    )
+
+    assert report["result"] == "failed"
+    assert report["failure_reason"] == "repeated_action"
+    assert report["s2_steps"] == 1
+    assert backend.execute_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_loop_stops_after_no_progress(tmp_path: Path) -> None:
+    backend = FakeBackend(
+        [
+            _obs(visible_text="携程 选择日期 2027年6月"),
+            _obs(visible_text="携程 选择日期 2027年6月"),
+        ]
+    )
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {"type": "wait", "arguments": {"duration_ms": 100}},
+                "reason": "wait for loading",
+                "semantic_target": "same calendar state",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }"""
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=_config(tmp_path),
+    )
+
+    assert report["result"] == "failed"
+    assert report["failure_reason"] == "no_progress"
+    assert report["s2_steps"] == 1
+    assert len(backend.execute_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_loop_enforces_three_step_budget(tmp_path: Path) -> None:
+    backend = FakeBackend(
+        [
+            _obs(visible_text="携程 选择日期 2027年6月"),
+            _obs(visible_text="携程 选择日期 2026年6月"),
+            _obs(visible_text="携程 选择日期 2026年6月 6月5"),
+            _obs(visible_text="携程 上海 广州 2026-06-05 航班 价格"),
+        ]
+    )
+    provider = FakeProvider(
+        [
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "swipe",
+                    "arguments": {
+                        "x": 500,
+                        "y": 800,
+                        "x2": 500,
+                        "y2": 200,
+                        "relative": true
+                    }
+                },
+                "reason": "move toward target month",
+                "semantic_target": "2026 calendar",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }""",
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 500, "y": 600, "relative": true}
+                },
+                "reason": "select target date",
+                "semantic_target": "6月5",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }""",
+            """{
+                "route": "continue",
+                "action": {
+                    "type": "click",
+                    "arguments": {"x": 820, "y": 920, "relative": true}
+                },
+                "reason": "open result list",
+                "semantic_target": "flight search results",
+                "final_answer": {"required": false, "text": "", "evidence": []},
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }""",
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=_config(tmp_path),
+    )
+
+    assert report["s2_steps"] == 3
+    assert report["result"] == "failed"
+    assert report["failure_reason"] == "s2_budget_exhausted"
+    assert len(backend.execute_calls) == 3
