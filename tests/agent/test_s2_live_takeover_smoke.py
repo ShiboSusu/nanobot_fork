@@ -500,6 +500,46 @@ async def test_run_loop_executes_safe_continue_then_verifies_done(
 
 
 @pytest.mark.asyncio
+async def test_run_loop_normalizes_done_wait_action_before_verifier(
+    tmp_path: Path,
+) -> None:
+    backend = FakeBackend(
+        [_obs(visible_text="上海 广州 明天 06-05 航班 价格 ¥320 起飞 到达")]
+    )
+    provider = FakeProvider(
+        [
+            """{
+                "route": "done",
+                "action": {"type": "wait", "arguments": {"duration": 1}},
+                "reason": "The flight result list is visible.",
+                "semantic_target": "verified result list",
+                "final_answer": {
+                    "required": true,
+                    "text": "Results are visible.",
+                    "evidence": ["上海 -> 广州", "明天 06-05", "¥320"]
+                },
+                "safety_check": {
+                    "side_effect": false,
+                    "requires_human_confirm": false
+                }
+            }"""
+        ]
+    )
+
+    report = await run_s2_live_takeover_smoke(
+        backend=backend,
+        provider=provider,
+        model="qwen3.5-397b-a17b",
+        config=_config(tmp_path),
+    )
+
+    assert report["result"] == "verified_success"
+    assert report["verified_success"] is True
+    assert report["failure_reason"] is None
+    assert backend.execute_calls == []
+
+
+@pytest.mark.asyncio
 async def test_run_loop_blocks_unsafe_action_without_execution(
     tmp_path: Path,
 ) -> None:
@@ -949,6 +989,27 @@ def test_parse_args_requires_manual_setup_description_and_run_dir(
     assert args.setup_description == "operator-created Ctrip calendar state"
     assert args.run_dir == tmp_path / "run"
     assert args.max_s2_steps == 8
+
+
+def test_parse_args_defaults_live_max_tokens_above_main_agent_default(
+    tmp_path: Path,
+) -> None:
+    args = parse_args(
+        [
+            "--task",
+            "在携程查询2026年6月5日上海到广州的机票，只看到结果列表即可",
+            "--success-criteria",
+            "Must show route, date, and result list.",
+            "--recovery-objective",
+            "Recover from calendar to result list.",
+            "--setup-description",
+            "operator-created Ctrip calendar state",
+            "--run-dir",
+            str(tmp_path / "run"),
+        ]
+    )
+
+    assert args.max_tokens == 16384
 
 
 @pytest.mark.asyncio

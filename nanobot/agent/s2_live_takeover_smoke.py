@@ -37,8 +37,9 @@ TASK_FAMILY = "date_travel_search"
 S2_MODEL_DEFAULT = "qwen3.5-397b-a17b"
 MAX_S2_STEPS = 3
 MAX_S2_CALLS = 3
-MAX_S2_TOTAL_TOKENS = 20000
+MAX_S2_TOTAL_TOKENS = 60000
 MAX_S2_WALL_TIME_S = 180
+MAX_S2_OUTPUT_TOKENS = 16384
 MAX_LIVE_PACKET_PROMPT_CHARS = 4800
 REQUIRED_LIVE_PACKET_FIELDS = (
     "packet_version",
@@ -709,7 +710,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--backend", choices=["ios"], default="ios")
     parser.add_argument("--model", default=S2_MODEL_DEFAULT)
-    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--max-tokens", type=int, default=MAX_S2_OUTPUT_TOKENS)
     parser.add_argument("--max-s2-steps", type=int, default=MAX_S2_STEPS)
     return parser.parse_args(argv)
 
@@ -721,7 +722,7 @@ async def run_s2_live_takeover_smoke(
     model: str,
     config: S2LiveSmokeConfig,
     known_bad_actions: Sequence[Action | Mapping[str, Any]] = (),
-    max_tokens: int = 512,
+    max_tokens: int = MAX_S2_OUTPUT_TOKENS,
 ) -> dict[str, Any]:
     """Run a short manual-gated S2 takeover smoke through injected fakes/live IO."""
 
@@ -1031,6 +1032,7 @@ def _scrub_raw_output(content: str) -> str:
 
 def _normalize_live_s2_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
+    normalized = _normalize_live_done_payload(normalized)
     action = normalized.get("action")
     if not isinstance(action, Mapping):
         return normalized
@@ -1057,6 +1059,21 @@ def _normalize_live_s2_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         normalized["action"] = _default_live_coordinates_to_relative(
             normalized_action,
         )
+    return normalized
+
+
+def _normalize_live_done_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    route = str(payload.get("route", "")).strip().casefold()
+    if route != "done":
+        return payload
+
+    normalized = dict(payload)
+    action = normalized.get("action")
+    action_type = ""
+    if isinstance(action, Mapping):
+        action_type = str(action.get("type", action.get("action_type", ""))).casefold()
+    if action_type != "done":
+        normalized["action"] = {"type": "done", "arguments": {"status": "success"}}
     return normalized
 
 
