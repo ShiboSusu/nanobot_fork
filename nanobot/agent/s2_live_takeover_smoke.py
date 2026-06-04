@@ -701,6 +701,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backend", choices=["ios"], default="ios")
     parser.add_argument("--model", default=S2_MODEL_DEFAULT)
     parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--max-s2-steps", type=int, default=MAX_S2_STEPS)
     return parser.parse_args(argv)
 
 
@@ -1272,6 +1273,7 @@ async def _amain(argv: Sequence[str] | None = None) -> int:
         recovery_objective=args.recovery_objective,
         setup_description=args.setup_description,
         run_dir=args.run_dir,
+        max_s2_steps=args.max_s2_steps,
     )
     report = await run_s2_live_takeover_smoke(
         backend=backend,

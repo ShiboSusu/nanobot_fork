@@ -805,12 +805,15 @@ def test_parse_args_requires_manual_setup_description_and_run_dir(
             "operator-created Ctrip calendar state",
             "--run-dir",
             str(tmp_path / "run"),
+            "--max-s2-steps",
+            "8",
         ]
     )
 
     assert args.task.startswith("在携程查询")
     assert args.setup_description == "operator-created Ctrip calendar state"
     assert args.run_dir == tmp_path / "run"
+    assert args.max_s2_steps == 8
 
 
 @pytest.mark.asyncio
