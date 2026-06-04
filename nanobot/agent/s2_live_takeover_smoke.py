@@ -30,17 +30,29 @@ MAX_S2_STEPS = 3
 MAX_S2_CALLS = 3
 MAX_S2_TOTAL_TOKENS = 20000
 MAX_S2_WALL_TIME_S = 180
+MAX_LIVE_PACKET_PROMPT_CHARS = 4800
+REQUIRED_LIVE_PACKET_FIELDS = (
+    "packet_version",
+    "task",
+    "current_state",
+    "controller",
+    "required_output",
+    "manual_setup_excluded_from_metrics",
+    "setup_description",
+    "takeover_start_screen_audited",
+)
 SENSITIVE_FLOW_KEYWORDS = (
     "order form",
     "submit order",
     "checkout",
     "payment",
-    "pay",
     "passenger",
     "coupon purchase",
     "login modification",
-    "account",
-    "permission",
+    "account modification",
+    "account settings",
+    "grant permission",
+    "allow permission",
     "订单填写",
     "提交订单",
     "确认订单",
@@ -99,37 +111,98 @@ FLIGHT_RESULT_KEYWORDS = (
     "¥",
     "￥",
 )
-LIVE_SENSITIVE_PAGE_KEYWORDS = SENSITIVE_FLOW_KEYWORDS + (
-    "order",
+LIVE_SENSITIVE_PAGE_KEYWORDS = (
     "order form",
     "booking form",
     "passenger info",
     "checkout",
-    "submit order",
-    "订单",
-    "订单页",
-    "填写乘机人",
-    "去支付",
-)
-LIVE_FORBIDDEN_ACTION_KEYWORDS = (
-    "booking",
-    "book ",
-    "submit",
-    "order",
-    "checkout",
     "payment",
-    "pay",
-    "passenger",
-    "purchase",
-    "下单",
-    "预订",
-    "提交",
-    "订单",
+    "pay now",
+    "submit order",
+    "confirm order",
+    "passenger form",
+    "coupon purchase",
+    "login modification",
+    "account modification",
+    "account settings",
+    "grant permission",
+    "allow permission",
+    "订单页",
+    "订单填写",
+    "提交订单",
+    "确认订单",
+    "结算",
     "支付",
     "付款",
     "乘机人",
-    "旅客",
+    "旅客信息",
+    "购买优惠券",
+    "登录修改",
+    "账号设置",
+    "账户设置",
+    "授权权限",
+    "填写乘机人",
+    "去支付",
+)
+LIVE_FORBIDDEN_INTENT_PHRASES = (
+    "submit order",
+    "submit the order",
+    "confirm order",
+    "place order",
+    "complete order",
+    "tap submit",
+    "click submit",
+    "press submit",
+    "checkout",
+    "pay now",
+    "make payment",
+    "proceed to payment",
+    "tap pay",
+    "click pay",
+    "book ticket",
+    "book flight",
+    "booking button",
+    "tap booking",
+    "click booking",
+    "passenger form",
+    "passenger info",
+    "fill passenger",
+    "enter passenger",
+    "purchase",
+    "下单",
+    "提交订单",
+    "确认订单",
+    "订单填写",
+    "去支付",
+    "支付",
+    "付款",
+    "点支付",
+    "点击支付",
+    "乘机人",
+    "旅客信息",
+    "填写乘机人",
     "购买",
+    "点击购买",
+    "点击预订",
+    "点预订",
+    "预订按钮",
+)
+FORBIDDEN_NEGATION_CUES = (
+    "avoid",
+    "without",
+    "do not",
+    "don't",
+    "not ",
+    "never",
+    "skip",
+    "不要",
+    "避免",
+    "不进入",
+    "不点击",
+    "不提交",
+    "不支付",
+    "不下单",
+    "跳过",
 )
 
 
@@ -371,9 +444,7 @@ def build_s2_live_messages(
     if mime is None:
         raise S2CapabilityError(f"Unsupported image file: {screenshot_path}")
 
-    packet_json = json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)
-    if len(packet_json) > 4800:
-        packet_json = f"{packet_json[:4800]}\n...<packet truncated for prompt bound>"
+    packet_json = _compact_live_packet_json(packet)
 
     label = (
         "S2 U0 Ctrip live takeover smoke.\n"
@@ -396,6 +467,102 @@ def build_s2_live_messages(
             ),
         },
     ]
+
+
+def _compact_live_packet_json(packet: Mapping[str, Any]) -> str:
+    for string_limit, list_limit in ((700, 3), (320, 2), (140, 1)):
+        compacted = _compact_live_packet(
+            packet,
+            string_limit=string_limit,
+            list_limit=list_limit,
+            include_optional=True,
+        )
+        rendered = json.dumps(compacted, ensure_ascii=False, indent=2)
+        if len(rendered) <= MAX_LIVE_PACKET_PROMPT_CHARS:
+            return rendered
+
+    compacted = _compact_live_packet(
+        packet,
+        string_limit=120,
+        list_limit=0,
+        include_optional=False,
+    )
+    return json.dumps(compacted, ensure_ascii=False, indent=2)
+
+
+def _compact_live_packet(
+    packet: Mapping[str, Any],
+    *,
+    string_limit: int,
+    list_limit: int,
+    include_optional: bool,
+) -> dict[str, Any]:
+    compacted: dict[str, Any] = {}
+    for key in REQUIRED_LIVE_PACKET_FIELDS:
+        if key in packet:
+            field_list_limit = (
+                999 if key in {"controller", "required_output"} else list_limit
+            )
+            compacted[key] = _compact_packet_value(
+                packet[key],
+                string_limit=string_limit,
+                list_limit=field_list_limit,
+            )
+
+    if include_optional:
+        for key in ("takeover_start_mode", "recovery", "s1_history_summary"):
+            if key in packet and key not in compacted:
+                compacted[key] = _compact_packet_value(
+                    packet[key],
+                    string_limit=string_limit,
+                    list_limit=list_limit,
+                )
+    return compacted
+
+
+def _compact_packet_value(
+    value: Any,
+    *,
+    string_limit: int,
+    list_limit: int,
+) -> Any:
+    if isinstance(value, str):
+        return _truncate_packet_string(value, string_limit)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _compact_packet_value(
+                item,
+                string_limit=string_limit,
+                list_limit=list_limit,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        shown = value[-list_limit:] if list_limit > 0 else []
+        compacted = [
+            _compact_packet_value(
+                item,
+                string_limit=string_limit,
+                list_limit=list_limit,
+            )
+            for item in shown
+        ]
+        if len(value) > len(shown):
+            compacted.insert(0, f"<{len(value) - len(shown)} entries omitted>")
+        return compacted
+    if isinstance(value, tuple):
+        return _compact_packet_value(
+            list(value),
+            string_limit=string_limit,
+            list_limit=list_limit,
+        )
+    return value
+
+
+def _truncate_packet_string(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}...<truncated {len(value) - limit} chars>"
 
 
 def ctrip_date_search_verifier(observation: Observation) -> CtripVerifierResult:
@@ -479,9 +646,13 @@ def progress_evidence(
 
 
 def forbidden_action_hit_for_live_smoke(candidate: Any) -> bool:
+    if bool(getattr(candidate, "side_effect", False)) or bool(
+        getattr(candidate, "requires_human_confirm", False)
+    ):
+        return True
+
     action = getattr(candidate, "action", None)
     text_parts = [
-        getattr(candidate, "route", ""),
         getattr(candidate, "reason", ""),
         getattr(candidate, "semantic_target", ""),
     ]
@@ -491,11 +662,8 @@ def forbidden_action_hit_for_live_smoke(candidate: Any) -> bool:
             action.text or "",
             action.status or "",
         ])
-    raw = getattr(candidate, "raw", None)
-    if isinstance(raw, Mapping):
-        text_parts.append(json.dumps(raw, ensure_ascii=False, sort_keys=True))
     combined = " ".join(part for part in text_parts if part)
-    return _has_any_keyword(combined, LIVE_FORBIDDEN_ACTION_KEYWORDS)
+    return _has_forbidden_action_intent(combined)
 
 
 def known_bad_action_repeated_for_live_smoke(
@@ -551,6 +719,23 @@ def _packet_action(action: Action | Mapping[str, Any]) -> dict[str, Any]:
 def _has_any_keyword(text: str, keywords: Sequence[str]) -> bool:
     normalized = text.casefold()
     return any(keyword.casefold() in normalized for keyword in keywords)
+
+
+def _has_forbidden_action_intent(text: str) -> bool:
+    normalized = text.casefold()
+    for phrase in LIVE_FORBIDDEN_INTENT_PHRASES:
+        phrase_norm = phrase.casefold()
+        start = normalized.find(phrase_norm)
+        while start != -1:
+            if not _is_negated_forbidden_phrase(normalized, start):
+                return True
+            start = normalized.find(phrase_norm, start + len(phrase_norm))
+    return False
+
+
+def _is_negated_forbidden_phrase(normalized_text: str, phrase_start: int) -> bool:
+    prefix = normalized_text[max(0, phrase_start - 32) : phrase_start]
+    return any(cue.casefold() in prefix for cue in FORBIDDEN_NEGATION_CUES)
 
 
 def _has_route_evidence(text: str) -> bool:

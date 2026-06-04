@@ -182,6 +182,49 @@ def test_build_s2_live_messages_includes_image_packet_and_bounded_u0_prompt(
     assert len(prompt_text) < 6000
 
 
+def test_build_s2_live_messages_compacts_history_without_losing_contract(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    screenshot_path = tmp_path / "screen.png"
+    screenshot_path.write_bytes(PNG_1X1)
+    packet = build_live_handoff_packet(
+        config=config,
+        observation=_obs(),
+        screenshot_path=screenshot_path,
+        recent_actions=[],
+        known_bad_actions=[],
+        s2_step_index=1,
+    )
+    packet["current_state"]["visible_text"] = "visible text " + ("x" * 9000)
+    packet["current_state"]["page_summary"] = "page summary " + ("y" * 9000)
+    packet["s1_history_summary"]["recent_actions"] = [
+        {"action_type": "tap", "summary": f"recent {index} " + ("r" * 1000)}
+        for index in range(12)
+    ]
+    packet["s1_history_summary"]["known_bad_actions"] = [
+        {"action_type": "tap", "summary": f"bad {index} " + ("b" * 1000)}
+        for index in range(12)
+    ]
+
+    messages = build_s2_live_messages(packet, screenshot_path)
+
+    text_blocks = [
+        block["text"] for block in messages[1]["content"] if block["type"] == "text"
+    ]
+    prompt_text = "\n".join(text_blocks)
+    assert "s2_live_handoff_v1" in prompt_text
+    assert "setup_description" in prompt_text
+    assert "operator-created Ctrip calendar state" in prompt_text
+    assert "required_output" in prompt_text
+    assert "continue" in prompt_text
+    assert "done" in prompt_text
+    assert "halt" in prompt_text
+    assert "human_confirm" in prompt_text
+    assert config.task_instruction in prompt_text
+    assert len(prompt_text) < 6000
+
+
 def test_ctrip_date_search_verifier_requires_route_date_and_result_evidence() -> None:
     success = ctrip_date_search_verifier(
         _obs(
@@ -207,6 +250,20 @@ def test_ctrip_date_search_verifier_requires_route_date_and_result_evidence() ->
     assert missing_result.failure_reason == "verifier_unknown"
     assert sensitive.verified_success is False
     assert sensitive.failure_reason == "sensitive_flow_page"
+
+
+def test_ctrip_date_search_verifier_allows_benign_order_entry_text() -> None:
+    result = ctrip_date_search_verifier(
+        _obs(
+            visible_text=(
+                "携程 机票 上海 到 广州 2026-06-05 航班列表 "
+                "价格 起飞 到达 sort order 我的订单入口"
+            )
+        )
+    )
+
+    assert result.verified_success is True
+    assert result.failure_reason is None
 
 
 def test_progress_evidence_detects_screenshot_hash_date_and_result_progress(
@@ -281,6 +338,23 @@ def test_forbidden_action_hit_for_live_smoke_blocks_booking_payment_language() -
     )
 
     assert forbidden_action_hit_for_live_smoke(candidate) is True
+
+
+def test_forbidden_action_hit_for_live_smoke_allows_safe_avoidance_text() -> None:
+    candidate = adapt_s2_action_output(
+        {
+            "route": "continue",
+            "action": {"type": "wait", "arguments": {"duration_ms": 500}},
+            "reason": "Wait; sort order and 我的订单入口 are visible, avoid booking flow.",
+            "semantic_target": "keep observing the safe result list",
+            "safety_check": {
+                "side_effect": False,
+                "requires_human_confirm": False,
+            },
+        }
+    )
+
+    assert forbidden_action_hit_for_live_smoke(candidate) is False
 
 
 def test_known_bad_action_repeated_for_live_smoke_detects_same_click() -> None:
