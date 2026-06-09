@@ -440,6 +440,80 @@ class TestGuiAgentProfileWiring:
 
         assert captured_kwargs["image_scale_ratio"] == pytest.approx(0.4)
 
+    def test_s2_takeover_enabled_is_forwarded_to_agent(self) -> None:
+        gui_config = GuiConfig(
+            backend="dry-run",
+            enable_skill_execution=True,
+            s2_takeover_enabled=True,
+        )
+        tool = _make_tool(gui_config)
+
+        captured_kwargs: dict = {}
+
+        async def _run() -> None:
+            with (
+                patch("nanobot.agent.tools.gui.GuiAgent.__init__", return_value=None) as mock_init,
+                patch(
+                    "nanobot.agent.tools.gui.TrajectoryRecorder",
+                    return_value=MagicMock(path=None),
+                ),
+            ):
+                with patch("opengui.agent.GuiAgent.run", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = MagicMock(
+                        success=True,
+                        summary="ok",
+                        model_summary="",
+                        trace_path=None,
+                        steps_taken=0,
+                        error=None,
+                    )
+                    mock_init.side_effect = lambda *a, **kw: captured_kwargs.update(kw)
+                    try:
+                        await tool._run_task(tool._backend, "open settings")
+                    except Exception:
+                        pass
+
+        asyncio.run(_run())
+
+        assert captured_kwargs["s2_takeover_enabled"] is True
+
+    def test_s2_hint_disabled_sets_zero_s2_hints_on_agent(self) -> None:
+        gui_config = GuiConfig(
+            backend="dry-run",
+            enable_skill_execution=True,
+            s2_hint_enabled=False,
+        )
+        tool = _make_tool(gui_config)
+
+        captured_kwargs: dict = {}
+
+        async def _run() -> None:
+            with (
+                patch("nanobot.agent.tools.gui.GuiAgent.__init__", return_value=None) as mock_init,
+                patch(
+                    "nanobot.agent.tools.gui.TrajectoryRecorder",
+                    return_value=MagicMock(path=None),
+                ),
+            ):
+                with patch("opengui.agent.GuiAgent.run", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = MagicMock(
+                        success=True,
+                        summary="ok",
+                        model_summary="",
+                        trace_path=None,
+                        steps_taken=0,
+                        error=None,
+                    )
+                    mock_init.side_effect = lambda *a, **kw: captured_kwargs.update(kw)
+                    try:
+                        await tool._run_task(tool._backend, "open settings")
+                    except Exception:
+                        pass
+
+        asyncio.run(_run())
+
+        assert captured_kwargs["s2_max_hints"] == 0
+
     def test_stagnation_limit_is_forwarded_to_agent(self) -> None:
         gui_config = GuiConfig(
             backend="dry-run",

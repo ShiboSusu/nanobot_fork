@@ -346,6 +346,8 @@ class GuiSubagentTool(Tool):
             installed_apps=installed_apps,
             s2_llm=self._s2_llm_adapter,
             s2_model=self._s2_model,
+            s2_max_hints=1 if self._gui_config.s2_hint_enabled else 0,
+            s2_takeover_enabled=self._gui_config.s2_takeover_enabled,
         )
 
         app_hint = self._resolve_app_hint(

@@ -311,6 +311,7 @@ _IOS_BUNDLE_DISPLAY_NAMES: dict[str, str] = {
     "com.jingdong.app.iphone": "JD",
     "com.xunmeng.pinduoduo": "Pinduoduo",
     "com.taobao.fleamarket": "Xianyu",
+    "com.wuba.zhuanzhuan": "Zhuanzhuan/转转",
     "com.meituan.imeituan": "Meituan",
     "com.dianping.dpscope": "Dianping",
     # Transport
@@ -405,6 +406,8 @@ _IOS_APP_ALIASES_BASE: dict[str, str] = {
     "拼多多": "com.xunmeng.pinduoduo",
     "xianyu": "com.taobao.fleamarket",
     "闲鱼": "com.taobao.fleamarket",
+    "zhuanzhuan": "com.wuba.zhuanzhuan",
+    "转转": "com.wuba.zhuanzhuan",
     "ctrip": "ctrip.com",
     "携程": "ctrip.com",
     "lark": "com.ss.iphone.lark",

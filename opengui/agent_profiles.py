@@ -506,6 +506,9 @@ def _normalize_general_e2e_action(action_json: dict[str, Any]) -> dict[str, Any]
         "swipe": "scroll",
     }.get(raw_type, raw_type)
 
+    if action_type == "click" and _is_top_left_back_navigation_click(action_json):
+        return {"action_type": "back"}
+
     if action_type in {"click", "double_tap", "long_press"}:
         x, y = _extract_point(action_json.get("coordinate"))
         return {
@@ -573,6 +576,25 @@ def _normalize_general_e2e_action(action_json: dict[str, Any]) -> dict[str, Any]
         status = action_json.get("goal_status") or action_json.get("status") or action_json.get("text")
         return {"action_type": "done", "status": _normalize_done_status(status)}
     raise ValueError(f"Unsupported general_e2e action type: {action_type!r}")
+
+
+def _is_top_left_back_navigation_click(action_json: dict[str, Any]) -> bool:
+    if action_json.get("coordinate") is None:
+        return False
+    try:
+        x, y = _extract_point(action_json.get("coordinate"))
+    except ValueError:
+        return False
+    if x > 160 or y > 160:
+        return False
+    text = " ".join(
+        str(action_json.get(key) or "")
+        for key in ("summary", "intent", "text")
+    ).casefold()
+    return any(term in text for term in (
+        "返回", "上一级", "上一页", "退出当前", "退出系统设置",
+        "back", "go back", "previous screen", "return to previous",
+    ))
 
 
 def _normalize_qwen3vl_action(action_json: dict[str, Any]) -> dict[str, Any]:

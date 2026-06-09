@@ -502,8 +502,172 @@ async def test_gui_agent_uses_s2_hint_before_halting_on_monitor_red(tmp_path: Pa
         for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     s2_events = [event for event in trace_events if event["event"] == "s2_guidance"]
-    assert s2_events
+    assert len(s2_events) == 1
     assert s2_events[0]["hint"] == "Verify Settings is already open, then call done if complete."
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_enters_s2_takeover_after_prior_hint(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor(horizon_threshold=0.20)
+    backend = _StaticScreenBackend()
+    s1 = _RecordingLLM([
+        LLMResponse(
+            content="Action: tap Settings",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 120,
+                        "y": 220,
+                        "summary": "tap Settings first",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: tap Settings again",
+            tool_calls=[
+                ToolCall(
+                    id="call-2",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 120,
+                        "y": 220,
+                        "summary": "tap Settings again",
+                    },
+                )
+            ],
+        ),
+    ])
+    s2 = _RecordingLLM([
+        LLMResponse(content='{"route":"S2_HINT","hint":"Stop repeating the same tap and finish from the current screen."}'),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-s2-done",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "summary": "S2 takeover completed the task",
+                    },
+                )
+            ],
+        ),
+    ])
+    task = "点击屏幕上的设置图标"
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task=task, platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=4,
+        include_date_context=False,
+        autonomy_monitor=monitor,
+        s2_llm=s2,
+        s2_model="qwen3.5-397b-a17b",
+        s2_max_hints=1,
+        s2_takeover_enabled=True,
+    )
+
+    result = await agent.run(task, max_retries=1)
+
+    assert result.success is True
+    assert len(s1.calls) == 2
+    assert len(s2.calls) == 2
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len([event for event in trace_events if event["event"] == "s2_guidance"]) == 1
+    takeover_events = [event for event in trace_events if event["event"] == "s2_takeover_start"]
+    assert len(takeover_events) == 1
+    assert takeover_events[0]["step_index"] == 2
+
+
+@pytest.mark.asyncio
+async def test_gui_agent_keeps_hint_only_when_s2_takeover_disabled(tmp_path: Path) -> None:
+    monitor = AutonomyMonitor(horizon_threshold=0.20)
+    backend = _StaticScreenBackend()
+    s1 = _RecordingLLM([
+        LLMResponse(
+            content="Action: tap Settings",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 120,
+                        "y": 220,
+                        "summary": "tap Settings first",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: tap Settings again",
+            tool_calls=[
+                ToolCall(
+                    id="call-2",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "tap",
+                        "x": 120,
+                        "y": 220,
+                        "summary": "tap Settings again",
+                    },
+                )
+            ],
+        ),
+        LLMResponse(
+            content="Action: done",
+            tool_calls=[
+                ToolCall(
+                    id="call-3",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "summary": "S1 completed after hint-only recovery",
+                    },
+                )
+            ],
+        ),
+    ])
+    s2 = _RecordingLLM([
+        LLMResponse(content='{"route":"S2_HINT","hint":"Stop repeating the same tap and verify completion."}')
+    ])
+    task = "点击屏幕上的设置图标"
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task=task, platform="ios")
+    agent = GuiAgent(
+        s1,
+        backend,
+        trajectory_recorder=recorder,
+        artifacts_root=tmp_path / "runs",
+        max_steps=4,
+        include_date_context=False,
+        autonomy_monitor=monitor,
+        s2_llm=s2,
+        s2_model="qwen3.5-397b-a17b",
+        s2_max_hints=1,
+    )
+
+    result = await agent.run(task, max_retries=1)
+
+    assert result.success is True
+    assert len(s1.calls) == 3
+    assert len(s2.calls) == 1
+    trace_events = [
+        json.loads(line)
+        for line in (Path(result.trace_path) / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert not [event for event in trace_events if event["event"] == "s2_takeover_start"]
 
 
 @pytest.mark.asyncio

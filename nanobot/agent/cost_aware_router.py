@@ -220,7 +220,7 @@ class CostAwareProblemRouter:
         app_terms = (term for term in self._COMMON_APP_TERMS if term not in {"天气"})
         app_gui_operation_terms = (
             *self._OPEN_TERMS,
-            "点击", "输入", "搜索", "查看", "看看", "检查", "播放", "进入",
+            "点击", "输入", "搜索", "查", "查询", "显示", "查看", "看看", "检查", "播放", "进入",
             "tap", "click", "type", "search", "watch", "play",
         )
         return (

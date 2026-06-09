@@ -279,6 +279,8 @@ class GuiConfig(Base):
     reuser_model: str | None = None
     s2_model: str | None = None
     s2_provider: str | None = None
+    s2_hint_enabled: bool = True
+    s2_takeover_enabled: bool = False
     planner_enabled: bool = False
     planner_model: str | None = None
     planner_provider: str | None = None

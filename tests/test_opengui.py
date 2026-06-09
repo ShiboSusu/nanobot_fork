@@ -456,6 +456,40 @@ async def test_ios_go_to_app_without_punctuation_prelaunches_resolved_app(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_ios_zhuanzhuan_task_prelaunches_resolved_app(tmp_path: Path) -> None:
+    backend = _RecordingIosBackend()
+    agent = GuiAgent(
+        _ScriptedLLM([
+            LLMResponse(
+                content="done",
+                tool_calls=[ToolCall(
+                    id="call-1",
+                    name="computer_use",
+                    arguments={
+                        "action_type": "done",
+                        "status": "success",
+                        "text": "Zhuanzhuan is ready for the next GUI step.",
+                    },
+                )],
+            )
+        ]),
+        backend,
+        trajectory_recorder=_make_recorder(tmp_path, "ios-zhuanzhuan-prelaunch"),
+        artifacts_root=tmp_path / "runs",
+        max_steps=1,
+    )
+
+    await agent.run(
+        '打开转转App，搜索"健身环大冒险"，然后筛选"个人卖家"和"支持验机"的商品',
+        max_retries=1,
+    )
+
+    assert backend.executed_actions[:1] == [
+        Action(action_type="open_app", text="com.wuba.zhuanzhuan")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_ios_prelaunch_dismisses_visible_skip_control_before_llm(tmp_path: Path) -> None:
     class SplashBackend(_RecordingIosBackend):
         async def find_text_controls(self, texts: list[str]) -> list[dict[str, object]]:
@@ -1037,6 +1071,49 @@ def test_parse_action_accepts_mobileworld_navigation_aliases() -> None:
     assert recents.action_type == "app_switch"
 
 
+def test_general_e2e_top_left_back_click_normalizes_to_back_action() -> None:
+    response = LLMResponse(
+        content=(
+            "Thought: Need to leave the current iOS page.\n"
+            'Action: {"action_type":"click","coordinate":[50,44],'
+            '"summary":"点击左上角返回箭头，退出系统设置页面返回B站应用"}'
+        ),
+    )
+
+    normalized = normalize_profile_response("general_e2e", response)
+
+    assert normalized.tool_calls
+    assert normalized.tool_calls[0].arguments["action_type"] == "back"
+
+
+def test_gui_action_policy_blocks_notification_enable_detour(tmp_path: Path) -> None:
+    agent = GuiAgent(
+        _ScriptedLLM([]),
+        DryRunBackend(),
+        trajectory_recorder=_make_recorder(tmp_path, "policy"),
+    )
+    observation = Observation(
+        screenshot_path=str(tmp_path / "screen.png"),
+        screen_width=402,
+        screen_height=874,
+        foreground_app="tv.danmaku.bilianime",
+        platform="ios",
+    )
+
+    intervention = agent._policy_intervention_for_action(
+        task="检查B站里我的关注列表设置是不是不公开，只查看当前设置，不要修改任何开关",
+        action=Action(action_type="tap", x=745, y=922, relative=True),
+        current_observation=observation,
+        action_summary="点击去开启按钮关闭通知弹窗",
+        state_summary="B站弹出通知权限引导",
+    )
+
+    assert intervention is not None
+    policy_action, reason = intervention
+    assert policy_action.action_type == "request_intervention"
+    assert "permission_or_authorization" in reason
+
+
 def test_build_system_prompt_uses_mobile_agent_style_sections() -> None:
     prompt = build_system_prompt(
         platform="android",
@@ -1079,6 +1156,27 @@ def test_general_e2e_prompt_includes_mobileworld_execution_principles() -> None:
     assert "You MUST first click or focus the input box before using input_text" in prompt
     assert "If an action fails twice" in prompt
     assert "Analyze goal, history, and current screen" in prompt
+
+
+def test_ios_general_e2e_prompt_prefers_navigate_back_for_back_navigation() -> None:
+    prompt = build_system_prompt(
+        platform="ios",
+        agent_profile="general_e2e",
+    )
+
+    assert "prefer `navigate_back`" in prompt
+    assert "left-edge back gesture" in prompt
+
+
+def test_ios_general_e2e_prompt_warns_against_app_icon_guessing() -> None:
+    prompt = build_system_prompt(
+        platform="ios",
+        agent_profile="general_e2e",
+    )
+
+    assert "Do not launch apps by guessing from icon appearance" in prompt
+    assert "Spotlight" in prompt
+    assert "visible app-name text" in prompt
 
 
 def test_build_system_prompt_warns_against_filling_onboarding_personal_data() -> None:
@@ -1563,6 +1661,44 @@ async def test_ios_backend_scroll_vertical_direction_is_inverted(
     await backend.execute(action)
 
     assert backend._client._session.swipe_calls == [(200, 400, 200, expected_y2, 0.3)]
+
+
+@pytest.mark.asyncio
+async def test_ios_backend_back_uses_long_left_edge_swipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.swipe_calls: list[tuple[int, int, int, int, float]] = []
+
+        def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_s: float) -> None:
+            self.swipe_calls.append((x1, y1, x2, y2, duration_s))
+
+    class _FakeClient:
+        def __init__(self, _url: str) -> None:
+            self._session = _FakeSession()
+
+        def session(self) -> _FakeSession:
+            return self._session
+
+        def window_size(self) -> dict[str, int]:
+            return {"width": 402, "height": 874}
+
+        def app_current(self) -> dict[str, str]:
+            return {"bundleId": "com.example.ios"}
+
+    class _FakeWdaModule:
+        Client = _FakeClient
+
+    monkeypatch.setattr(ios_wda_module, "_import_wda", lambda: _FakeWdaModule)
+    backend = ios_wda_module.WdaBackend()
+    monkeypatch.setattr(backend, "_wda_call", AsyncMock(side_effect=lambda fn, *args: fn(*args)))
+    backend._screen_width = 402
+    backend._screen_height = 874
+
+    await backend.execute(Action(action_type="back"))
+
+    assert backend._client._session.swipe_calls == [(4, 437, 341, 437, 0.45)]
 
 
 def test_agent_marks_qwen_and_gemini_coordinates_as_relative(tmp_path: Path) -> None:

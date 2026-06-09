@@ -15,6 +15,8 @@ def test_gui_config_accepts_explicit_s2_model_and_provider() -> None:
         "provider": "vllm_9b",
         "s2Model": "qwen3.5-397b-a17b",
         "s2Provider": "custom",
+        "s2HintEnabled": False,
+        "s2TakeoverEnabled": True,
         "plannerEnabled": True,
         "plannerModel": "qwen3.6-35b-a3b",
         "plannerProvider": "vllm_35b",
@@ -28,6 +30,8 @@ def test_gui_config_accepts_explicit_s2_model_and_provider() -> None:
     assert cfg.provider == "vllm_9b"
     assert cfg.s2_model == "qwen3.5-397b-a17b"
     assert cfg.s2_provider == "custom"
+    assert cfg.s2_hint_enabled is False
+    assert cfg.s2_takeover_enabled is True
     assert cfg.planner_enabled is True
     assert cfg.planner_model == "qwen3.6-35b-a3b"
     assert cfg.planner_provider == "vllm_35b"

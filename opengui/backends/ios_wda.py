@@ -498,7 +498,7 @@ class WdaBackend:
             # iOS has no physical back button — simulate with a left-edge swipe gesture.
             w = self._screen_width
             h = self._screen_height
-            await self._wda_call(session.swipe, 0, h // 2, w // 3, h // 2, 0.3)
+            await self._wda_call(session.swipe, max(1, w // 100), h // 2, int(w * 0.85), h // 2, 0.45)
 
         elif t == "home":
             await self._wda_call(session.home)

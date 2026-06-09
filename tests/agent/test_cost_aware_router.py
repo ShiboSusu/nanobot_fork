@@ -128,14 +128,79 @@ def test_account_presence_read_requires_human_confirmation() -> None:
     assert "financial_or_account_read" in decision.policy.categories
 
 
-def test_private_account_query_requires_human_confirmation_not_web_search() -> None:
+def test_user_authorized_private_account_query_uses_gui_not_web_search() -> None:
     router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
 
     decision = router.classify("查一下我的淘宝订单到哪了", available_tools={"gui_task", "web_search"})
 
+    assert decision.route == RouteKind.GUI
+    assert decision.policy.action == PolicyAction.ALLOW
+    assert decision.requires_gui is True
+
+
+def test_user_authorized_read_only_order_logistics_query_uses_gui() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify(
+        "打开淘宝,进入我的订单页面,查看最近一笔交易的物流信息。",
+        available_tools={"gui_task", "web_search"},
+    )
+
+    assert decision.route == RouteKind.GUI
+    assert decision.policy.action == PolicyAction.ALLOW
+    assert decision.requires_gui is True
+
+
+def test_read_only_published_content_query_uses_gui_not_publish_policy() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify(
+        "在小红书里搜索“健身餐”,点开第一篇笔记,然后看看作者还发布了哪些其他笔记。",
+        available_tools={"gui_task", "web_search"},
+    )
+
+    assert decision.route == RouteKind.GUI
+    assert decision.policy.action == PolicyAction.ALLOW
+    assert decision.requires_gui is True
+
+
+def test_external_share_task_still_requires_human_confirmation() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify(
+        "打开抖音,把第一个视频分享给微信好友“Su4o_”",
+        available_tools={"gui_task", "web_search"},
+    )
+
     assert decision.route == RouteKind.HUMAN_CONFIRM
     assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
-    assert "private_account_query" in decision.policy.categories
+    assert "external_send_or_publish" in decision.policy.categories
+
+
+def test_read_only_privacy_setting_check_uses_gui_without_confirmation() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify(
+        "检查B站安全隐私的空间设置里我的关注列表设置是不是不公开，只查看当前设置，不要修改任何开关",
+        available_tools={"gui_task", "web_search"},
+    )
+
+    assert decision.route == RouteKind.GUI
+    assert decision.policy.action == PolicyAction.ALLOW
+    assert decision.requires_gui is True
+
+
+def test_privacy_setting_change_still_requires_human_confirmation() -> None:
+    router = CostAwareProblemRouter(policy_store=PolicyStore(), skill_library=NoopSkillLibrary())
+
+    decision = router.classify(
+        "在B站安全隐私的空间设置里开启公开我的关注列表开关",
+        available_tools={"gui_task", "web_search"},
+    )
+
+    assert decision.route == RouteKind.HUMAN_CONFIRM
+    assert decision.policy.action == PolicyAction.ASK_HUMAN_CONFIRM
+    assert "privacy_or_personal_data" in decision.policy.categories
 
 
 def test_jd_baitiao_credit_limit_requires_human_confirmation() -> None:

@@ -80,6 +80,13 @@ def build_system_prompt(
     if platform != "unknown":
         sections.extend(["", f"- Platform: {platform}"])
 
+    if platform == "ios":
+        sections.extend([
+            "",
+            "- On iOS, when the intended action is to go back, exit the current page, or return to the previous screen, prefer `navigate_back`; the iOS backend performs it with the left-edge back gesture. Tap a visible in-app back control only when that exact control is clearly the safer target.",
+            "- On iOS, Do not launch apps by guessing from icon appearance. Prefer `open_app` with the target app name or bundle ID; if the app is not available through direct launch, use Spotlight search and tap only a result with matching visible app-name text.",
+        ])
+
     if memory_context:
         sections.extend(["", "# Relevant Knowledge", "", memory_context])
 

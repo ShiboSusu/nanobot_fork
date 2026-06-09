@@ -927,6 +927,7 @@ class GuiAgent:
         s2_llm: LLMProvider | None = None,
         s2_model: str | None = None,
         s2_max_hints: int = 1,
+        s2_takeover_enabled: bool = False,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -964,6 +965,7 @@ class GuiAgent:
         self._autonomy_monitor = autonomy_monitor or AutonomyMonitor()
         self._s2_llm = s2_llm
         self._s2_model = s2_model or model
+        self._s2_takeover_enabled = bool(s2_takeover_enabled)
         try:
             parsed_s2_max_hints = int(s2_max_hints)
         except (TypeError, ValueError):
@@ -971,6 +973,7 @@ class GuiAgent:
         self._s2_max_hints = max(0, parsed_s2_max_hints)
         self._s2_global_step_hint_threshold = 20
         self._global_s2_budget_hint_issued = False
+        self._active_s2_guidance_count = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -992,6 +995,7 @@ class GuiAgent:
         # 1. Start trajectory recording
         self._trajectory_recorder.start(phase=ExecutionPhase.AGENT)
         self._global_s2_budget_hint_issued = False
+        self._active_s2_guidance_count = 0
 
         # 2. Retrieve memory context (once)
         memory_context = await self._retrieve_memory(task)
@@ -1274,6 +1278,7 @@ class GuiAgent:
             self._autonomy_monitor.mark_prior_attempt_progress()
         s2_guidance: list[str] = []
         loop_guidance: list[str] = []
+        s2_takeover_active = False
         stagnation_completion_probe_used = False
         terminal_toggle_guard: tuple[Action, str | None, str | None] | None = None
         previous_fingerprint: _ScreenFingerprint | None = None
@@ -1304,6 +1309,9 @@ class GuiAgent:
                 current_observation=obs,
                 history=history,
             )
+            actor_phase = "s2_takeover" if s2_takeover_active else "s1"
+            actor_llm = self._s2_llm if s2_takeover_active and self._s2_llm is not None else self.llm
+            actor_model = self._s2_model if s2_takeover_active and self._s2_llm is not None else None
 
             try:
                 result = await asyncio.wait_for(
@@ -1315,6 +1323,8 @@ class GuiAgent:
                         total_steps=self.max_steps,
                         current_observation=obs,
                         terminal_toggle_guard=terminal_toggle_guard,
+                        llm=actor_llm,
+                        model=actor_model,
                     ),
                     timeout=self.step_timeout * 3,
                 )
@@ -1565,6 +1575,8 @@ class GuiAgent:
                     "action_intent": self._scrub_text_for_artifact_action(result.action_intent, result.action),
                     "state_summary": self._scrub_text_for_artifact_action(result.state_summary, result.action),
                     "autonomy_monitor": monitor_payload,
+                    "phase": actor_phase,
+                    "actor_model": actor_model or self.model,
                     "screenshot_path": (
                         trace_observation.screenshot_path if trace_observation else None
                     ),
@@ -1620,6 +1632,7 @@ class GuiAgent:
                 and not stagnation_completion_probe_used
                 and self._monitor_decision_is_repeated_no_progress(monitor_payload)
                 and self._should_probe_completion_before_stagnation(task, result)
+                and not self._should_start_s2_takeover(s2_takeover_active)
             ):
                 stagnation_completion_probe_used = True
                 loop_guidance.append(self._completion_probe_guidance())
@@ -1675,6 +1688,7 @@ class GuiAgent:
             if (
                 monitor_decision.decision == AutonomyDecisionKind.CHEAP_VERIFY
                 and self._can_request_s2_guidance(monitor_decision, s2_guidance)
+                and not self._should_start_s2_takeover(s2_takeover_active)
             ):
                 history_with_current_step = history + [
                     HistoryTurn(
@@ -1735,6 +1749,73 @@ class GuiAgent:
                     hint=hint,
                     monitor=monitor_payload,
                     s2_guidance=s2_guidance,
+                )
+                history = history_with_current_step
+                if result.next_observation is not None:
+                    obs = result.next_observation
+                    if self.stagnation_limit > 0:
+                        previous_fingerprint = self._build_screen_fingerprint(obs)
+                        previous_action_type = None
+                        stagnation_streak = 0
+                continue
+
+            if (
+                monitor_decision.decision
+                in {
+                    AutonomyDecisionKind.CHEAP_VERIFY,
+                    AutonomyDecisionKind.HALT,
+                    AutonomyDecisionKind.S2_TAKEOVER,
+                }
+                and self._should_start_s2_takeover(s2_takeover_active)
+            ):
+                history_with_current_step = history + [
+                    HistoryTurn(
+                        step_index=step_index,
+                        observation=obs,
+                        assistant_message=self._scrub_assistant_message_for_log(
+                            result.assistant_message,
+                            result.action,
+                        ),
+                        tool_result_message={
+                            "role": "tool",
+                            "tool_call_id": result.tool_call_id,
+                            "content": self._scrub_text_for_action(
+                                result.tool_result,
+                                result.action,
+                            ),
+                        },
+                        action_summary=(
+                            self._scrub_text_for_action(
+                                result.action_summary,
+                                result.action,
+                            )
+                            or result.action_summary
+                        ),
+                        action_intent=(
+                            self._scrub_text_for_action(
+                                result.action_intent,
+                                result.action,
+                            )
+                            or result.action_intent
+                        ),
+                        state_summary=(
+                            self._scrub_text_for_action(
+                                result.state_summary,
+                                result.action,
+                            )
+                            or result.state_summary
+                        ),
+                    )
+                ]
+                s2_takeover_active = True
+                await self._log_attempt_event(
+                    run_dir,
+                    "s2_takeover_start",
+                    step_index=step_index,
+                    model=self._s2_model,
+                    monitor=monitor_payload,
+                    prior_s2_guidance_count=self._active_s2_guidance_count,
+                    reason="monitor_trigger_after_s2_guidance",
                 )
                 history = history_with_current_step
                 if result.next_observation is not None:
@@ -2654,6 +2735,8 @@ class GuiAgent:
         total_steps: int,
         current_observation: Observation,
         terminal_toggle_guard: tuple[Action, str | None, str | None] | None = None,
+        llm: LLMProvider | None = None,
+        model: str | None = None,
     ) -> StepResult:
         """Execute a single vision-action step with retries on malformed calls."""
         _step_start = time.monotonic()
@@ -2667,11 +2750,15 @@ class GuiAgent:
 
             # Call LLM
             native_tools_enabled = profile_uses_native_tools(self.agent_profile)
-            response: LLMResponse = await self.llm.chat(
-                messages=messages,
-                tools=[_COMPUTER_USE_TOOL] if native_tools_enabled else None,
-                tool_choice="required" if native_tools_enabled else None,
-            )
+            llm_provider = llm or self.llm
+            chat_kwargs: dict[str, Any] = {
+                "messages": messages,
+                "tools": [_COMPUTER_USE_TOOL] if native_tools_enabled else None,
+                "tool_choice": "required" if native_tools_enabled else None,
+            }
+            if model is not None:
+                chat_kwargs["model"] = model
+            response: LLMResponse = await llm_provider.chat(**chat_kwargs)
             for k, v in (response.usage or {}).items():
                 step_usage[k] = step_usage.get(k, 0) + v
             if response.latency_s is not None:
@@ -3064,8 +3151,48 @@ class GuiAgent:
         # GUI action policy is prompt/memory-driven.  Main-agent task routing
         # still uses PolicyStore, but this step-level hook intentionally does
         # not keyword-block actions such as search edits or navigation away
-        # from sensitive pages.
-        del task, action, current_observation, action_summary, state_summary
+        # from sensitive pages. Keep one hard gate for permission/authorization
+        # detours because they can change device/app access outside the user's
+        # requested read-only task.
+        del task, current_observation
+        if action.action_type not in {"tap", "click", "open_app"}:
+            return None
+        text = " ".join(
+            part
+            for part in (
+                action.text or "",
+                action_summary or "",
+                state_summary or "",
+            )
+            if part
+        )
+        normalized = self._policy_store._normalize(text)
+        compact = self._policy_store._compact_obfuscated_cjk(normalized)
+        permission_terms = (
+            "允许",
+            "授权",
+            "权限",
+            "同意",
+            "批准",
+            "去开启",
+            "开启通知",
+            "通知权限",
+            "allow",
+            "authorize",
+            "grant permission",
+            "permission",
+            "enable notifications",
+        )
+        if any(
+            self._policy_store._contains_term(normalized, term)
+            or self._policy_store._compact_obfuscated_cjk(self._policy_store._normalize(term)) in compact
+            for term in permission_terms
+        ):
+            reason = (
+                "permission_or_authorization: Permission, authorization, or notification "
+                "enable prompts require user confirmation."
+            )
+            return Action(action_type="request_intervention", text=reason), reason
         return None
 
     @staticmethod
@@ -3457,6 +3584,8 @@ class GuiAgent:
     ) -> bool:
         if self._s2_llm is None or self._s2_max_hints <= 0:
             return False
+        if self._active_s2_guidance_count >= self._s2_max_hints:
+            return False
         if len(s2_guidance) >= self._s2_max_hints:
             return False
         return monitor_decision.decision in {
@@ -3464,6 +3593,14 @@ class GuiAgent:
             AutonomyDecisionKind.HALT,
             AutonomyDecisionKind.S2_TAKEOVER,
         }
+
+    def _should_start_s2_takeover(self, s2_takeover_active: bool) -> bool:
+        return (
+            self._s2_takeover_enabled
+            and not s2_takeover_active
+            and self._s2_llm is not None
+            and self._active_s2_guidance_count >= 1
+        )
 
     def _should_force_s2_for_global_step_budget(
         self,
@@ -3477,6 +3614,8 @@ class GuiAgent:
         if action.action_type in {"done", "request_intervention"}:
             return False
         if self._s2_llm is None or self._s2_max_hints <= 0:
+            return False
+        if self._active_s2_guidance_count >= self._s2_max_hints:
             return False
         if len(s2_guidance) >= self._s2_max_hints:
             return False
@@ -3493,6 +3632,7 @@ class GuiAgent:
         s2_guidance: list[str],
     ) -> None:
         s2_guidance.append(hint)
+        self._active_s2_guidance_count += 1
         self._autonomy_monitor.mark_s2_guidance_issued()
         await self._log_attempt_event(
             run_dir,
@@ -3501,17 +3641,6 @@ class GuiAgent:
             model=model,
             hint=hint,
             monitor=monitor,
-        )
-        await self._write_trace(
-            run_dir / "trace.jsonl",
-            self._scrub_for_artifact({
-                "event": "s2_guidance",
-                "step_index": step_index,
-                "model": model,
-                "hint": hint,
-                "monitor": monitor,
-                "timestamp": time.time(),
-            }),
         )
 
     async def _request_s2_guidance(
@@ -4457,7 +4586,7 @@ class GuiAgent:
 
     async def _retrieve_relevant_memory(self, task: str, *, include_policy: bool) -> str | None:
         if self._memory_retriever is None:
-            return None
+            return self._retrieve_relevant_memory_from_store(task, include_policy=include_policy)
         from opengui.memory.types import MemoryType
 
         # Fetch relevant entries by query
@@ -4495,6 +4624,146 @@ class GuiAgent:
         context = self._memory_retriever.format_context(memory_entries)
         self._log_memory_retrieval(task, memory_entries, context)
         return context
+
+    def _retrieve_relevant_memory_from_store(
+        self,
+        task: str,
+        *,
+        include_policy: bool,
+    ) -> str | None:
+        """Select memory directly from the store when embedding search is unavailable.
+
+        This keeps nanobot's memory split intact: policy entries can be injected in
+        full, while app/os/icon guides are still selected by relevance instead of
+        appended wholesale.
+        """
+        if self._memory_store is None:
+            return None
+
+        from opengui.memory.types import MemoryType
+
+        try:
+            entries = self._memory_store.list_all()
+        except Exception:
+            logger.warning("Memory store fallback retrieval failed", exc_info=True)
+            return None
+
+        platform = getattr(self.backend, "platform", "unknown")
+        scored: list[tuple[Any, float]] = []
+        policies: list[tuple[Any, float]] = []
+        for entry in entries:
+            if entry.memory_type == MemoryType.POLICY:
+                if include_policy:
+                    policies.append((entry, 1.0))
+                continue
+            if not self._memory_entry_platform_matches(entry, platform):
+                continue
+            score = self._score_memory_entry_for_task(entry, task)
+            if score > 0:
+                scored.append((entry, score))
+
+        scored.sort(key=lambda item: item[1], reverse=True)
+        memory_entries = policies + scored[: self._memory_top_k]
+        if not memory_entries:
+            logger.info("Memory fallback retrieval: no hits for task=%r", task)
+            self._trajectory_recorder.record_event(
+                "memory_retrieval",
+                task=task,
+                hit_count=0,
+                hits=[],
+                context="",
+                source="store_fallback",
+            )
+            return None
+
+        context = self._format_memory_context(memory_entries)
+        self._log_memory_retrieval(task, memory_entries, context)
+        return context
+
+    @staticmethod
+    def _memory_entry_platform_matches(entry: Any, platform: str) -> bool:
+        entry_platform = str(getattr(entry, "platform", "") or "").casefold()
+        if entry_platform in {"", "unknown", "universal", "all", "any"}:
+            return True
+        return entry_platform == str(platform or "").casefold()
+
+    @classmethod
+    def _score_memory_entry_for_task(cls, entry: Any, task: str) -> float:
+        task_text = cls._normalize_memory_text(task)
+        task_terms = cls._memory_search_terms(task)
+        if not task_terms:
+            return 0.0
+
+        searchable = cls._normalize_memory_text(
+            " ".join(
+                str(part)
+                for part in (
+                    getattr(entry, "content", ""),
+                    getattr(entry, "app", "") or "",
+                    " ".join(getattr(entry, "tags", ()) or ()),
+                )
+                if part
+            )
+        )
+        if not searchable:
+            return 0.0
+
+        score = 0.0
+        for alias in cls._memory_aliases(getattr(entry, "app", None)):
+            if alias and alias in task_text:
+                score += 6.0
+        for tag in getattr(entry, "tags", ()) or ():
+            normalized_tag = cls._normalize_memory_text(str(tag))
+            if normalized_tag and normalized_tag in task_terms:
+                score += 2.0
+        for term in task_terms:
+            if len(term) < 2:
+                continue
+            if term in searchable:
+                score += 1.0
+        return score
+
+    @staticmethod
+    def _normalize_memory_text(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").casefold()).strip()
+
+    @classmethod
+    def _memory_search_terms(cls, text: str) -> set[str]:
+        normalized = cls._normalize_memory_text(text)
+        terms: set[str] = set()
+        for chunk in re.findall(r"[a-z0-9\u4e00-\u9fff]+", normalized):
+            if len(chunk) < 2:
+                continue
+            terms.add(chunk)
+            max_n = min(6, len(chunk))
+            for size in range(2, max_n + 1):
+                for start in range(0, len(chunk) - size + 1):
+                    terms.add(chunk[start : start + size])
+        return terms
+
+    @classmethod
+    def _memory_aliases(cls, app: str | None) -> tuple[str, ...]:
+        if not app:
+            return ()
+        return tuple(
+            alias
+            for alias in (
+                cls._normalize_memory_text(part)
+                for part in re.split(r"[,，、/|]+", app)
+            )
+            if alias
+        )
+
+    @staticmethod
+    def _format_memory_context(memory_entries: list[tuple[Any, float]]) -> str:
+        lines: list[str] = []
+        for entry, _score in memory_entries:
+            tag = entry.memory_type.value.upper()
+            prefix = f"[{tag}]"
+            if entry.app:
+                prefix += f" ({entry.app})"
+            lines.append(f"- {prefix} {entry.content}")
+        return "\n".join(lines)
 
     def _log_policy_injection(self, context: str) -> None:
         """Record a trajectory event for direct policy context injection."""

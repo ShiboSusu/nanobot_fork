@@ -170,6 +170,66 @@ async def test_gui_agent_combines_policy_context_with_selected_memory(tmp_path: 
     assert mock_retriever.search.await_args.kwargs["top_k"] == 15
 
 
+@pytest.mark.asyncio
+async def test_gui_agent_selects_app_memory_from_store_when_retriever_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Policy stays direct while app/os/icon memory is selected from the store."""
+    from opengui.agent import GuiAgent
+    from opengui.backends.dry_run import DryRunBackend
+    from opengui.memory.store import MemoryStore
+    from opengui.memory.types import MemoryEntry, MemoryType
+    from opengui.trajectory.recorder import TrajectoryRecorder
+
+    class IosDryRunBackend(DryRunBackend):
+        @property
+        def platform(self) -> str:
+            return "ios"
+
+    store = MemoryStore(tmp_path / "memory")
+    store.add(MemoryEntry(
+        entry_id="bili-privacy-path",
+        memory_type=MemoryType.APP_GUIDE,
+        platform="ios",
+        app="哔哩哔哩, B站, bilibili",
+        tags=("bilibili", "privacy", "following", "followers", "settings"),
+        content=(
+            "B站检查关注/粉丝列表公开状态的路径：我的 -> 设置 -> 安全隐私 -> "
+            "空间设置。只读取公开我的粉丝列表和公开我的关注列表的开关状态，不要切换。"
+        ),
+    ))
+    store.add(MemoryEntry(
+        entry_id="unrelated-app",
+        memory_type=MemoryType.APP_GUIDE,
+        platform="ios",
+        app="铁路12306",
+        tags=("train", "ticket"),
+        content="铁路12306购票路径：车票 -> 查询 -> 预订。",
+    ))
+
+    recorder = TrajectoryRecorder(output_dir=tmp_path / "traj", task="test task")
+    recorder.start()
+
+    agent = GuiAgent(
+        llm=MagicMock(),
+        backend=IosDryRunBackend(),
+        trajectory_recorder=recorder,
+        policy_context="- [policy] Never change privacy settings without confirmation.",
+        memory_retriever=None,
+        memory_store=store,
+    )
+
+    result = await agent._retrieve_memory(
+        "检查B站里我的关注列表设置是不是不公开，只查看当前设置，不要修改任何开关"
+    )
+
+    assert result is not None
+    assert "Never change privacy settings" in result
+    assert "B站检查关注/粉丝列表公开状态的路径" in result
+    assert "[APP]" in result
+    assert "铁路12306购票路径" not in result
+
+
 # ---------------------------------------------------------------------------
 # Test 6: GuiAgent falls back to retriever when policy_context is None
 # ---------------------------------------------------------------------------
