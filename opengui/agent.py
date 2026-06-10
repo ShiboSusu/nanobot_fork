@@ -2602,7 +2602,7 @@ class GuiAgent:
                     {"role": "user", "content": user_content},
                 ],
                 tools=None,
-                max_tokens=500,
+                max_tokens=180,
             )
         except Exception:
             logger.warning("GUI S2 hint request failed.", exc_info=True)

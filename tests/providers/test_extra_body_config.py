@@ -184,6 +184,29 @@ class TestBuildKwargsExtraBody:
         )
         assert kwargs["extra_body"]["repetition_penalty"] == 1.15
 
+    def test_extra_body_does_not_forward_core_request_fields(self) -> None:
+        provider = _make_provider(
+            {
+                "model": "wrong-model",
+                "messages": [{"role": "user", "content": "wrong"}],
+                "stream": True,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        )
+
+        kwargs = provider._build_kwargs(
+            messages=_simple_messages(),
+            tools=None, model="right-model", max_tokens=100,
+            temperature=0.1, reasoning_effort=None, tool_choice=None,
+        )
+
+        assert kwargs["model"] == "right-model"
+        assert kwargs["messages"] == _simple_messages()
+        assert "model" not in kwargs["extra_body"]
+        assert "messages" not in kwargs["extra_body"]
+        assert "stream" not in kwargs["extra_body"]
+        assert kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+
 
 # ---------------------------------------------------------------------------
 # Schema validation
@@ -212,3 +235,85 @@ class TestSchemaConfig:
             extra_body={"chat_template_kwargs": {"enable_thinking": False}}
         )
         assert config.extra_body["chat_template_kwargs"]["enable_thinking"] is False
+
+    def test_named_openai_compatible_provider_keeps_extra_body(self) -> None:
+        from nanobot.config.schema import Config
+        from nanobot.providers.factory import build_provider_snapshot
+
+        config = Config.model_validate(
+            {
+                "providers": {
+                    "qwen_9b": {
+                        "apiKey": "qwen-key",
+                        "apiBase": "http://qwen-9b.test/v1",
+                        "extraBody": {
+                            "chat_template_kwargs": {"enable_thinking": False}
+                        },
+                    }
+                }
+            }
+        )
+
+        snapshot = build_provider_snapshot(
+            config,
+            model_override="qwen3.5-9b",
+            provider_override="qwen_9b",
+        )
+
+        provider = snapshot.provider
+        assert provider.get_default_model() == "qwen3.5-9b"
+        assert provider.api_key == "qwen-key"
+        assert provider.api_base == "http://qwen-9b.test/v1"
+        assert provider._extra_body == {
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+
+    def test_gui_s1_s2_named_providers_keep_separate_extra_body(self) -> None:
+        from nanobot.config.schema import Config
+        from nanobot.providers.factory import (
+            build_gui_provider_snapshot,
+            build_gui_s2_provider_snapshot,
+        )
+
+        config = Config.model_validate(
+            {
+                "providers": {
+                    "qwen_9b": {
+                        "apiKey": "qwen-key",
+                        "apiBase": "http://qwen-9b.test/v1",
+                        "extraBody": {
+                            "chat_template_kwargs": {"enable_thinking": False}
+                        },
+                    },
+                    "qwen_35b": {
+                        "apiKey": "qwen-key",
+                        "apiBase": "http://qwen-35b.test/v1",
+                        "extraBody": {
+                            "chat_template_kwargs": {"enable_thinking": False}
+                        },
+                    },
+                },
+                "gui": {
+                    "backend": "dry-run",
+                    "provider": "qwen_9b",
+                    "model": "qwen3.5-9b",
+                    "s1Provider": "qwen_9b",
+                    "s1Model": "qwen3.5-9b",
+                    "s2Enabled": True,
+                    "s2Provider": "qwen_35b",
+                    "s2Model": "qwen3.6-35b-a3b",
+                },
+            }
+        )
+
+        s1 = build_gui_provider_snapshot(config)
+        s2 = build_gui_s2_provider_snapshot(config)
+
+        assert s1 is not None
+        assert s2 is not None
+        assert s1.model == "qwen3.5-9b"
+        assert s2.model == "qwen3.6-35b-a3b"
+        assert s1.provider.api_base == "http://qwen-9b.test/v1"
+        assert s2.provider.api_base == "http://qwen-35b.test/v1"
+        assert s1.provider._extra_body["chat_template_kwargs"]["enable_thinking"] is False
+        assert s2.provider._extra_body["chat_template_kwargs"]["enable_thinking"] is False

@@ -616,6 +616,32 @@ def test_agent_passes_gui_runtime_snapshot(mock_agent_runtime, monkeypatch):
     assert kwargs["gui_model"] == "gui-model"
 
 
+def test_agent_passes_gui_s2_runtime_snapshot(mock_agent_runtime, monkeypatch):
+    gui_provider = object()
+    gui_s2_provider = object()
+    gui_config = Config.model_validate(
+        {"gui": {"backend": "dry-run", "s2Enabled": True, "s2Model": "slow-gui"}}
+    ).gui
+    mock_agent_runtime["config"].gui = gui_config
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_gui_provider_snapshot",
+        lambda _config: _test_gui_provider_snapshot(gui_provider, "gui-model"),
+    )
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_gui_s2_provider_snapshot",
+        lambda _config: _test_gui_provider_snapshot(gui_s2_provider, "slow-gui"),
+    )
+
+    result = runner.invoke(app, ["agent", "-m", "hello"])
+
+    assert result.exit_code == 0
+    kwargs = mock_agent_runtime["agent_loop_cls"].call_args.kwargs
+    assert kwargs["gui_provider"] is gui_provider
+    assert kwargs["gui_model"] == "gui-model"
+    assert kwargs["gui_s2_provider"] is gui_s2_provider
+    assert kwargs["gui_s2_model"] == "slow-gui"
+
+
 def test_agent_uses_explicit_config_path(mock_agent_runtime, tmp_path: Path):
     config_path = tmp_path / "agent-config.json"
     config_path.write_text("{}")
@@ -892,6 +918,7 @@ def _patch_cli_command_runtime(
     cron_service=None,
     get_cron_dir=None,
     gui_provider_snapshot=None,
+    gui_s2_provider_snapshot=None,
 ) -> None:
     provider_factory = make_provider or (lambda _config: object())
 
@@ -921,6 +948,10 @@ def _patch_cli_command_runtime(
         "nanobot.providers.factory.build_gui_provider_snapshot",
         lambda _config: gui_provider_snapshot,
     )
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_gui_s2_provider_snapshot",
+        lambda _config: gui_s2_provider_snapshot,
+    )
 
     if message_bus is not None:
         monkeypatch.setattr("nanobot.bus.queue.MessageBus", message_bus)
@@ -938,6 +969,7 @@ def _patch_serve_runtime(
     seen: dict[str, object],
     *,
     gui_provider_snapshot=None,
+    gui_s2_provider_snapshot=None,
 ) -> None:
     pytest.importorskip("aiohttp")
 
@@ -974,6 +1006,7 @@ def _patch_serve_runtime(
         message_bus=lambda: object(),
         session_manager=lambda _workspace: object(),
         gui_provider_snapshot=gui_provider_snapshot,
+        gui_s2_provider_snapshot=gui_s2_provider_snapshot,
     )
     monkeypatch.setattr("nanobot.agent.loop.AgentLoop", _FakeAgentLoop)
     monkeypatch.setattr("nanobot.api.server.create_app", _fake_create_app)
@@ -1694,6 +1727,33 @@ def test_serve_passes_gui_runtime_snapshot(monkeypatch, tmp_path: Path) -> None:
     assert kwargs["gui_config"] is config.gui
     assert kwargs["gui_provider"] is gui_provider
     assert kwargs["gui_model"] == "gui-model"
+
+
+def test_serve_passes_gui_s2_runtime_snapshot(monkeypatch, tmp_path: Path) -> None:
+    config_file = _write_instance_config(tmp_path)
+    config = Config.model_validate(
+        {"gui": {"backend": "dry-run", "s2Enabled": True, "s2Model": "slow-gui"}}
+    )
+    gui_provider = object()
+    gui_s2_provider = object()
+    seen: dict[str, object] = {}
+
+    _patch_serve_runtime(
+        monkeypatch,
+        config,
+        seen,
+        gui_provider_snapshot=_test_gui_provider_snapshot(gui_provider, "gui-model"),
+        gui_s2_provider_snapshot=_test_gui_provider_snapshot(gui_s2_provider, "slow-gui"),
+    )
+
+    result = runner.invoke(app, ["serve", "--config", str(config_file)])
+
+    assert result.exit_code == 0
+    kwargs = seen["agent_loop_kwargs"]
+    assert kwargs["gui_provider"] is gui_provider
+    assert kwargs["gui_model"] == "gui-model"
+    assert kwargs["gui_s2_provider"] is gui_s2_provider
+    assert kwargs["gui_s2_model"] == "slow-gui"
 
 
 def test_serve_cli_options_override_api_config(monkeypatch, tmp_path: Path) -> None:

@@ -18,6 +18,31 @@ class ProviderSnapshot:
     signature: tuple[object, ...]
 
 
+_CUSTOM_OPENAI_COMPAT_SPEC = ProviderSpec(
+    name="custom",
+    keywords=(),
+    env_key="",
+    display_name="Custom",
+    backend="openai_compat",
+    is_direct=True,
+)
+
+
+def _named_provider_config(config: Config, provider_name: str | None) -> ProviderConfig | None:
+    if not provider_name:
+        return None
+    raw = getattr(config.providers, provider_name, None)
+    if raw is None:
+        raw = getattr(config.providers, provider_name.replace("-", "_"), None)
+    if raw is None:
+        return None
+    if isinstance(raw, ProviderConfig):
+        return raw
+    if isinstance(raw, dict):
+        return ProviderConfig.model_validate(raw)
+    return None
+
+
 def _resolve_provider(
     config: Config,
     model: str,
@@ -27,8 +52,11 @@ def _resolve_provider(
     if provider_override and provider_override != "auto":
         spec = find_by_name(provider_override)
         if spec is None:
-            raise ValueError(f"Unknown provider '{provider_override}'.")
-        p = getattr(config.providers, spec.name, None)
+            p = _named_provider_config(config, provider_override)
+            if p is None:
+                raise ValueError(f"Unknown provider '{provider_override}'.")
+            return p, provider_override, _CUSTOM_OPENAI_COMPAT_SPEC
+        p = _named_provider_config(config, spec.name)
         return p, spec.name, spec
 
     provider_name = config.get_provider_name(model)
@@ -136,6 +164,8 @@ def provider_signature(
         provider_name,
         p.api_key if p else None,
         api_base,
+        p.extra_headers if p else None,
+        p.extra_body if p else None,
         defaults.max_tokens,
         defaults.temperature,
         defaults.reasoning_effort,
@@ -170,11 +200,22 @@ def build_gui_provider_snapshot(config: Config) -> ProviderSnapshot | None:
     """Create the optional GUI-specific provider snapshot from config.gui."""
     if config.gui is None:
         return None
-    gui_model = config.gui.model or config.agents.defaults.model
+    gui_model = config.gui.s1_model or config.gui.model or config.agents.defaults.model
     return build_provider_snapshot(
         config,
         model_override=gui_model,
-        provider_override=config.gui.provider,
+        provider_override=config.gui.s1_provider or config.gui.provider,
+    )
+
+
+def build_gui_s2_provider_snapshot(config: Config) -> ProviderSnapshot | None:
+    """Create the optional GUI S2 provider snapshot from config.gui."""
+    if config.gui is None or not config.gui.s2_enabled or not config.gui.s2_model:
+        return None
+    return build_provider_snapshot(
+        config,
+        model_override=config.gui.s2_model,
+        provider_override=config.gui.s2_provider or config.gui.s1_provider or config.gui.provider,
     )
 
 

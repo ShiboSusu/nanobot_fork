@@ -27,6 +27,24 @@ class _NoopLLM:
         return LLMResponse(content="")
 
 
+class _HintLLM:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.max_tokens_seen: list[int | None] = []
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        del messages, tools, tool_choice, model
+        self.max_tokens_seen.append(max_tokens)
+        return LLMResponse(content=self.content)
+
+
 class _StaticBackend:
     platform = "dry-run"
 
@@ -93,6 +111,50 @@ def _step_result(
         execution_snapshot={},
         done=done,
     )
+
+
+@pytest.mark.asyncio
+async def test_s2_hint_uses_small_token_budget_and_extracts_json_after_thinking(
+    tmp_path: Path,
+) -> None:
+    slow_llm = _HintLLM(
+        '<think>reason privately</think>\n'
+        '{"diagnosis":"stuck","next_subgoal":"open search",'
+        '"avoid":["repeat tap"],"stop_condition":"result visible"}'
+    )
+    agent = GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        stagnation_limit=1,
+        s2_llm=slow_llm,
+        s2_enabled=True,
+    )
+    screenshot = tmp_path / "screen.png"
+    _write_png(screenshot)
+
+    hint = await agent._request_s2_hint(
+        task="recover",
+        step_index=1,
+        current_observation=Observation(
+            screenshot_path=str(screenshot),
+            screen_width=64,
+            screen_height=64,
+            foreground_app="DryRun",
+            platform="dry-run",
+        ),
+        history=[],
+        last_action_summary=None,
+        reason="same screen",
+    )
+
+    assert slow_llm.max_tokens_seen == [180]
+    assert hint is not None
+    assert "diagnosis: stuck" in hint
+    assert "next_subgoal: open search" in hint
+    assert "avoid: repeat tap" in hint
 
 
 @pytest.mark.asyncio

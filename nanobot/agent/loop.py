@@ -213,6 +213,8 @@ class AgentLoop:
         gui_config: "GuiConfig | None" = None,
         gui_provider: LLMProvider | None = None,
         gui_model: str | None = None,
+        gui_s2_provider: LLMProvider | None = None,
+        gui_s2_model: str | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, ToolsConfig, WebToolsConfig
 
@@ -225,6 +227,8 @@ class AgentLoop:
         self._provider_signature = provider_signature
         self._gui_provider = gui_provider
         self._gui_model = gui_model
+        self._gui_s2_provider = gui_s2_provider
+        self._gui_s2_model = gui_s2_model
         self.workspace = workspace
         self.model = model or provider.get_default_model()
         self.max_iterations = (
@@ -404,10 +408,8 @@ class AgentLoop:
                     provider=self._gui_provider or self.provider,
                     model=self._gui_model or self.model,
                     workspace=self.workspace,
-                    # TODO: resolve an independent gui.s2_provider through the
-                    # existing provider factory. V0 reuses the GUI/S1 provider.
-                    s2_provider=None,
-                    s2_model=self._gui_config.s2_model,
+                    s2_provider=self._gui_s2_provider,
+                    s2_model=self._gui_s2_model or self._gui_config.s2_model,
                 )
             )
 

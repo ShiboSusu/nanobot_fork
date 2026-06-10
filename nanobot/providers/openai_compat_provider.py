@@ -50,6 +50,7 @@ _ALNUM = string.ascii_letters + string.digits
 
 _STANDARD_TC_KEYS = frozenset({"id", "type", "index", "function"})
 _STANDARD_FN_KEYS = frozenset({"name", "arguments"})
+_PROTECTED_EXTRA_BODY_KEYS = frozenset({"model", "messages", "stream"})
 _DEFAULT_OPENROUTER_HEADERS = {
     "HTTP-Referer": "https://github.com/HKUDS/nanobot",
     "X-OpenRouter-Title": "nanobot",
@@ -625,7 +626,13 @@ class OpenAICompatProvider(LLMProvider):
         # do not clobber sibling keys already set by thinking-style logic.
         if self._extra_body:
             existing = kwargs.get("extra_body", {})
-            kwargs["extra_body"] = _deep_merge(existing, self._extra_body)
+            extra_body = {
+                key: value
+                for key, value in self._extra_body.items()
+                if key not in _PROTECTED_EXTRA_BODY_KEYS
+            }
+            if extra_body:
+                kwargs["extra_body"] = _deep_merge(existing, extra_body)
 
         return kwargs
 
