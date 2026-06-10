@@ -18,7 +18,11 @@ import numpy as np
 
 from nanobot.agent.gui_adapter import NanobotEmbeddingAdapter, NanobotLLMAdapter
 from nanobot.agent.gui_safety import check_gui_safety
-from nanobot.agent.gui_task_schema import normalize_gui_task_request
+from nanobot.agent.gui_task_schema import (
+    GuiOutputMode,
+    GuiTaskType,
+    normalize_gui_task_request,
+)
 from nanobot.agent.tools.base import Tool
 from opengui.agent import GuiAgent
 from opengui.evidence import apply_evidence_contract
@@ -68,6 +72,63 @@ def _attach_request_metadata(payload: dict[str, Any], task_request: Any | None) 
     payload["task_type"] = getattr(task_type, "value", task_type)
     payload["output_mode"] = getattr(output_mode, "value", output_mode)
     return payload
+
+
+def _empty_s2_usage() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "hints_used": 0,
+        "takeover_used": False,
+        "takeover_steps": 0,
+        "s1_steps": 0,
+        "s2_steps": 0,
+        "triggers": [],
+        "token_usage": {},
+    }
+
+
+def _safety_block_payload(
+    *,
+    task_request: Any | None,
+    safety_decision: Any,
+    workflow_mode: str = "blocked_before_execution",
+    summary: str | None = None,
+    blackboard: dict[str, str] | None = None,
+    blackboard_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": "gui_task_result.v1",
+        "success": False,
+        "status": "needs_human_confirm",
+        "summary": summary
+        or getattr(safety_decision, "reason", None)
+        or "GUI task requires human confirmation.",
+        "model_summary": None,
+        "trace_path": None,
+        "steps_taken": 0,
+        "error": "needs_human_confirm",
+        "post_run_state": None,
+        "metrics_path": None,
+        "duration_s": 0,
+        "token_usage": {},
+        "total_duration_s": 0,
+        "total_token_usage": {},
+        "workflow_mode": workflow_mode,
+        "safety": safety_decision.to_payload(),
+        "pending_action": dict(getattr(safety_decision, "pending_action", {}) or {}),
+        "s2_usage": _empty_s2_usage(),
+        "answer_candidates": [],
+        "evidence": {},
+        "blackboard": dict(blackboard or {}),
+        "blackboard_meta": dict(blackboard_meta or {}),
+    }
+    _attach_request_metadata(payload, task_request)
+    return apply_evidence_contract(
+        request=task_request,
+        payload=payload,
+        blackboard=blackboard or {},
+        blackboard_meta=blackboard_meta or {},
+    )
 
 
 @dataclass(frozen=True)
@@ -670,6 +731,9 @@ class GuiWorkflowRunner:
         task_with_hints = self._task_with_router_hints(task, router_context)
         plan = await self._safe_plan_workflow(task, router_context=router_context)
         if plan is None:
+            blocked = self._single_fallback_safety_block(task=task, task_request=task_request)
+            if blocked is not None:
+                return blocked
             payload = await self._run_task(active_backend, task_with_hints, **kwargs)
             return self._with_workflow_mode(payload, "single", task_request=task_request)
         plan = self._normalize_plan_app_hints(
@@ -677,10 +741,47 @@ class GuiWorkflowRunner:
             platform=str(getattr(active_backend, "platform", "") or "unknown"),
         )
         if plan.mode != "multi_app" or len(plan.subtasks) < 2:
+            blocked = self._single_fallback_safety_block(task=task, task_request=task_request)
+            if blocked is not None:
+                return blocked
             payload = await self._run_task(active_backend, task_with_hints, **kwargs)
             return self._with_workflow_mode(payload, "single", task_request=task_request)
 
         return await self._run_multi_app(active_backend, task, plan, task_request=task_request, **kwargs)
+
+    @staticmethod
+    def _is_mixed_query_action(task_request: Any | None) -> bool:
+        task_type = getattr(task_request, "task_type", None)
+        return task_type == GuiTaskType.MIXED_QUERY_AND_ACTION
+
+    def _single_fallback_safety_block(
+        self,
+        *,
+        task: str,
+        task_request: Any | None,
+    ) -> str | None:
+        if not self._is_mixed_query_action(task_request):
+            return None
+
+        safety_decision = check_gui_safety(
+            task=task,
+            app_hint=getattr(task_request, "app_hint", None),
+            known_values={},
+            stage="before_gui_task",
+        )
+        if safety_decision.allowed:
+            return None
+
+        payload = _safety_block_payload(
+            task_request=task_request,
+            safety_decision=safety_decision,
+            workflow_mode="blocked_mixed_single_fallback",
+            summary=(
+                "This GUI task includes a sensitive follow-up action and could not be "
+                "safely decomposed into separate GUI subtasks. Human confirmation is required."
+            ),
+        )
+        return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
     def _task_with_router_hints(task: str, router_context: GuiRouterContext | None) -> str:
@@ -1454,6 +1555,27 @@ class GuiSubagentTool(Tool):
     ) -> str:
         task_request = normalize_gui_task_request(task if isinstance(task, dict) else {"task": task})
         task_text = task_request.task
+        task_type = getattr(task_request, "task_type", None)
+        output_mode = getattr(task_request, "output_mode", None)
+        is_direct_sensitive = (
+            task_type == GuiTaskType.SENSITIVE_ACTION
+            or output_mode == GuiOutputMode.NEEDS_HUMAN_CONFIRM
+        )
+        if is_direct_sensitive:
+            safety_decision = check_gui_safety(
+                task=task_text,
+                app_hint=getattr(task_request, "app_hint", None),
+                known_values={},
+                stage="before_gui_task",
+            )
+            if not safety_decision.allowed:
+                payload = _safety_block_payload(
+                    task_request=task_request,
+                    safety_decision=safety_decision,
+                    workflow_mode="blocked_before_gui_task",
+                )
+                return json.dumps(payload, ensure_ascii=False)
+
         active_backend = self._select_backend(backend)
         try:
             if self._gui_config.background:

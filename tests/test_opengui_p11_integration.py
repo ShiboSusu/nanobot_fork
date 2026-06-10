@@ -978,7 +978,7 @@ async def test_gui_tool_intervention_flow_returns_structured_resume_result(
         patch.object(tool._postprocessor, "_summarize_trajectory", new=AsyncMock(return_value="")),
         patch.object(tool._postprocessor, "_extract_skill", new=AsyncMock(return_value=None)),
     ):
-        payload = json.loads(await tool.execute("Handle payroll login"))
+        payload = json.loads(await tool._run_task(tool._backend, "Handle payroll login"))
         await tool._wait_for_pending_postprocessing()
 
     assert payload["success"] is True
@@ -1024,7 +1024,7 @@ async def test_gui_tool_intervention_trace_payload_is_scrubbed(
         patch.object(tool._postprocessor, "_summarize_trajectory", new=AsyncMock(return_value="")),
         patch.object(tool._postprocessor, "_extract_skill", new=AsyncMock(return_value=None)),
     ):
-        payload = json.loads(await tool.execute("Handle payroll login"))
+        payload = json.loads(await tool._run_task(tool._backend, "Handle payroll login"))
         await tool._wait_for_pending_postprocessing()
 
     trace_text = Path(payload["trace_path"]).read_text(encoding="utf-8")

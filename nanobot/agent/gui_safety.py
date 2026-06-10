@@ -70,6 +70,13 @@ _PREPARE_ONLY_PHRASES = (
     "不提交",
     "不付款",
 )
+_PREPARE_ONLY_ALLOWED_STAGES = frozenset(
+    {
+        "before_subtask",
+        "before_gui_task",
+        "before_workflow",
+    }
+)
 
 
 def check_gui_safety(
@@ -93,7 +100,7 @@ def check_gui_safety(
     if risk is None:
         return GuiSafetyDecision(allowed=True, requires_human_confirm=False)
 
-    if stage_text == "before_subtask" and _is_prepare_only(task_text):
+    if stage_text in _PREPARE_ONLY_ALLOWED_STAGES and _is_prepare_only(task_text):
         return GuiSafetyDecision(allowed=True, requires_human_confirm=False)
 
     pending_action = {

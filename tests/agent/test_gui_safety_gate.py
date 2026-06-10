@@ -33,6 +33,17 @@ def test_prepare_before_send_is_allowed_at_subtask_level() -> None:
     assert decision.allowed is True
 
 
+def test_prepare_before_send_is_allowed_at_gui_task_level() -> None:
+    decision = check_gui_safety(
+        task="打开微信准备发给张三，但停在发送前，不要真的发送",
+        app_hint="微信",
+        stage="before_gui_task",
+    )
+
+    assert decision.allowed is True
+    assert decision.requires_human_confirm is False
+
+
 def test_tap_send_is_blocked_at_action_level_even_if_prepare_task() -> None:
     decision = check_gui_safety(
         task="在微信准备消息但不要真的发送",
@@ -44,6 +55,20 @@ def test_tap_send_is_blocked_at_action_level_even_if_prepare_task() -> None:
 
     assert decision.allowed is False
     assert decision.requires_human_confirm is True
+
+
+def test_tap_send_is_still_blocked_at_action_level_with_prepare_task() -> None:
+    decision = check_gui_safety(
+        task="打开微信准备发给张三，但停在发送前，不要真的发送",
+        app_hint="微信",
+        stage="before_action",
+        action_summary="点击发送按钮",
+        state_summary="消息已编辑完成",
+    )
+
+    assert decision.allowed is False
+    assert decision.requires_human_confirm is True
+    assert decision.risk == GuiSafetyRisk.EXTERNAL_SEND
 
 
 def test_payment_requires_confirm() -> None:
@@ -58,4 +83,3 @@ def test_order_submit_requires_confirm() -> None:
 
     assert decision.allowed is False
     assert decision.risk == GuiSafetyRisk.ORDER_SUBMIT
-
