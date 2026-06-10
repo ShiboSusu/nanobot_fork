@@ -46,9 +46,17 @@ from opengui.interfaces import (
     ToolCall,
 )
 from opengui.observation import Observation
+from opengui.s2_policy import (
+    S2Mode,
+    S2Trigger,
+    S2TriggerEvent,
+    S2Usage,
+    decide_s2_mode,
+)
 from opengui.skills.compact_prompt import (
     ALWAYS_ON_SKILL_TAG,
     COMPOSITE_ACTION_DEFINITIONS,
+    CompositeActionInfo,
     CompactPromptParts,
     build_compact_prompt_parts,
     composite_action_infos_from_skills,
@@ -148,6 +156,9 @@ class AgentResult:
     error: str | None = None
     attempt_summary: str | None = None
     token_usage: dict[str, int] = dataclasses.field(default_factory=dict)
+    s2_usage: dict[str, Any] = dataclasses.field(default_factory=dict)
+    answer_candidates: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    evidence: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -405,6 +416,16 @@ class GuiAgent:
         prompt_skill_top_k: int = 5,
         prompt_shortcut_only: bool = False,
         always_on_skill_tags: list[str] | tuple[str, ...] | None = None,
+        s2_llm: LLMProvider | None = None,
+        s2_model: str | None = None,
+        s2_enabled: bool = False,
+        s2_hint_enabled: bool = True,
+        s2_takeover_enabled: bool = True,
+        s2_max_hints: int = 1,
+        s2_takeover_after_hints: int = 1,
+        s2_max_takeover_steps: int = 8,
+        s2_trigger_on_stagnation: bool = True,
+        s2_prompt_max_chars: int = 6000,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -457,6 +478,16 @@ class GuiAgent:
         except (TypeError, ValueError):
             parsed_stagnation_limit = 0
         self.stagnation_limit = max(0, parsed_stagnation_limit)
+        self._s2_llm = s2_llm
+        self._s2_model = s2_model or ""
+        self._s2_enabled = bool(s2_enabled and s2_llm is not None)
+        self._s2_hint_enabled = bool(s2_hint_enabled)
+        self._s2_takeover_enabled = bool(s2_takeover_enabled)
+        self._s2_max_hints = max(0, int(s2_max_hints))
+        self._s2_takeover_after_hints = max(0, int(s2_takeover_after_hints))
+        self._s2_max_takeover_steps = max(1, int(s2_max_takeover_steps))
+        self._s2_trigger_on_stagnation = bool(s2_trigger_on_stagnation)
+        self._s2_prompt_max_chars = max(1000, int(s2_prompt_max_chars))
 
     def _build_tools_list(self) -> list[dict[str, Any]]:
         tools = [COMPUTER_USE_TOOL]
@@ -792,6 +823,7 @@ class GuiAgent:
         prompt_skill_parts: CompactPromptParts | None = None,
     ) -> AgentResult:
         """Execute one full attempt of the task."""
+        s2_usage = S2Usage(enabled=self._s2_enabled)
         # 1. Preflight
         try:
             await self.backend.preflight()
@@ -806,6 +838,7 @@ class GuiAgent:
                 ),
                 trace_path=str(run_dir),
                 error=str(exc),
+                s2_usage=s2_usage.to_dict(),
             )
 
         # 2. Initial observation
@@ -818,6 +851,8 @@ class GuiAgent:
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
         stagnation_streak = 0
+        s2_guidance_notes: list[str] = []
+        takeover_remaining = 0
         if self.stagnation_limit > 0:
             previous_fingerprint = self._build_screen_fingerprint(obs)
 
@@ -826,11 +861,15 @@ class GuiAgent:
         total_usage: dict[str, int] = {}
         for step in range(self.max_steps):
             step_index = step + 1
+            effective_memory_context = self._memory_context_with_s2_guidance(
+                memory_context,
+                s2_guidance_notes,
+            )
             messages = self._build_messages(
                 task=task,
                 current_observation=obs,
                 history=history,
-                memory_context=memory_context,
+                memory_context=effective_memory_context,
                 skill_context=skill_context,
                 prompt_skill_parts=prompt_skill_parts,
             )
@@ -842,6 +881,14 @@ class GuiAgent:
                 history=history,
             )
 
+            if takeover_remaining > 0 and self._s2_llm is not None:
+                llm_override: LLMProvider | None = self._s2_llm
+                actor = "s2_takeover"
+                takeover_remaining -= 1
+            else:
+                llm_override = None
+                actor = "s1"
+
             try:
                 result = await asyncio.wait_for(
                     self._run_step(
@@ -850,6 +897,8 @@ class GuiAgent:
                         step_index=step_index,
                         total_steps=self.max_steps,
                         current_observation=obs,
+                        llm_override=llm_override,
+                        actor=actor,
                     ),
                     timeout=self.step_timeout * 3,
                 )
@@ -881,6 +930,7 @@ class GuiAgent:
                         action_summaries=tuple(turn.action_summary for turn in history),
                     ),
                     token_usage=total_usage,
+                    s2_usage=s2_usage.to_dict(),
                 )
             except _StepExecutionError as exc:
                 raise _StepExecutionError(
@@ -894,6 +944,13 @@ class GuiAgent:
                 ) from exc
 
             steps_taken = step_index
+            if actor == "s2_takeover":
+                s2_usage.s2_steps += 1
+                s2_usage.takeover_steps += 1
+                for k, v in result.step_usage.items():
+                    s2_usage.token_usage[k] = s2_usage.token_usage.get(k, 0) + v
+            else:
+                s2_usage.s1_steps += 1
             for k, v in result.step_usage.items():
                 total_usage[k] = total_usage.get(k, 0) + v
 
@@ -1132,6 +1189,7 @@ class GuiAgent:
                         ),
                     ),
                     token_usage=total_usage,
+                    s2_usage=s2_usage.to_dict(),
                 )
 
             if result.done:
@@ -1164,6 +1222,7 @@ class GuiAgent:
                         ),
                     ),
                     token_usage=total_usage,
+                    s2_usage=s2_usage.to_dict(),
                 )
 
             if self.stagnation_limit > 0 and result.next_observation is not None:
@@ -1230,6 +1289,88 @@ class GuiAgent:
                             ),
                         )
                     ]
+                    stagnation_reason = (
+                        "Detected unchanged screen state for "
+                        f"{stagnation_streak} consecutive step(s) in app {app_label}; "
+                        "task would stop to avoid repeating the same action loop."
+                    )
+                    s2_mode = decide_s2_mode(
+                        enabled=self._s2_enabled and self._s2_trigger_on_stagnation,
+                        trigger=S2Trigger.STAGNATION,
+                        hints_used=s2_usage.hints_used,
+                        max_hints=self._s2_max_hints,
+                        hint_enabled=self._s2_hint_enabled,
+                        takeover_enabled=self._s2_takeover_enabled,
+                        takeover_after_hints=self._s2_takeover_after_hints,
+                    )
+                    if s2_mode == S2Mode.HINT:
+                        hint = await self._request_s2_hint(
+                            task=task,
+                            step_index=step_index,
+                            current_observation=result.next_observation or obs,
+                            history=history_with_current_step,
+                            last_action_summary=result.state_summary or result.action_summary,
+                            reason=stagnation_reason,
+                        )
+                        if hint:
+                            s2_guidance_notes.append(hint)
+                            s2_usage.hints_used += 1
+                            s2_usage.triggers.append(
+                                S2TriggerEvent(
+                                    step_index=step_index,
+                                    trigger=S2Trigger.STAGNATION,
+                                    mode=S2Mode.HINT,
+                                    reason=stagnation_reason,
+                                    actor_before=actor,
+                                    metadata={"foreground_app": app_label},
+                                )
+                            )
+                            await self._log_attempt_event(
+                                run_dir,
+                                "s2_hint",
+                                step_index=step_index,
+                                reason=stagnation_reason,
+                                foreground_app=app_label,
+                            )
+                            history.append(history_with_current_step[-1])
+                            if result.next_observation is not None:
+                                obs = result.next_observation
+                            stagnation_streak = 0
+                            previous_fingerprint = self._build_screen_fingerprint(obs)
+                            previous_action_type = None
+                            continue
+
+                    if s2_mode == S2Mode.TAKEOVER and self._s2_llm is not None:
+                        remaining_steps = max(self.max_steps - step_index, 0)
+                        takeover_remaining = min(self._s2_max_takeover_steps, remaining_steps)
+                        if takeover_remaining > 0:
+                            s2_usage.takeover_used = True
+                            s2_usage.triggers.append(
+                                S2TriggerEvent(
+                                    step_index=step_index,
+                                    trigger=S2Trigger.STAGNATION,
+                                    mode=S2Mode.TAKEOVER,
+                                    reason=stagnation_reason,
+                                    actor_before=actor,
+                                    metadata={"foreground_app": app_label},
+                                )
+                            )
+                            await self._log_attempt_event(
+                                run_dir,
+                                "s2_takeover",
+                                step_index=step_index,
+                                reason=stagnation_reason,
+                                foreground_app=app_label,
+                                takeover_remaining=takeover_remaining,
+                            )
+                            history.append(history_with_current_step[-1])
+                            if result.next_observation is not None:
+                                obs = result.next_observation
+                            stagnation_streak = 0
+                            previous_fingerprint = self._build_screen_fingerprint(obs)
+                            previous_action_type = None
+                            continue
+
                     termination_summary = await self._generate_termination_summary(
                         task=task,
                         termination_reason=(
@@ -1274,6 +1415,7 @@ class GuiAgent:
                             ),
                         ),
                         token_usage=total_usage,
+                        s2_usage=s2_usage.to_dict(),
                     )
 
             history.append(
@@ -1341,6 +1483,7 @@ class GuiAgent:
                 action_summaries=tuple(turn.action_summary for turn in history),
             ),
             token_usage=total_usage,
+            s2_usage=s2_usage.to_dict(),
         )
 
     # ------------------------------------------------------------------
@@ -1354,6 +1497,9 @@ class GuiAgent:
         step_index: int,
         total_steps: int,
         current_observation: Observation,
+        *,
+        llm_override: LLMProvider | None = None,
+        actor: str = "s1",
     ) -> StepResult:
         """Execute a single vision-action step with retries on malformed calls."""
         _step_start = time.monotonic()
@@ -1369,7 +1515,8 @@ class GuiAgent:
 
             # Call LLM
             native_tools_enabled = profile_uses_native_tools(self.agent_profile)
-            response: LLMResponse = await self.llm.chat(
+            active_llm = llm_override or self.llm
+            response: LLMResponse = await active_llm.chat(
                 messages=messages,
                 tools=self._build_tools_list() if native_tools_enabled else None,
                 tool_choice="required" if native_tools_enabled else None,
@@ -1474,7 +1621,7 @@ class GuiAgent:
             ).strip().lower()
             if special_action_type == "use_skill" or special_action_type in self._prompt_composite_aliases:
                 try:
-                    return await self._dispatch_prompt_special_action(
+                    special_result = await self._dispatch_prompt_special_action(
                         tool_call=tool_call,
                         response=response,
                         assistant_message=assistant_msg,
@@ -1489,6 +1636,7 @@ class GuiAgent:
                         action_intent=action_intent,
                         state_summary=state_summary,
                     )
+                    return self._tag_step_actor(special_result, actor)
                 except ActionError as exc:
                     if retries_left > 0:
                         messages.append({
@@ -1556,7 +1704,7 @@ class GuiAgent:
                 if action.status != done_status:
                     action = replace(action, status=done_status)
                 tool_result = f"Task terminated with status: {done_status}"
-                return StepResult(
+                return self._tag_step_actor(StepResult(
                     action=action,
                     tool_call_id=tool_call.id,
                     tool_result=tool_result,
@@ -1576,10 +1724,10 @@ class GuiAgent:
                     duration_s=time.monotonic() - _step_start,
                     chat_latency_s=step_chat_latency_s or None,
                     ttft_s=step_ttft_s,
-                )
+                ), actor)
 
             if action.action_type == "request_intervention":
-                return StepResult(
+                return self._tag_step_actor(StepResult(
                     action=action,
                     tool_call_id=tool_call.id,
                     tool_result="intervention_requested",
@@ -1599,7 +1747,7 @@ class GuiAgent:
                     duration_s=time.monotonic() - _step_start,
                     chat_latency_s=step_chat_latency_s or None,
                     ttft_s=step_ttft_s,
-                )
+                ), actor)
 
             # Normalize app identifiers for mobile open/close actions.
             if (
@@ -1639,7 +1787,7 @@ class GuiAgent:
                 timeout=self.step_timeout,
             )
 
-            return StepResult(
+            return self._tag_step_actor(StepResult(
                 action=action,
                 tool_call_id=tool_call.id,
                 tool_result=result_text,
@@ -1660,9 +1808,21 @@ class GuiAgent:
                 duration_s=time.monotonic() - _step_start,
                 chat_latency_s=step_chat_latency_s or None,
                 ttft_s=step_ttft_s,
-            )
+            ), actor)
 
         raise RuntimeError("GUI model did not return a valid computer_use call after retries.")
+
+    @staticmethod
+    def _tag_step_actor(result: StepResult, actor: str) -> StepResult:
+        model_snapshot = dict(result.model_snapshot or {})
+        model_snapshot["actor"] = actor
+        execution_snapshot = dict(result.execution_snapshot or {})
+        execution_snapshot["actor"] = actor
+        return replace(
+            result,
+            model_snapshot=model_snapshot,
+            execution_snapshot=execution_snapshot,
+        )
 
     async def _dispatch_prompt_special_action(
         self,
@@ -1959,7 +2119,7 @@ class GuiAgent:
         alias = str(arguments.get("action_type") or arguments.get("action") or "").strip().lower()
         if alias not in self._prompt_composite_aliases:
             raise ActionError(f"Composite action {alias!r} is not listed in the prompt.")
-        if alias not in COMPOSITE_ACTION_DEFINITIONS:
+        if alias not in COMPOSITE_ACTION_DEFINITIONS and alias != "click_and_type":
             raise ActionError(f"Composite action {alias!r} has no executor.")
 
         action = Action(action_type=alias, text=self._composite_action_text(arguments))
@@ -2035,7 +2195,7 @@ class GuiAgent:
         arguments: dict[str, Any],
         observation: Observation,
     ) -> list[Action]:
-        if alias == "click_then_type":
+        if alias in {"click_then_type", "click_and_type"}:
             x, y = self._point_from_payload(arguments, observation)
             text = str(arguments.get("text") or "")
             if not text:
@@ -2100,7 +2260,7 @@ class GuiAgent:
 
     @staticmethod
     def _composite_action_summary(alias: str, arguments: dict[str, Any]) -> str:
-        if alias == "click_then_type":
+        if alias in {"click_then_type", "click_and_type"}:
             return "tap target and type text"
         if alias == "click_multi":
             points = arguments.get("coordinates") or arguments.get("points") or []
@@ -2349,6 +2509,146 @@ class GuiAgent:
         if self.backend.platform == "android" and hasattr(self.backend, "_run"):
             return normalize_adb_app_identifier(app)
         return normalize_app_identifier(self.backend.platform, app)
+
+    # ------------------------------------------------------------------
+    # S2 recovery helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _memory_context_with_s2_guidance(
+        memory_context: str | None,
+        s2_guidance_notes: list[str],
+    ) -> str | None:
+        if not s2_guidance_notes:
+            return memory_context
+        lines: list[str] = []
+        if memory_context and memory_context.strip():
+            lines.append(memory_context.strip())
+            lines.append("")
+        lines.append("Slow-model recovery hint:")
+        for note in s2_guidance_notes[-3:]:
+            for line in str(note).splitlines():
+                clean = line.strip()
+                if clean:
+                    lines.append(f"- {clean}")
+        lines.append("")
+        lines.append("This is advisory. Continue using the current screen evidence.")
+        return "\n".join(lines)
+
+    async def _request_s2_hint(
+        self,
+        *,
+        task: str,
+        step_index: int,
+        current_observation: Observation,
+        history: list[HistoryTurn],
+        last_action_summary: str | None,
+        reason: str,
+    ) -> str | None:
+        if not self._s2_enabled or self._s2_llm is None:
+            return None
+        recent_actions = [
+            f"Step {turn.step_index}: {turn.action_intent or turn.action_summary}"
+            for turn in history[-6:]
+        ]
+        observation_payload = {
+            "foreground_app": current_observation.foreground_app,
+            "platform": current_observation.platform,
+            "screen_width": current_observation.screen_width,
+            "screen_height": current_observation.screen_height,
+            "extra": self._scrub_for_log(current_observation.extra),
+        }
+        user_content = (
+            f"Original task:\n{task}\n\n"
+            f"Step index: {step_index}\n"
+            f"Current foreground app: {current_observation.foreground_app or 'unknown'}\n"
+            f"Current visible/screen summary:\n"
+            f"{self._truncate_text(self._json_for_prompt(observation_payload), self._s2_prompt_max_chars)}\n\n"
+            f"Recent action summaries:\n{chr(10).join(recent_actions) if recent_actions else 'None'}\n\n"
+            f"Last action summary: {last_action_summary or 'None'}\n"
+            f"Stagnation reason: {reason}"
+        )
+        user_content = self._truncate_text(user_content, self._s2_prompt_max_chars)
+        try:
+            response = await self._s2_llm.chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the slow-reasoning recovery model for a GUI agent.\n\n"
+                            "You must not directly answer the user.\n"
+                            "You must not invent screen content.\n"
+                            "You must provide a concise recovery hint for the small GUI executor.\n\n"
+                            "Return JSON:\n"
+                            "{\n"
+                            '  "diagnosis": "...",\n'
+                            '  "next_subgoal": "...",\n'
+                            '  "avoid": ["..."],\n'
+                            '  "stop_condition": "..."\n'
+                            "}"
+                        ),
+                    },
+                    {"role": "user", "content": user_content},
+                ],
+                tools=None,
+                max_tokens=500,
+            )
+        except Exception:
+            logger.warning("GUI S2 hint request failed.", exc_info=True)
+            return None
+
+        text = (response.content or "").strip()
+        if not text:
+            return None
+        payload = self._extract_json_object(text)
+        if isinstance(payload, dict):
+            lines: list[str] = []
+            for key in ("diagnosis", "next_subgoal", "stop_condition"):
+                value = payload.get(key)
+                if value:
+                    lines.append(f"{key}: {str(value).strip()}")
+            avoid = payload.get("avoid")
+            if isinstance(avoid, list):
+                avoid_items = [str(item).strip() for item in avoid if str(item).strip()]
+                if avoid_items:
+                    lines.append(f"avoid: {', '.join(avoid_items)}")
+            elif avoid:
+                lines.append(f"avoid: {str(avoid).strip()}")
+            if lines:
+                return self._truncate_text("\n".join(lines), self._s2_prompt_max_chars)
+        return self._truncate_text(text, self._s2_prompt_max_chars)
+
+    @staticmethod
+    def _json_for_prompt(value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(value)
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any] | None:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start < 0 or end <= start:
+                return None
+            try:
+                payload = json.loads(cleaned[start : end + 1])
+            except json.JSONDecodeError:
+                return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _truncate_text(text: str, max_chars: int) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "..."
 
     # ------------------------------------------------------------------
     # Message helpers
@@ -3352,6 +3652,7 @@ class GuiAgent:
             all_skills,
             tags=self._always_on_skill_tags,
         )
+        composite_actions.extend(self._legacy_composite_action_infos(all_skills, composite_actions))
         self._prompt_composite_aliases = {action.alias for action in composite_actions}
 
         skill_query = self._task_without_advisory_hints(task)
@@ -3396,6 +3697,30 @@ class GuiAgent:
             shortcut_only=self._prompt_shortcut_only,
         )
         return parts
+
+    @staticmethod
+    def _legacy_composite_action_infos(
+        skills: list[Any],
+        existing_actions: list[CompositeActionInfo],
+    ) -> list[CompositeActionInfo]:
+        existing_aliases = {action.alias for action in existing_actions}
+        if "click_and_type" in existing_aliases:
+            return []
+        for skill in skills:
+            tags = {str(tag).strip().lower() for tag in (getattr(skill, "tags", ()) or ())}
+            name = str(getattr(skill, "name", "") or "").strip().lower()
+            if "action_alias:click_and_type" in tags or name == "click_and_type":
+                return [
+                    CompositeActionInfo(
+                        alias="click_and_type",
+                        description=(
+                            "Legacy alias for click_then_type: tap a visible text field and type text."
+                        ),
+                        example='`{"action_type":"click_and_type","coordinate":[x,y],"text":"Hello","auto_enter":false}`',
+                        source_skill_id=str(getattr(skill, "skill_id", "") or "") or None,
+                    )
+                ]
+        return []
 
     @staticmethod
     def _skill_matches_app_filter(skill: Any, app: str | None) -> bool:

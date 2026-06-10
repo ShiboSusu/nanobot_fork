@@ -404,6 +404,10 @@ class AgentLoop:
                     provider=self._gui_provider or self.provider,
                     model=self._gui_model or self.model,
                     workspace=self.workspace,
+                    # TODO: resolve an independent gui.s2_provider through the
+                    # existing provider factory. V0 reuses the GUI/S1 provider.
+                    s2_provider=None,
+                    s2_model=self._gui_config.s2_model,
                 )
             )
 

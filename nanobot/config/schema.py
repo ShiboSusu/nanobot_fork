@@ -283,6 +283,21 @@ class GuiConfig(Base):
     backend: Literal["adb", "ios", "hdc", "mobileworld", "local", "dry-run"] = "adb"
     model: str | None = None
     provider: str | None = None
+    s1_provider: str | None = None
+    s1_model: str | None = None
+    s2_enabled: bool = False
+    s2_provider: str | None = None
+    s2_model: str | None = None
+    s2_hint_enabled: bool = True
+    s2_takeover_enabled: bool = True
+    s2_max_hints: int = Field(default=1, ge=0, le=5)
+    s2_takeover_after_hints: int = Field(default=1, ge=0, le=5)
+    s2_max_takeover_steps: int = Field(default=8, ge=1, le=30)
+    s2_trigger_on_stagnation: bool = True
+    s2_trigger_on_max_steps_near: bool = False
+    s2_trigger_on_done_missing_evidence: bool = True
+    s2_trigger_on_step_error: bool = True
+    s2_prompt_max_chars: int = Field(default=6000, ge=1000, le=30000)
     validator_model: str | None = None
     grounder_model: str | None = None
     reuser_model: str | None = None

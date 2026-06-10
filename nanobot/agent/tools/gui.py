@@ -359,6 +359,7 @@ class GuiRouterMemoryRetriever:
         chunks: list[tuple[str, str]] = []
         chunks.extend(self._iter_markdown_chunks(self._workspace / "memory" / "MEMORY.md", "memory/MEMORY.md"))
         chunks.extend(self._iter_history_chunks(self._workspace / "memory" / "history.jsonl"))
+        chunks.extend(self._iter_markdown_chunks(self._workspace / "android_deeplinks.md", "android_deeplinks.md"))
         chunks.extend(self._iter_opengui_memory_chunks())
         return chunks
 
@@ -818,6 +819,7 @@ class GuiWorkflowRunner:
         **kwargs: Any,
     ) -> str:
         blackboard: dict[str, str] = {}
+        blackboard_meta: dict[str, dict[str, Any]] = {}
         subtask_records: list[dict[str, Any]] = []
         payloads: list[dict[str, Any]] = []
         total_steps = 0
@@ -831,6 +833,7 @@ class GuiWorkflowRunner:
                     error="max_steps_exhausted",
                     subtask_records=subtask_records,
                     blackboard=blackboard,
+                    blackboard_meta=blackboard_meta,
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
@@ -845,6 +848,7 @@ class GuiWorkflowRunner:
                     error="missing_workflow_input",
                     subtask_records=subtask_records,
                     blackboard=blackboard,
+                    blackboard_meta=blackboard_meta,
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
@@ -870,6 +874,7 @@ class GuiWorkflowRunner:
                     error="invalid_subtask_result",
                     subtask_records=subtask_records,
                     blackboard=blackboard,
+                    blackboard_meta=blackboard_meta,
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
@@ -888,6 +893,7 @@ class GuiWorkflowRunner:
                     error=self._string_or_default(payload.get("error"), "subtask_failed"),
                     subtask_records=subtask_records,
                     blackboard=blackboard,
+                    blackboard_meta=blackboard_meta,
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
@@ -906,7 +912,20 @@ class GuiWorkflowRunner:
                 )
                 for key, value in extracted.items():
                     if key in subtask.outputs and isinstance(value, str) and value.strip():
-                        blackboard[key] = value.strip()
+                        clean_value = value.strip()
+                        blackboard[key] = clean_value
+                        evidence_refs = [
+                            str(payload.get("trace_path"))
+                            for _ in (0,)
+                            if payload.get("trace_path")
+                        ]
+                        blackboard_meta[key] = {
+                            "value": clean_value,
+                            "source_subtask": subtask.task,
+                            "source_app_hint": subtask.app_hint,
+                            "confidence": None,
+                            "evidence_refs": evidence_refs,
+                        }
 
                 missing_outputs = [key for key in subtask.outputs if key not in blackboard]
                 if missing_outputs:
@@ -918,6 +937,7 @@ class GuiWorkflowRunner:
                         error="missing_workflow_output",
                         subtask_records=subtask_records,
                         blackboard=blackboard,
+                        blackboard_meta=blackboard_meta,
                         missing_outputs=missing_outputs,
                         payloads=payloads,
                         steps_taken=total_steps,
@@ -930,6 +950,7 @@ class GuiWorkflowRunner:
             error=None,
             subtask_records=subtask_records,
             blackboard=blackboard,
+            blackboard_meta=blackboard_meta,
             payloads=payloads,
             steps_taken=total_steps,
         )
@@ -1014,6 +1035,7 @@ class GuiWorkflowRunner:
         error: str,
         subtask_records: list[dict[str, Any]],
         blackboard: dict[str, str],
+        blackboard_meta: dict[str, dict[str, Any]],
         missing_outputs: list[str],
         payloads: list[dict[str, Any]],
         steps_taken: int,
@@ -1024,6 +1046,7 @@ class GuiWorkflowRunner:
             error=error,
             subtask_records=subtask_records,
             blackboard=blackboard,
+            blackboard_meta=blackboard_meta,
             payloads=payloads,
             steps_taken=steps_taken,
         )
@@ -1039,13 +1062,16 @@ class GuiWorkflowRunner:
         error: str | None,
         subtask_records: list[dict[str, Any]],
         blackboard: dict[str, str],
+        blackboard_meta: dict[str, dict[str, Any]],
         payloads: list[dict[str, Any]],
         steps_taken: int,
     ) -> dict[str, Any]:
         last_payload = payloads[-1] if payloads else {}
         duration_s = self._sum_numeric(payloads, "duration_s")
         token_usage = self._sum_token_usage(payloads, "token_usage")
+        meta = dict(blackboard_meta or {})
         return {
+            "schema_version": "gui_task_result.v1",
             "success": success,
             "summary": summary,
             "model_summary": last_payload.get("model_summary"),
@@ -1061,6 +1087,19 @@ class GuiWorkflowRunner:
             "workflow_mode": "multi_app",
             "subtasks": subtask_records,
             "blackboard": dict(blackboard),
+            "blackboard_meta": meta,
+            "answer_candidates": [
+                {
+                    "key": key,
+                    "text": item.get("value"),
+                    "source": "blackboard",
+                    "confidence": item.get("confidence"),
+                    "source_subtask": item.get("source_subtask"),
+                    "evidence_refs": item.get("evidence_refs", []),
+                }
+                for key, item in meta.items()
+            ],
+            "s2_usage": self._merge_s2_usage(payloads),
         }
 
     @staticmethod
@@ -1159,6 +1198,42 @@ class GuiWorkflowRunner:
                     totals[usage_key] = totals.get(usage_key, 0) + value
         return totals
 
+    @staticmethod
+    def _merge_s2_usage(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+        totals: dict[str, Any] = {
+            "enabled": False,
+            "hints_used": 0,
+            "takeover_used": False,
+            "takeover_steps": 0,
+            "s1_steps": 0,
+            "s2_steps": 0,
+            "triggers": [],
+            "token_usage": {},
+        }
+        token_usage: dict[str, int] = {}
+        triggers: list[dict[str, Any]] = []
+        for payload in payloads:
+            usage = payload.get("s2_usage")
+            if not isinstance(usage, dict):
+                continue
+            totals["enabled"] = bool(totals["enabled"] or usage.get("enabled"))
+            totals["takeover_used"] = bool(totals["takeover_used"] or usage.get("takeover_used"))
+            for key in ("hints_used", "takeover_steps", "s1_steps", "s2_steps"):
+                value = usage.get(key)
+                if isinstance(value, int):
+                    totals[key] += value
+            raw_triggers = usage.get("triggers")
+            if isinstance(raw_triggers, list):
+                triggers.extend(item for item in raw_triggers if isinstance(item, dict))
+            raw_token_usage = usage.get("token_usage")
+            if isinstance(raw_token_usage, dict):
+                for key, value in raw_token_usage.items():
+                    if isinstance(value, int):
+                        token_usage[str(key)] = token_usage.get(str(key), 0) + value
+        totals["triggers"] = triggers
+        totals["token_usage"] = token_usage
+        return totals
+
 
 class GuiSubagentTool(Tool):
     """Run a GUI automation task through opengui."""
@@ -1172,19 +1247,35 @@ class GuiSubagentTool(Tool):
         workspace: Path,
         gui_event_callback: Any | None = None,
         gui_frame_callback: Any | None = None,
+        s2_provider: "LLMProvider | None" = None,
+        s2_model: str | None = None,
     ) -> None:
         if gui_config is None:
             raise ValueError("GuiSubagentTool requires gui_config")
 
         self._gui_config = gui_config
         self._provider = provider
-        self._model = model
+        self._s1_provider = provider
+        self._s1_model = gui_config.s1_model or model
+        self._model = self._s1_model
+        self._s2_provider = s2_provider or provider
+        self._s2_model = s2_model or gui_config.s2_model
         self._workspace = Path(workspace)
         self._gui_event_callback = gui_event_callback
         self._gui_frame_callback = gui_frame_callback
         self._llm_adapter = NanobotLLMAdapter(
-            provider, model, capture_ttft=gui_config.capture_ttft,
+            self._s1_provider, self._s1_model, capture_ttft=gui_config.capture_ttft,
         )
+        self._s2_llm_adapter = None
+        if gui_config.s2_enabled:
+            if self._s2_model:
+                self._s2_llm_adapter = NanobotLLMAdapter(
+                    self._s2_provider,
+                    self._s2_model,
+                    capture_ttft=gui_config.capture_ttft,
+                )
+            else:
+                logger.warning("GUI S2 is enabled but gui.s2_model is not configured; disabling S2.")
         self._embedding_signature: str | None = self._resolve_embedding_signature()
         self._embedding_adapter = self._build_embedding_adapter() if gui_config.embedding_model else None
         self._skill_libraries: dict[str, Any] = {}
@@ -1515,12 +1606,25 @@ class GuiSubagentTool(Tool):
             always_on_skill_tags=self._gui_config.always_on_skill_tags,
             shortcut_backend=shortcut_backend,
             shortcut_cache_dir=str(sc_dir),
+            s2_llm=self._s2_llm_adapter,
+            s2_model=self._s2_model,
+            s2_enabled=self._gui_config.s2_enabled and self._s2_llm_adapter is not None,
+            s2_hint_enabled=self._gui_config.s2_hint_enabled,
+            s2_takeover_enabled=self._gui_config.s2_takeover_enabled,
+            s2_max_hints=self._gui_config.s2_max_hints,
+            s2_takeover_after_hints=self._gui_config.s2_takeover_after_hints,
+            s2_max_takeover_steps=self._gui_config.s2_max_takeover_steps,
+            s2_trigger_on_stagnation=self._gui_config.s2_trigger_on_stagnation,
+            s2_prompt_max_chars=self._gui_config.s2_prompt_max_chars,
         )
 
-        if app_hint is not None:
-            result = await agent.run(task=task, app_hint=app_hint, max_retries=max_retries)
-        else:
-            result = await agent.run(task=task, max_retries=max_retries)
+        run_kwargs: dict[str, Any] = {}
+        run_params = inspect.signature(agent.run).parameters
+        if "max_retries" in run_params:
+            run_kwargs["max_retries"] = max_retries
+        if app_hint is not None and "app_hint" in run_params:
+            run_kwargs["app_hint"] = app_hint
+        result = await agent.run(task=task, **run_kwargs)
         summary = result.summary
         error = result.error
         if error and error.startswith("intervention_cancelled:"):
@@ -1541,10 +1645,19 @@ class GuiSubagentTool(Tool):
             or result.token_usage
             or {}
         )
+        raw_s2_usage = getattr(result, "s2_usage", {})
+        raw_answer_candidates = getattr(result, "answer_candidates", [])
+        raw_evidence = getattr(result, "evidence", {})
+        result_s2_usage = raw_s2_usage if isinstance(raw_s2_usage, dict) else {}
+        result_answer_candidates = (
+            raw_answer_candidates if isinstance(raw_answer_candidates, list) else []
+        )
+        result_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
         self._postprocessor.schedule(trace_path, is_success=result.success, platform=active_backend.platform, task=task)
 
         return json.dumps(
             {
+                "schema_version": "gui_task_result.v1",
                 "success": result.success,
                 "summary": summary,
                 "model_summary": result.model_summary,
@@ -1557,6 +1670,9 @@ class GuiSubagentTool(Tool):
                 "token_usage": total_token_usage,
                 "total_duration_s": total_duration_s,
                 "total_token_usage": total_token_usage,
+                "s2_usage": result_s2_usage,
+                "answer_candidates": result_answer_candidates,
+                "evidence": result_evidence,
             },
             ensure_ascii=False,
         )
