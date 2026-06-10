@@ -7,6 +7,7 @@ from importlib.resources import files as pkg_files
 from pathlib import Path
 from typing import Any
 
+from nanobot.agent.gui_experiment_policy import GUI_APP_TASK_POLICY, GUI_FINAL_ANSWER_POLICY
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 from nanobot.utils.helpers import build_assistant_message, current_time_str, detect_image_mime, truncate_text
@@ -68,6 +69,12 @@ class ContextBuilder:
         )
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
+
+        parts.append(
+            "# GUI/App Task Policy\n\n"
+            f"{GUI_APP_TASK_POLICY.strip()}\n\n"
+            f"{GUI_FINAL_ANSWER_POLICY.strip()}"
+        )
 
         entries = self.memory.read_unprocessed_history(since_cursor=self.memory.get_last_dream_cursor())
         if entries:

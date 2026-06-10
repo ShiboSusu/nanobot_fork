@@ -81,6 +81,23 @@ from opengui.trajectory.recorder import ExecutionPhase, TrajectoryRecorder
 from opengui.trajectory.summarizer import build_state_note, is_state_note
 
 logger = logging.getLogger(__name__)
+
+S2_NO_THINKING_POLICY = """/no_think
+
+Do not output thinking.
+Do not output analysis.
+Do not output markdown.
+Do not output code fences.
+Do not include text before or after the required output.
+Keep the output concise.
+"""
+
+S2_TAKEOVER_ACTION_POLICY = (
+    f"{S2_NO_THINKING_POLICY.strip()}\n\n"
+    "Return only the required GUI action output.\n"
+    "Do not explain the action.\n"
+    "Follow the active GUI action contract exactly."
+)
 _SKILL_PARAM_EXTRACTION_TIMEOUT_SECONDS = 60.0
 
 _DONE_FAILURE_HINTS: tuple[str, ...] = (
@@ -1527,8 +1544,13 @@ class GuiAgent:
             # Call LLM
             native_tools_enabled = profile_uses_native_tools(self.agent_profile)
             active_llm = llm_override or self.llm
+            request_messages = (
+                self._messages_with_s2_takeover_policy(messages)
+                if actor == "s2_takeover"
+                else messages
+            )
             response: LLMResponse = await active_llm.chat(
-                messages=messages,
+                messages=request_messages,
                 tools=self._build_tools_list() if native_tools_enabled else None,
                 tool_choice="required" if native_tools_enabled else None,
             )
@@ -2586,17 +2608,15 @@ class GuiAgent:
                     {
                         "role": "system",
                         "content": (
+                            f"{S2_NO_THINKING_POLICY.strip()}\n\n"
                             "You are the slow-reasoning recovery model for a GUI agent.\n\n"
                             "You must not directly answer the user.\n"
                             "You must not invent screen content.\n"
                             "You must provide a concise recovery hint for the small GUI executor.\n\n"
-                            "Return JSON:\n"
-                            "{\n"
-                            '  "diagnosis": "...",\n'
-                            '  "next_subgoal": "...",\n'
-                            '  "avoid": ["..."],\n'
-                            '  "stop_condition": "..."\n'
-                            "}"
+                            "Return ONLY one minified JSON object.\n"
+                            "Keep the JSON under 120 tokens.\n"
+                            'Schema: {"diagnosis":"...","next_subgoal":"...",'
+                            '"avoid":["..."],"stop_condition":"..."}'
                         ),
                     },
                     {"role": "user", "content": user_content},
@@ -2695,6 +2715,20 @@ class GuiAgent:
             history_image_window=self.history_image_window,
             compact_prompt_parts=prompt_skill_parts,
         )
+
+    @staticmethod
+    def _messages_with_s2_takeover_policy(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not messages:
+            return [{"role": "system", "content": S2_TAKEOVER_ACTION_POLICY}]
+        updated = [dict(message) for message in messages]
+        first = dict(updated[0])
+        content = first.get("content")
+        if isinstance(content, str):
+            first["content"] = f"{content}\n\n{S2_TAKEOVER_ACTION_POLICY}"
+            updated[0] = first
+            return updated
+        updated.insert(0, {"role": "system", "content": S2_TAKEOVER_ACTION_POLICY})
+        return updated
 
     def _build_instruction_prompt(
         self,

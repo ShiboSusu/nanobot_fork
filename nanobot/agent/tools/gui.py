@@ -17,6 +17,11 @@ import litellm
 import numpy as np
 
 from nanobot.agent.gui_adapter import NanobotEmbeddingAdapter, NanobotLLMAdapter
+from nanobot.agent.gui_experiment_policy import (
+    GUI_INFORMATION_QUERY_POLICY,
+    GUI_TASK_DESCRIPTION_POLICY,
+    GUI_WORKFLOW_PLANNER_POLICY,
+)
 from nanobot.agent.gui_safety import check_gui_safety
 from nanobot.agent.gui_task_schema import (
     GuiOutputMode,
@@ -129,6 +134,16 @@ def _safety_block_payload(
         blackboard=blackboard or {},
         blackboard_meta=blackboard_meta or {},
     )
+
+
+def _task_with_information_query_policy(task: str, task_request: Any | None) -> str:
+    task_type = getattr(task_request, "task_type", None)
+    if task_type not in {GuiTaskType.INFORMATION_QUERY, GuiTaskType.MIXED_QUERY_AND_ACTION}:
+        return task
+    policy = GUI_INFORMATION_QUERY_POLICY.strip()
+    if not policy or policy in task:
+        return task
+    return f"{task.rstrip()}\n\n{policy}"
 
 
 @dataclass(frozen=True)
@@ -875,7 +890,8 @@ class GuiWorkflowRunner:
                         "{\"app_hint\":\"WeChat\",\"task\":\"In WeChat, message Zhang San that you arrived.\","
                         "\"inputs\":[],\"outputs\":[]},"
                         "{\"app_hint\":\"Maps\",\"task\":\"In Maps, start navigation home.\","
-                        "\"inputs\":[],\"outputs\":[]}]}"
+                        "\"inputs\":[],\"outputs\":[]}]}\n\n"
+                        f"{GUI_WORKFLOW_PLANNER_POLICY.strip()}"
                     ),
                 },
                 {
@@ -1497,7 +1513,7 @@ class GuiSubagentTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
+        base = (
             "Execute a GUI automation goal on a device through a vision-action agent "
             "that observes screenshots and executes actions. Pass a high-level app-scoped "
             "goal with user-provided constraints and values; do not invent low-level UI "
@@ -1505,6 +1521,7 @@ class GuiSubagentTool(Tool):
             "user explicitly provided them or they come from reliable known context. "
             "Returns a structured result with success status, summary, and trace path."
         )
+        return f"{base}\n\n{GUI_TASK_DESCRIPTION_POLICY.strip()}"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -1696,6 +1713,7 @@ class GuiSubagentTool(Tool):
     ) -> str:
         if task_request is None:
             task_request = normalize_gui_task_request({"task": task, "app_hint": app_hint})
+        task = _task_with_information_query_policy(task, task_request)
         raw_max_retries = kwargs.pop("max_retries", 1)
         try:
             max_retries = max(1, int(raw_max_retries))
