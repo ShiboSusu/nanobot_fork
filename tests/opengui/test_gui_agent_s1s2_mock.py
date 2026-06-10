@@ -79,6 +79,15 @@ def _recorder(tmp_path: Path) -> TrajectoryRecorder:
     return TrajectoryRecorder(output_dir=tmp_path / "trajectory", task="s2 test")
 
 
+def _agent(tmp_path: Path) -> GuiAgent:
+    return GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+    )
+
+
 def _step_result(
     *,
     step_index: int,
@@ -111,6 +120,62 @@ def _step_result(
         execution_snapshot={},
         done=done,
     )
+
+
+def test_build_s2_takeover_context_includes_failure_history(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+
+    text = agent._build_s2_takeover_context(
+        task="打开微博，查看热搜第三名",
+        trigger_reason="stagnation_streak=1 reached stagnation_limit=1",
+        stagnation_streak=1,
+        stagnation_limit=1,
+        recent_history=[
+            {
+                "actor": "s1",
+                "action_summary": "repeated tapping search box",
+                "state_summary": "screen did not change",
+            }
+        ],
+        s2_guidance_notes=["Avoid repeating the search box tap."],
+    )
+
+    assert "S2 takeover context" in text
+    assert "taking over from the small GUI executor" in text
+    assert "Trigger: stagnation" in text
+    assert "repeated tapping search box" in text
+    assert "screen did not change" in text
+    assert "Do not repeat the last failed action pattern" in text
+    assert "Continue from the current screen" in text
+    assert "/no_think" in text
+
+
+def test_takeover_context_does_not_include_raw_model_response(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    recent = agent._recent_history_for_takeover(
+        [
+            {
+                "actor": "s1",
+                "action_summary": "tap search",
+                "state_summary": "same screen",
+                "raw_response_content": "<very long raw response>",
+            }
+        ]
+    )
+
+    text = agent._build_s2_takeover_context(
+        task="recover",
+        trigger_reason="stagnation",
+        stagnation_streak=1,
+        stagnation_limit=1,
+        recent_history=recent,
+        s2_guidance_notes=[],
+    )
+
+    assert "tap search" in text
+    assert "same screen" in text
+    assert "raw_response_content" not in text
+    assert "<very long raw response>" not in text
 
 
 @pytest.mark.asyncio
@@ -218,6 +283,7 @@ async def test_second_stagnation_triggers_s2_takeover(monkeypatch: pytest.Monkey
     hint_calls: list[dict[str, Any]] = []
     actors: list[str] = []
     overrides: list[Any] = []
+    captured: list[dict[str, Any]] = []
 
     async def fake_hint(self: GuiAgent, **kwargs: Any) -> str:
         del self
@@ -235,9 +301,16 @@ async def test_second_stagnation_triggers_s2_takeover(monkeypatch: pytest.Monkey
         llm_override: Any = None,
         actor: str = "s1",
     ) -> StepResult:
-        del self, messages, prompt_snapshot, total_steps
+        del self, prompt_snapshot, total_steps
         actors.append(actor)
         overrides.append(llm_override)
+        captured.append(
+            {
+                "actor": actor,
+                "llm_override": llm_override,
+                "messages": messages,
+            }
+        )
         return _step_result(
             step_index=step_index,
             current_observation=current_observation,
@@ -273,6 +346,21 @@ async def test_second_stagnation_triggers_s2_takeover(monkeypatch: pytest.Monkey
     assert [event["mode"] for event in result.s2_usage["triggers"]] == ["hint", "takeover"]
     assert result.s2_usage["takeover_steps"] == 1
     assert result.s2_usage["s2_steps"] == 1
+
+    takeover_calls = [item for item in captured if item["actor"] == "s2_takeover"]
+    assert takeover_calls
+    takeover_text = "\n".join(str(message.get("content", "")) for message in takeover_calls[0]["messages"])
+    assert "S2 takeover context" in takeover_text
+    assert "Trigger: stagnation" in takeover_text
+    assert "Do not repeat the last failed action pattern" in takeover_text
+    assert "Continue from the current screen" in takeover_text
+    assert "/no_think" in takeover_text
+
+    for item in captured:
+        if item["actor"] != "s1":
+            continue
+        text = "\n".join(str(message.get("content", "")) for message in item["messages"])
+        assert "S2 takeover context" not in text
 
 
 @pytest.mark.asyncio

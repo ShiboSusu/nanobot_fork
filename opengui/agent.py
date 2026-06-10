@@ -870,6 +870,8 @@ class GuiAgent:
         stagnation_streak = 0
         s2_guidance_notes: list[str] = []
         takeover_remaining = 0
+        last_s2_takeover_reason = ""
+        last_s2_stagnation_streak = 0
         if self.stagnation_limit > 0:
             previous_fingerprint = self._build_screen_fingerprint(obs)
 
@@ -902,6 +904,15 @@ class GuiAgent:
                 llm_override: LLMProvider | None = self._s2_llm
                 actor = "s2_takeover"
                 takeover_remaining -= 1
+                takeover_context = self._build_s2_takeover_context(
+                    task=task,
+                    trigger_reason=last_s2_takeover_reason or "stagnation",
+                    stagnation_streak=last_s2_stagnation_streak,
+                    stagnation_limit=self.stagnation_limit,
+                    recent_history=self._recent_history_for_takeover(history),
+                    s2_guidance_notes=s2_guidance_notes,
+                )
+                messages = self._with_s2_takeover_context(messages, takeover_context)
             else:
                 llm_override = None
                 actor = "s1"
@@ -1368,6 +1379,8 @@ class GuiAgent:
                         remaining_steps = max(self.max_steps - step_index, 0)
                         takeover_remaining = min(self._s2_max_takeover_steps, remaining_steps)
                         if takeover_remaining > 0:
+                            last_s2_takeover_reason = stagnation_reason
+                            last_s2_stagnation_streak = stagnation_streak
                             s2_usage.takeover_used = True
                             s2_usage.triggers.append(
                                 S2TriggerEvent(
@@ -2567,6 +2580,106 @@ class GuiAgent:
         lines.append("")
         lines.append("This is advisory. Continue using the current screen evidence.")
         return "\n".join(lines)
+
+    def _recent_history_for_takeover(
+        self,
+        history: list[Any],
+        *,
+        max_items: int = 5,
+    ) -> list[dict[str, str]]:
+        del self
+        recent: list[dict[str, str]] = []
+        for item in history[-max_items:]:
+            if isinstance(item, dict):
+                action_summary = str(item.get("action_summary") or "").strip()
+                state_summary = str(item.get("state_summary") or "").strip()
+                actor = str(item.get("actor") or "s1").strip()
+            else:
+                action_summary = str(getattr(item, "action_summary", "") or "").strip()
+                state_summary = str(getattr(item, "state_summary", "") or "").strip()
+                actor = str(getattr(item, "actor", "") or "s1").strip()
+            if not action_summary and not state_summary:
+                continue
+            recent.append(
+                {
+                    "actor": actor or "s1",
+                    "action_summary": action_summary[:500],
+                    "state_summary": state_summary[:500],
+                }
+            )
+        return recent
+
+    def _build_s2_takeover_context(
+        self,
+        *,
+        task: str,
+        trigger_reason: str,
+        stagnation_streak: int,
+        stagnation_limit: int,
+        recent_history: list[dict[str, str]],
+        s2_guidance_notes: list[str],
+    ) -> str:
+        del self
+        lines: list[str] = [
+            "/no_think",
+            "",
+            "S2 takeover context:",
+            "You are now taking over from the small GUI executor because the previous GUI steps reached a stagnation condition.",
+            "Use the current screen and the recent step history to recover.",
+            "Continue from the current screen. Do not restart the whole task unless it is clearly necessary.",
+            "Do not repeat the last failed action pattern.",
+            "Do not invent screen content.",
+            "Do not directly answer the user.",
+            "Return only the required GUI action output.",
+            "",
+            f"Original task: {task}",
+            "Trigger: stagnation",
+            f"Trigger reason: {trigger_reason}",
+            f"Stagnation streak: {stagnation_streak}",
+            f"Stagnation limit: {stagnation_limit}",
+        ]
+
+        if recent_history:
+            lines.append("")
+            lines.append("Recent S1 step history:")
+            for idx, item in enumerate(recent_history, start=1):
+                action_summary = item.get("action_summary") or ""
+                state_summary = item.get("state_summary") or ""
+                actor = item.get("actor") or "s1"
+                lines.append(
+                    f"{idx}. actor={actor}; action={action_summary}; state={state_summary}"
+                )
+
+        if s2_guidance_notes:
+            lines.append("")
+            lines.append("Previous S2 recovery hints:")
+            for idx, note in enumerate(s2_guidance_notes[-3:], start=1):
+                lines.append(f"{idx}. {str(note).strip()[:800]}")
+
+        lines.append("")
+        lines.append("Safety constraints:")
+        lines.append("- Do not send, pay, submit, delete, authorize, or enter secrets.")
+        lines.append("- If a sensitive action is required, stop before execution and request user confirmation.")
+        lines.append("- For information queries, do not mark done unless the requested answer is visible or explicitly extracted.")
+
+        return "\n".join(lines).strip()
+
+    def _with_s2_takeover_context(
+        self,
+        messages: list[dict[str, Any]],
+        takeover_context: str,
+    ) -> list[dict[str, Any]]:
+        del self
+        if not takeover_context:
+            return messages
+
+        copied = [dict(item) for item in messages]
+        for item in copied:
+            if item.get("role") == "system":
+                item["content"] = f"{item.get('content', '')}\n\n{takeover_context}".strip()
+                return copied
+
+        return [{"role": "system", "content": takeover_context}, *copied]
 
     async def _request_s2_hint(
         self,
