@@ -18,12 +18,13 @@ def test_decide_s2_mode_disabled_returns_off() -> None:
         hint_enabled=True,
         takeover_enabled=True,
         takeover_after_hints=1,
+        takeover_used=False,
     )
 
     assert mode == S2Mode.OFF
 
 
-def test_decide_s2_mode_uses_hint_when_budget_available() -> None:
+def test_stagnation_first_trigger_returns_hint() -> None:
     mode = decide_s2_mode(
         enabled=True,
         trigger=S2Trigger.STAGNATION,
@@ -32,12 +33,13 @@ def test_decide_s2_mode_uses_hint_when_budget_available() -> None:
         hint_enabled=True,
         takeover_enabled=True,
         takeover_after_hints=1,
+        takeover_used=False,
     )
 
     assert mode == S2Mode.HINT
 
 
-def test_decide_s2_mode_takes_over_after_hint_budget() -> None:
+def test_stagnation_second_trigger_returns_takeover() -> None:
     mode = decide_s2_mode(
         enabled=True,
         trigger=S2Trigger.STAGNATION,
@@ -46,9 +48,47 @@ def test_decide_s2_mode_takes_over_after_hint_budget() -> None:
         hint_enabled=True,
         takeover_enabled=True,
         takeover_after_hints=1,
+        takeover_used=False,
     )
 
     assert mode == S2Mode.TAKEOVER
+
+
+def test_non_stagnation_trigger_returns_off_in_v0_policy() -> None:
+    for trigger in [
+        S2Trigger.LOW_CONFIDENCE,
+        S2Trigger.FAKE_DONE,
+        S2Trigger.MISSING_EVIDENCE,
+        S2Trigger.MAX_STEPS_NEAR,
+        S2Trigger.STEP_ERROR,
+    ]:
+        mode = decide_s2_mode(
+            enabled=True,
+            trigger=trigger,
+            hints_used=0,
+            max_hints=1,
+            hint_enabled=True,
+            takeover_enabled=True,
+            takeover_after_hints=1,
+            takeover_used=False,
+        )
+
+        assert mode == S2Mode.OFF
+
+
+def test_takeover_used_disables_repeated_takeover() -> None:
+    mode = decide_s2_mode(
+        enabled=True,
+        trigger=S2Trigger.STAGNATION,
+        hints_used=1,
+        max_hints=1,
+        hint_enabled=True,
+        takeover_enabled=True,
+        takeover_after_hints=1,
+        takeover_used=True,
+    )
+
+    assert mode == S2Mode.OFF
 
 
 def test_decide_s2_mode_takeover_disabled_returns_off() -> None:
@@ -60,12 +100,13 @@ def test_decide_s2_mode_takeover_disabled_returns_off() -> None:
         hint_enabled=True,
         takeover_enabled=False,
         takeover_after_hints=1,
+        takeover_used=False,
     )
 
     assert mode == S2Mode.OFF
 
 
-def test_decide_s2_mode_zero_hint_budget_can_take_over_immediately() -> None:
+def test_zero_hint_budget_allows_immediate_takeover() -> None:
     mode = decide_s2_mode(
         enabled=True,
         trigger=S2Trigger.STAGNATION,
@@ -74,6 +115,7 @@ def test_decide_s2_mode_zero_hint_budget_can_take_over_immediately() -> None:
         hint_enabled=True,
         takeover_enabled=True,
         takeover_after_hints=0,
+        takeover_used=False,
     )
 
     assert mode == S2Mode.TAKEOVER

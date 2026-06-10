@@ -73,15 +73,22 @@ def decide_s2_mode(
     hint_enabled: bool,
     takeover_enabled: bool,
     takeover_after_hints: int,
+    takeover_used: bool = False,
 ) -> S2Mode:
-    del trigger
+    """Decide the minimal V0 S2 mode for stagnation recovery."""
     if not enabled:
         return S2Mode.OFF
 
-    if hint_enabled and hints_used < max_hints:
+    if trigger != S2Trigger.STAGNATION:
+        return S2Mode.OFF
+
+    if hint_enabled and max_hints > 0 and hints_used < max_hints:
         return S2Mode.HINT
 
-    if takeover_enabled and hints_used >= takeover_after_hints:
+    if takeover_used:
+        return S2Mode.OFF
+
+    if takeover_enabled and hints_used >= max(0, takeover_after_hints):
         return S2Mode.TAKEOVER
 
     return S2Mode.OFF

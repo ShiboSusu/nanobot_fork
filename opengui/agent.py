@@ -1295,13 +1295,14 @@ class GuiAgent:
                         "task would stop to avoid repeating the same action loop."
                     )
                     s2_mode = decide_s2_mode(
-                        enabled=self._s2_enabled and self._s2_trigger_on_stagnation,
+                        enabled=self._s2_enabled,
                         trigger=S2Trigger.STAGNATION,
                         hints_used=s2_usage.hints_used,
                         max_hints=self._s2_max_hints,
                         hint_enabled=self._s2_hint_enabled,
                         takeover_enabled=self._s2_takeover_enabled,
                         takeover_after_hints=self._s2_takeover_after_hints,
+                        takeover_used=s2_usage.takeover_used,
                     )
                     if s2_mode == S2Mode.HINT:
                         hint = await self._request_s2_hint(
@@ -1312,33 +1313,39 @@ class GuiAgent:
                             last_action_summary=result.state_summary or result.action_summary,
                             reason=stagnation_reason,
                         )
+                        s2_usage.hints_used += 1
+                        s2_usage.triggers.append(
+                            S2TriggerEvent(
+                                step_index=step_index,
+                                trigger=S2Trigger.STAGNATION,
+                                mode=S2Mode.HINT,
+                                reason=stagnation_reason,
+                                actor_before=actor,
+                                metadata={
+                                    "foreground_app": app_label,
+                                    "stagnation_streak": stagnation_streak,
+                                    "stagnation_limit": self.stagnation_limit,
+                                    "hint_available": bool(hint),
+                                },
+                            )
+                        )
                         if hint:
                             s2_guidance_notes.append(hint)
-                            s2_usage.hints_used += 1
-                            s2_usage.triggers.append(
-                                S2TriggerEvent(
-                                    step_index=step_index,
-                                    trigger=S2Trigger.STAGNATION,
-                                    mode=S2Mode.HINT,
-                                    reason=stagnation_reason,
-                                    actor_before=actor,
-                                    metadata={"foreground_app": app_label},
-                                )
-                            )
-                            await self._log_attempt_event(
-                                run_dir,
-                                "s2_hint",
-                                step_index=step_index,
-                                reason=stagnation_reason,
-                                foreground_app=app_label,
-                            )
-                            history.append(history_with_current_step[-1])
-                            if result.next_observation is not None:
-                                obs = result.next_observation
-                            stagnation_streak = 0
-                            previous_fingerprint = self._build_screen_fingerprint(obs)
-                            previous_action_type = None
-                            continue
+                        await self._log_attempt_event(
+                            run_dir,
+                            "s2_hint",
+                            step_index=step_index,
+                            reason=stagnation_reason,
+                            foreground_app=app_label,
+                            hint_available=bool(hint),
+                        )
+                        history.append(history_with_current_step[-1])
+                        if result.next_observation is not None:
+                            obs = result.next_observation
+                        stagnation_streak = 0
+                        previous_fingerprint = self._build_screen_fingerprint(obs)
+                        previous_action_type = None
+                        continue
 
                     if s2_mode == S2Mode.TAKEOVER and self._s2_llm is not None:
                         remaining_steps = max(self.max_steps - step_index, 0)
@@ -1352,7 +1359,11 @@ class GuiAgent:
                                     mode=S2Mode.TAKEOVER,
                                     reason=stagnation_reason,
                                     actor_before=actor,
-                                    metadata={"foreground_app": app_label},
+                                    metadata={
+                                        "foreground_app": app_label,
+                                        "stagnation_streak": stagnation_streak,
+                                        "stagnation_limit": self.stagnation_limit,
+                                    },
                                 )
                             )
                             await self._log_attempt_event(
