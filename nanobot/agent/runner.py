@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.agent.gui_experiment_policy import is_gui_e2e_compact_mode
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
 from nanobot.agent.tools.registry import ToolRegistry
@@ -583,6 +585,41 @@ class AgentRunner:
             kwargs["reasoning_effort"] = spec.reasoning_effort
         return kwargs
 
+    @staticmethod
+    def _tool_name(tool_def: dict[str, Any]) -> str | None:
+        fn = tool_def.get("function")
+        if isinstance(fn, dict):
+            name = fn.get("name")
+            return name if isinstance(name, str) else None
+        name = tool_def.get("name")
+        return name if isinstance(name, str) else None
+
+    @classmethod
+    def _filter_compact_tools(cls, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if not is_gui_e2e_compact_mode() or not tools:
+            return tools
+        return [tool for tool in tools if cls._tool_name(tool) == "gui_task"]
+
+    @staticmethod
+    def _dump_first_llm_payload(kwargs: dict[str, Any]) -> None:
+        dump_path = os.environ.get("NB_DUMP_FIRST_LLM_PAYLOAD")
+        if not dump_path:
+            return
+        path = Path(dump_path)
+        if path.exists():
+            return
+        payload = {
+            "model": kwargs.get("model"),
+            "messages": kwargs.get("messages"),
+            "tools": kwargs.get("tools"),
+            "max_tokens": kwargs.get("max_tokens"),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Failed to dump first LLM payload to {}: {}", dump_path, exc)
+
     async def _request_model(
         self,
         spec: AgentRunSpec,
@@ -606,8 +643,9 @@ class AgentRunner:
         kwargs = self._build_request_kwargs(
             spec,
             messages,
-            tools=spec.tools.get_definitions(),
+            tools=self._filter_compact_tools(spec.tools.get_definitions()),
         )
+        self._dump_first_llm_payload(kwargs)
         wants_streaming = hook.wants_streaming()
         wants_progress_streaming = (
             not wants_streaming

@@ -2,6 +2,32 @@
 
 from __future__ import annotations
 
+import os
+
+
+def is_gui_e2e_compact_mode() -> bool:
+    return os.environ.get("NB_GUI_E2E_COMPACT") == "1"
+
+
+GUI_E2E_COMPACT_MAIN_PROMPT = """You are the main controller for a GUI-only mobile experiment.
+
+For phone/app tasks, call gui_task. Do not answer app-visible or account-specific information from memory.
+
+Use gui_task for opening apps, operating apps, searching inside apps, and reading app-visible state such as rankings, tickets, flights, orders, maps, media, privacy, or account settings.
+
+After gui_task returns, answer in natural language.
+
+Do not expose raw JSON, trace_path, screenshot_path, schema_version, token_usage, or "Status: completed".
+
+If evidence is missing or uncertain, say it was not reliably found.
+
+Sensitive actions such as send, pay, submit, delete, authorize, passwords, or verification codes require confirmation and must not be completed automatically.
+"""
+
+
+GUI_E2E_COMPACT_GUI_TASK_DESCRIPTION = """Run a phone GUI task for app operations and app-visible information queries. Returns success, summary, model_summary, answer_candidates, evidence, safety, and s2_usage. Sensitive actions stop before execution and return needs_human_confirm."""
+
+
 GUI_APP_TASK_POLICY = """
 Phone/app GUI tasks must use gui_task.
 

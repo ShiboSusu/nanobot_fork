@@ -18,9 +18,11 @@ import numpy as np
 
 from nanobot.agent.gui_adapter import NanobotEmbeddingAdapter, NanobotLLMAdapter
 from nanobot.agent.gui_experiment_policy import (
+    GUI_E2E_COMPACT_GUI_TASK_DESCRIPTION,
     GUI_INFORMATION_QUERY_POLICY,
     GUI_TASK_DESCRIPTION_POLICY,
     GUI_WORKFLOW_PLANNER_POLICY,
+    is_gui_e2e_compact_mode,
 )
 from nanobot.agent.gui_safety import check_gui_safety
 from nanobot.agent.gui_task_schema import (
@@ -1513,6 +1515,9 @@ class GuiSubagentTool(Tool):
 
     @property
     def description(self) -> str:
+        if is_gui_e2e_compact_mode():
+            return GUI_E2E_COMPACT_GUI_TASK_DESCRIPTION
+
         base = (
             "Execute a GUI automation goal on a device through a vision-action agent "
             "that observes screenshots and executes actions. Pass a high-level app-scoped "
