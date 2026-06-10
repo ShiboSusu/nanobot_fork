@@ -435,6 +435,13 @@ class Config(BaseSettings):
             if spec:
                 p = getattr(self.providers, spec.name, None)
                 return (p, spec.name) if p else (None, None)
+            raw = getattr(self.providers, forced, None)
+            if raw is None:
+                raw = getattr(self.providers, forced.replace("-", "_"), None)
+            if isinstance(raw, ProviderConfig):
+                return raw, forced
+            if isinstance(raw, dict):
+                return ProviderConfig.model_validate(raw), forced
             return None, None
 
         model_lower = (model or self.agents.defaults.model).lower()

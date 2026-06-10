@@ -268,9 +268,10 @@ class TestSchemaConfig:
             "chat_template_kwargs": {"enable_thinking": False},
         }
 
-    def test_gui_s1_s2_named_providers_keep_separate_extra_body(self) -> None:
+    def test_main_gui_s1_s2_named_providers_keep_separate_extra_body(self) -> None:
         from nanobot.config.schema import Config
         from nanobot.providers.factory import (
+            build_provider_snapshot,
             build_gui_provider_snapshot,
             build_gui_s2_provider_snapshot,
         )
@@ -292,6 +293,19 @@ class TestSchemaConfig:
                             "chat_template_kwargs": {"enable_thinking": False}
                         },
                     },
+                    "qwen_397b": {
+                        "apiKey": "qwen-key",
+                        "apiBase": "http://qwen-397b.test/v1",
+                        "extraBody": {
+                            "chat_template_kwargs": {"enable_thinking": False}
+                        },
+                    },
+                },
+                "agents": {
+                    "defaults": {
+                        "provider": "qwen_35b",
+                        "model": "qwen3.6-35b-a3b",
+                    },
                 },
                 "gui": {
                     "backend": "dry-run",
@@ -300,20 +314,24 @@ class TestSchemaConfig:
                     "s1Provider": "qwen_9b",
                     "s1Model": "qwen3.5-9b",
                     "s2Enabled": True,
-                    "s2Provider": "qwen_35b",
-                    "s2Model": "qwen3.6-35b-a3b",
+                    "s2Provider": "qwen_397b",
+                    "s2Model": "qwen3.5-397b-a17b",
                 },
             }
         )
 
+        main = build_provider_snapshot(config)
         s1 = build_gui_provider_snapshot(config)
         s2 = build_gui_s2_provider_snapshot(config)
 
         assert s1 is not None
         assert s2 is not None
+        assert main.model == "qwen3.6-35b-a3b"
         assert s1.model == "qwen3.5-9b"
-        assert s2.model == "qwen3.6-35b-a3b"
+        assert s2.model == "qwen3.5-397b-a17b"
+        assert main.provider.api_base == "http://qwen-35b.test/v1"
         assert s1.provider.api_base == "http://qwen-9b.test/v1"
-        assert s2.provider.api_base == "http://qwen-35b.test/v1"
+        assert s2.provider.api_base == "http://qwen-397b.test/v1"
+        assert main.provider._extra_body["chat_template_kwargs"]["enable_thinking"] is False
         assert s1.provider._extra_body["chat_template_kwargs"]["enable_thinking"] is False
         assert s2.provider._extra_body["chat_template_kwargs"]["enable_thinking"] is False

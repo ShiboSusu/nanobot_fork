@@ -136,16 +136,16 @@ def test_agent_loop_passes_independent_s2_provider_to_gui_tool(
             provider="qwen_9b",
             model="qwen3.5-9b",
             s2_enabled=True,
-            s2_provider="qwen_35b",
-            s2_model="qwen3.6-35b-a3b",
+            s2_provider="qwen_397b",
+            s2_model="qwen3.5-397b-a17b",
         ),
         gui_provider=s1_provider,
         gui_model="qwen3.5-9b",
         gui_s2_provider=s2_provider,
-        gui_s2_model="qwen3.6-35b-a3b",
+        gui_s2_model="qwen3.5-397b-a17b",
     )
 
     assert captured_kwargs["provider"] is s1_provider
     assert captured_kwargs["model"] == "qwen3.5-9b"
     assert captured_kwargs["s2_provider"] is s2_provider
-    assert captured_kwargs["s2_model"] == "qwen3.6-35b-a3b"
+    assert captured_kwargs["s2_model"] == "qwen3.5-397b-a17b"
