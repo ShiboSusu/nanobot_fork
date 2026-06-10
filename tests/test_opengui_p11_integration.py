@@ -137,6 +137,17 @@ def _is_workflow_planner_call(messages: list[dict[str, Any]]) -> bool:
     return isinstance(first_content, str) and "narrow GUI task router" in first_content
 
 
+def _assert_gui_result_superset(result: str, expected_json: str, *, task: str = "test task") -> None:
+    actual = json.loads(result)
+    expected = json.loads(expected_json)
+    for key, value in expected.items():
+        assert actual[key] == value
+    assert actual["request_schema_version"] == "gui_task_request.v1"
+    assert actual["request"]["task"] == task
+    assert actual["task_type"] == "operation"
+    assert actual["output_mode"] == "operation_status"
+
+
 def _profile_response(response: Any) -> Any:
     tool_calls = getattr(response, "tool_calls", None)
     if not tool_calls:
@@ -245,7 +256,7 @@ async def test_gui_tool_execute_background_wraps_backend(monkeypatch: pytest.Mon
     ):
         result = await tool.execute("test task")
 
-    assert result == canned_result
+    _assert_gui_result_superset(result, canned_result)
     # BackgroundDesktopBackend must have been constructed with inner backend and xvfb manager
     mock_bg_cls.assert_called_once_with(
         inner_backend,
@@ -285,7 +296,7 @@ async def test_gui_tool_execute_background_nonlinux_fallback(
     ):
         result = await tool.execute("test task", acknowledge_background_fallback=True)
 
-    assert result == canned_result
+    _assert_gui_result_superset(result, canned_result)
     called_backend = mock_run_task.call_args[0][0]
     assert called_backend is raw_backend
     assert "background runtime resolved:" in caplog.text
@@ -303,7 +314,7 @@ async def test_gui_tool_execute_no_background() -> None:
     with patch("nanobot.agent.tools.gui.GuiSubagentTool._run_task", new=AsyncMock(return_value=canned_result)) as mock_run_task:
         result = await tool.execute("test task")
 
-    assert result == canned_result
+    _assert_gui_result_superset(result, canned_result)
     # _run_task must be called with the unwrapped raw backend
     mock_run_task.assert_called_once()
     called_backend = mock_run_task.call_args[0][0]
@@ -476,7 +487,7 @@ async def test_gui_tool_uses_cgvirtualdisplay_manager_for_macos_isolated_mode(
         monkeypatch.setattr(sys, "platform", "darwin")
         result = await tool.execute("test task")
 
-    assert result == canned_result
+    _assert_gui_result_superset(result, canned_result)
     assert cgvd_init_kwargs == [{"width": 1440, "height": 900}]
     assert len(wrapped_backend_ref) == 1
     assert wrapped_backend_ref[0]._inner is inner_backend
@@ -563,7 +574,7 @@ async def test_gui_tool_uses_windows_isolated_desktop_backend_for_windows_isolat
         monkeypatch.setattr(sys, "platform", "win32")
         result = await tool.execute("test task")
 
-    assert result == canned_result
+    _assert_gui_result_superset(result, canned_result)
     assert manager_init_kwargs == [{"width": 1600, "height": 900}]
     assert len(wrapped_backend_ref) == 1
     assert wrapped_backend_ref[0]._inner is inner_backend
@@ -600,8 +611,14 @@ async def test_gui_tool_passes_target_app_class_to_windows_probe(
         patch("opengui.backends.background_runtime.probe_isolated_background_support", side_effect=fake_probe),
         patch("nanobot.agent.tools.gui.GuiSubagentTool._run_task", new=AsyncMock(return_value=canned_result)) as mock_run_task,
     ):
-        assert await tool.execute("test task", target_app_class="uwp", acknowledge_background_fallback=True) == canned_result
-        assert await tool.execute("test task", acknowledge_background_fallback=True) == canned_result
+        _assert_gui_result_superset(
+            await tool.execute("test task", target_app_class="uwp", acknowledge_background_fallback=True),
+            canned_result,
+        )
+        _assert_gui_result_superset(
+            await tool.execute("test task", acknowledge_background_fallback=True),
+            canned_result,
+        )
 
     assert mock_run_task.await_count == 2
     assert probe_calls[0] == {"sys_platform": "win32", "target_app_class": "uwp"}

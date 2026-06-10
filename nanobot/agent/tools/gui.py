@@ -17,8 +17,11 @@ import litellm
 import numpy as np
 
 from nanobot.agent.gui_adapter import NanobotEmbeddingAdapter, NanobotLLMAdapter
+from nanobot.agent.gui_safety import check_gui_safety
+from nanobot.agent.gui_task_schema import normalize_gui_task_request
 from nanobot.agent.tools.base import Tool
 from opengui.agent import GuiAgent
+from opengui.evidence import apply_evidence_contract
 from opengui.interfaces import InterventionHandler, InterventionRequest, InterventionResolution
 from opengui.postprocessing import EvaluationConfig, PostRunProcessor
 from opengui.skills.normalization import (
@@ -51,6 +54,20 @@ probe_isolated_background_support = None
 resolve_run_mode = None
 log_mode_resolution = None
 WINDOWS_TARGET_APP_CLASSES = ("classic-win32", "uwp", "directx", "gpu-heavy", "electron-gpu")
+
+
+def _attach_request_metadata(payload: dict[str, Any], task_request: Any | None) -> dict[str, Any]:
+    if task_request is None:
+        return payload
+    to_payload = getattr(task_request, "to_payload", None)
+    if callable(to_payload):
+        payload["request"] = to_payload()
+    payload["request_schema_version"] = str(getattr(task_request, "schema_version", ""))
+    task_type = getattr(task_request, "task_type", None)
+    output_mode = getattr(task_request, "output_mode", None)
+    payload["task_type"] = getattr(task_type, "value", task_type)
+    payload["output_mode"] = getattr(output_mode, "value", output_mode)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -643,6 +660,9 @@ class GuiWorkflowRunner:
         self._router_memory = router_memory
 
     async def run(self, active_backend: Any, task: str, **kwargs: Any) -> str:
+        task_request = kwargs.pop("task_request", None)
+        if task_request is None:
+            task_request = normalize_gui_task_request({"task": task})
         router_context = await self._build_router_context(
             task,
             platform=str(getattr(active_backend, "platform", "") or "unknown"),
@@ -650,16 +670,17 @@ class GuiWorkflowRunner:
         task_with_hints = self._task_with_router_hints(task, router_context)
         plan = await self._safe_plan_workflow(task, router_context=router_context)
         if plan is None:
-            return await self._run_task(active_backend, task_with_hints, **kwargs)
+            payload = await self._run_task(active_backend, task_with_hints, **kwargs)
+            return self._with_workflow_mode(payload, "single", task_request=task_request)
         plan = self._normalize_plan_app_hints(
             plan,
             platform=str(getattr(active_backend, "platform", "") or "unknown"),
         )
         if plan.mode != "multi_app" or len(plan.subtasks) < 2:
             payload = await self._run_task(active_backend, task_with_hints, **kwargs)
-            return self._with_workflow_mode(payload, "single")
+            return self._with_workflow_mode(payload, "single", task_request=task_request)
 
-        return await self._run_multi_app(active_backend, task, plan, **kwargs)
+        return await self._run_multi_app(active_backend, task, plan, task_request=task_request, **kwargs)
 
     @staticmethod
     def _task_with_router_hints(task: str, router_context: GuiRouterContext | None) -> str:
@@ -818,6 +839,9 @@ class GuiWorkflowRunner:
         plan: GuiWorkflowPlan,
         **kwargs: Any,
     ) -> str:
+        task_request = kwargs.pop("task_request", None)
+        if task_request is None:
+            task_request = normalize_gui_task_request({"task": original_task})
         blackboard: dict[str, str] = {}
         blackboard_meta: dict[str, dict[str, Any]] = {}
         subtask_records: list[dict[str, Any]] = []
@@ -837,6 +861,7 @@ class GuiWorkflowRunner:
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
+                    task_request=task_request,
                 )
             missing_inputs = [key for key in subtask.inputs if key not in blackboard]
             if missing_inputs:
@@ -852,7 +877,42 @@ class GuiWorkflowRunner:
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
+                    task_request=task_request,
                 )
+
+            known_values = {key: blackboard[key] for key in subtask.inputs if key in blackboard}
+            safety_decision = check_gui_safety(
+                task=subtask.task,
+                app_hint=subtask.app_hint,
+                known_values=known_values,
+                stage="before_subtask",
+            )
+            if not safety_decision.allowed:
+                payload = self._base_workflow_payload(
+                    success=False,
+                    summary=safety_decision.reason or "GUI task requires human confirmation.",
+                    error="needs_human_confirm",
+                    subtask_records=subtask_records,
+                    blackboard=blackboard,
+                    blackboard_meta=blackboard_meta,
+                    payloads=payloads,
+                    steps_taken=total_steps,
+                )
+                payload.update(
+                    {
+                        "status": "needs_human_confirm",
+                        "safety": safety_decision.to_payload(),
+                        "pending_action": safety_decision.pending_action,
+                    }
+                )
+                _attach_request_metadata(payload, task_request)
+                payload = apply_evidence_contract(
+                    request=task_request,
+                    payload=payload,
+                    blackboard=blackboard,
+                    blackboard_meta=blackboard_meta,
+                )
+                return json.dumps(payload, ensure_ascii=False)
 
             task_prompt = self._append_known_values(subtask.task, blackboard, subtask.inputs)
             # GUI memory is induced at gui-task-run granularity, so retrieve hints
@@ -865,6 +925,9 @@ class GuiWorkflowRunner:
                 run_kwargs["max_steps"] = remaining_steps
             if subtask.app_hint is not None:
                 run_kwargs["app_hint"] = subtask.app_hint
+            run_kwargs["task_request"] = normalize_gui_task_request(
+                {"task": subtask.task, "app_hint": subtask.app_hint}
+            )
 
             raw_payload = await self._run_task(active_backend, task_prompt, **run_kwargs)
             payload = self._load_result_payload(raw_payload)
@@ -878,6 +941,7 @@ class GuiWorkflowRunner:
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
+                    task_request=task_request,
                 )
 
             payloads.append(payload)
@@ -897,6 +961,7 @@ class GuiWorkflowRunner:
                     missing_outputs=[],
                     payloads=payloads,
                     steps_taken=total_steps,
+                    task_request=task_request,
                 )
 
             if subtask.outputs:
@@ -941,6 +1006,7 @@ class GuiWorkflowRunner:
                         missing_outputs=missing_outputs,
                         payloads=payloads,
                         steps_taken=total_steps,
+                        task_request=task_request,
                     )
 
         last_payload = payloads[-1] if payloads else {}
@@ -953,6 +1019,13 @@ class GuiWorkflowRunner:
             blackboard_meta=blackboard_meta,
             payloads=payloads,
             steps_taken=total_steps,
+        )
+        _attach_request_metadata(result, task_request)
+        result = apply_evidence_contract(
+            request=task_request,
+            payload=result,
+            blackboard=blackboard,
+            blackboard_meta=blackboard_meta,
         )
         return json.dumps(result, ensure_ascii=False)
 
@@ -1039,6 +1112,7 @@ class GuiWorkflowRunner:
         missing_outputs: list[str],
         payloads: list[dict[str, Any]],
         steps_taken: int,
+        task_request: Any | None = None,
     ) -> str:
         payload = self._base_workflow_payload(
             success=False,
@@ -1052,6 +1126,14 @@ class GuiWorkflowRunner:
         )
         if missing_outputs:
             payload["missing_outputs"] = missing_outputs
+        _attach_request_metadata(payload, task_request)
+        if task_request is not None:
+            payload = apply_evidence_contract(
+                request=task_request,
+                payload=payload,
+                blackboard=blackboard,
+                blackboard_meta=blackboard_meta,
+            )
         return json.dumps(payload, ensure_ascii=False)
 
     def _base_workflow_payload(
@@ -1103,11 +1185,14 @@ class GuiWorkflowRunner:
         }
 
     @staticmethod
-    def _with_workflow_mode(payload: str, mode: str) -> str:
+    def _with_workflow_mode(payload: str, mode: str, *, task_request: Any | None = None) -> str:
         data = GuiWorkflowRunner._load_result_payload(payload)
         if data is None:
             return payload
         data["workflow_mode"] = mode
+        if task_request is not None:
+            _attach_request_metadata(data, task_request)
+            data = apply_evidence_contract(request=task_request, payload=data)
         return json.dumps(data, ensure_ascii=False)
 
     @staticmethod
@@ -1360,13 +1445,15 @@ class GuiSubagentTool(Tool):
 
     async def execute(
         self,
-        task: str,
+        task: str | dict[str, Any],
         backend: str | None = None,
         require_background_isolation: bool = False,
         acknowledge_background_fallback: bool = False,
         target_app_class: str | None = None,
         **kwargs: Any,
     ) -> str:
+        task_request = normalize_gui_task_request(task if isinstance(task, dict) else {"task": task})
+        task_text = task_request.task
         active_backend = self._select_backend(backend)
         try:
             if self._gui_config.background:
@@ -1406,7 +1493,7 @@ class GuiSubagentTool(Tool):
                     require_isolation=require_background_isolation,
                     require_acknowledgement_for_fallback=True,
                 )
-                log_fn(logger, decision, owner="nanobot", task=task)
+                log_fn(logger, decision, owner="nanobot", task=task_text)
 
                 if decision.mode == "blocked":
                     return self._background_json_failure(decision.message)
@@ -1434,9 +1521,11 @@ class GuiSubagentTool(Tool):
                             wrapped_backend = backend_cls(
                                 active_backend,
                                 mgr,
-                                run_metadata={"owner": "nanobot", "task": task, "model": self._model},
+                                run_metadata={"owner": "nanobot", "task": task_text, "model": self._model},
                             )
-                            return await self._run_workflow_or_task(wrapped_backend, task, **kwargs)
+                            return await self._run_workflow_or_task(
+                                wrapped_backend, task_text, task_request=task_request, **kwargs
+                            )
                         except RuntimeError as exc:
                             return self._background_json_failure(str(exc))
                         finally:
@@ -1448,14 +1537,18 @@ class GuiSubagentTool(Tool):
                         wrapped_backend = BackgroundDesktopBackend(
                             active_backend,
                             mgr,
-                            run_metadata={"owner": "nanobot", "task": task, "model": self._model},
+                            run_metadata={"owner": "nanobot", "task": task_text, "model": self._model},
                         )
                         try:
-                            return await self._run_workflow_or_task(wrapped_backend, task, **kwargs)
+                            return await self._run_workflow_or_task(
+                                wrapped_backend, task_text, task_request=task_request, **kwargs
+                            )
                         finally:
                             await wrapped_backend.shutdown()
 
-            return await self._run_workflow_or_task(active_backend, task, **kwargs)
+            return await self._run_workflow_or_task(
+                active_backend, task_text, task_request=task_request, **kwargs
+            )
         finally:
             await self._shutdown_android_backend(active_backend)
 
@@ -1476,8 +1569,11 @@ class GuiSubagentTool(Tool):
         task: str,
         *,
         app_hint: str | None = None,
+        task_request: Any | None = None,
         **kwargs: Any,
     ) -> str:
+        if task_request is None:
+            task_request = normalize_gui_task_request({"task": task, "app_hint": app_hint})
         raw_max_retries = kwargs.pop("max_retries", 1)
         try:
             max_retries = max(1, int(raw_max_retries))
@@ -1653,29 +1749,39 @@ class GuiSubagentTool(Tool):
             raw_answer_candidates if isinstance(raw_answer_candidates, list) else []
         )
         result_evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
-        self._postprocessor.schedule(trace_path, is_success=result.success, platform=active_backend.platform, task=task)
-
-        return json.dumps(
-            {
-                "schema_version": "gui_task_result.v1",
-                "success": result.success,
-                "summary": summary,
-                "model_summary": result.model_summary,
-                "trace_path": str(trace_path) if trace_path is not None else result.trace_path,
-                "steps_taken": result.steps_taken,
-                "error": error,
-                "post_run_state": post_run_state,
-                "metrics_path": str(metrics_path) if metrics_path is not None and metrics_path.exists() else None,
-                "duration_s": total_duration_s,
-                "token_usage": total_token_usage,
-                "total_duration_s": total_duration_s,
-                "total_token_usage": total_token_usage,
-                "s2_usage": result_s2_usage,
-                "answer_candidates": result_answer_candidates,
-                "evidence": result_evidence,
-            },
-            ensure_ascii=False,
+        payload = {
+            "schema_version": "gui_task_result.v1",
+            "success": result.success,
+            "summary": summary,
+            "model_summary": result.model_summary,
+            "trace_path": str(trace_path) if trace_path is not None else result.trace_path,
+            "steps_taken": result.steps_taken,
+            "error": error,
+            "post_run_state": post_run_state,
+            "metrics_path": str(metrics_path) if metrics_path is not None and metrics_path.exists() else None,
+            "duration_s": total_duration_s,
+            "token_usage": total_token_usage,
+            "total_duration_s": total_duration_s,
+            "total_token_usage": total_token_usage,
+            "s2_usage": result_s2_usage,
+            "answer_candidates": result_answer_candidates,
+            "evidence": result_evidence,
+        }
+        _attach_request_metadata(payload, task_request)
+        latest_step = self._load_latest_step_event(trace_path)
+        payload = apply_evidence_contract(
+            request=task_request,
+            payload=payload,
+            latest_step=latest_step,
         )
+        self._postprocessor.schedule(
+            trace_path,
+            is_success=bool(payload.get("success")),
+            platform=active_backend.platform,
+            task=task,
+        )
+
+        return json.dumps(payload, ensure_ascii=False)
 
     @staticmethod
     def _shortcut_discovery_backend(active_backend: Any) -> Any | None:

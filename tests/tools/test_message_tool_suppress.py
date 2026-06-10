@@ -168,25 +168,56 @@ class TestMessageToolSuppressLogic:
         ])
         loop.provider.chat_with_retry = AsyncMock(side_effect=lambda *a, **kw: next(calls))
         loop.tools.get_definitions = MagicMock(return_value=[])
-        loop.tools.execute = AsyncMock(return_value=json.dumps({
-            "success": True,
-            "summary": "Task completed after 3 step(s).",
-            "model_summary": "任务已完成，视频已成功播放",
-            "trace_path": None,
-            "steps_taken": 3,
-            "error": None,
-            "post_run_state": {
-                "trace_read": True,
-                "latest_screenshot_path": "/tmp/gui/latest.png",
-                "last_action": {"action_type": "done", "status": "success"},
-                "last_action_summary": "视频已开始播放",
-                "last_foreground_app": "哔哩哔哩",
-                "platform": "android",
-                "screen_resolution": "1080x2400",
-                "current_state": "Task completed after 3 step(s). Latest visible app: 哔哩哔哩. Screen resolution: 1080x2400.",
-                "completion_assessment": "completed",
-            },
-        }, ensure_ascii=False))
+        from nanobot.agent.tools.base import Tool
+
+        gui_tool_calls: list[dict[str, str]] = []
+
+        class _FakeGuiTaskTool(Tool):
+            @property
+            def name(self) -> str:
+                return "gui_task"
+
+            @property
+            def description(self) -> str:
+                return "Fake GUI task tool."
+
+            @property
+            def parameters(self) -> dict[str, object]:
+                return {
+                    "type": "object",
+                    "properties": {"task": {"type": "string"}},
+                    "required": ["task"],
+                }
+
+            async def execute(self, **kwargs: str) -> str:
+                gui_tool_calls.append(dict(kwargs))
+                return json.dumps(
+                    {
+                        "success": True,
+                        "summary": "Task completed after 3 step(s).",
+                        "model_summary": "任务已完成，视频已成功播放",
+                        "trace_path": None,
+                        "steps_taken": 3,
+                        "error": None,
+                        "post_run_state": {
+                            "trace_read": True,
+                            "latest_screenshot_path": "/tmp/gui/latest.png",
+                            "last_action": {"action_type": "done", "status": "success"},
+                            "last_action_summary": "视频已开始播放",
+                            "last_foreground_app": "哔哩哔哩",
+                            "platform": "android",
+                            "screen_resolution": "1080x2400",
+                            "current_state": (
+                                "Task completed after 3 step(s). Latest visible app: "
+                                "哔哩哔哩. Screen resolution: 1080x2400."
+                            ),
+                            "completion_assessment": "completed",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+
+        loop.tools.register(_FakeGuiTaskTool())
 
         msg = InboundMessage(channel="telegram", sender_id="user1", chat_id="chat123", content="播放热门视频")
         result = await loop._process_message(msg)
@@ -194,7 +225,7 @@ class TestMessageToolSuppressLogic:
         assert result is not None
         assert result.content == "任务已完成，目前停留在视频播放页。"
         assert loop.provider.chat_with_retry.await_count == 2
-        loop.tools.execute.assert_awaited_once()
+        assert gui_tool_calls == [{"task": "打开 B 站并播放第一个视频"}]
 
 
 class TestMessageToolTurnTracking:

@@ -89,7 +89,10 @@ async def test_gui_task_shuts_down_android_backend_after_foreground_run() -> Non
         )
         result = await tool.execute("Open Settings")
 
-    assert result == '{"success": true}'
+    payload = json.loads(result)
+    assert payload["success"] is True
+    assert payload["request_schema_version"] == "gui_task_request.v1"
+    assert payload["task_type"] == "operation"
     mock_backend.shutdown.assert_awaited_once()
 
 

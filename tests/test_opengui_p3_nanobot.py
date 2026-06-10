@@ -495,7 +495,7 @@ async def test_trajectory_saved_to_workspace(tmp_workspace: Path) -> None:
     result = json.loads(await tool.execute(task="Open Settings"))
 
     traces = list((tmp_workspace / "gui_runs").glob("**/*.jsonl"))
-    assert set(result) == {
+    required_keys = {
         "success",
         "summary",
         "model_summary",
@@ -510,6 +510,7 @@ async def test_trajectory_saved_to_workspace(tmp_workspace: Path) -> None:
         "total_token_usage",
         "workflow_mode",
     }
+    assert required_keys <= set(result)
     assert result["success"] is True
     assert result["summary"].startswith("Status: completed")
     assert result["post_run_state"]["current_state"] == result["summary"]
@@ -753,14 +754,14 @@ async def test_gui_task_multi_app_workflow_injects_blackboard_values(
         mode="multi_app",
         subtasks=[
             GuiWorkflowSubtask(
-                task="Open Messages and read the verification code.",
-                app_hint="Messages",
-                outputs=("code",),
+                task="Open Notes and read the favorite color.",
+                app_hint="Notes",
+                outputs=("favorite_color",),
             ),
             GuiWorkflowSubtask(
-                task="Open Browser and enter the verification code.",
+                task="Open Browser and enter the favorite color.",
                 app_hint="Browser",
-                inputs=("code",),
+                inputs=("favorite_color",),
             ),
         ],
     )
@@ -770,7 +771,7 @@ async def test_gui_task_multi_app_workflow_injects_blackboard_values(
     )
     monkeypatch.setattr(
         "nanobot.agent.tools.gui.GuiWorkflowRunner._extract_outputs",
-        AsyncMock(return_value={"code": "1234"}),
+        AsyncMock(return_value={"favorite_color": "blue"}),
     )
 
     async def fake_run_task(active_backend: Any, task: str, **kwargs: Any) -> str:
@@ -789,18 +790,18 @@ async def test_gui_task_multi_app_workflow_injects_blackboard_values(
     run_task = AsyncMock(side_effect=fake_run_task)
     monkeypatch.setattr(GuiSubagentTool, "_run_task", run_task)
 
-    result = json.loads(await tool.execute(task="Copy a code from Messages into Browser"))
+    result = json.loads(await tool.execute(task="Copy a favorite color from Notes into Browser"))
 
     assert run_task.await_count == 2
     second_task = run_task.await_args_list[1].args[1]
-    assert "Open Browser and enter the verification code." in second_task
-    assert "You must use these known values if relevant: code=1234" in second_task
-    assert run_task.await_args_list[0].kwargs["app_hint"] == "messages"
+    assert "Open Browser and enter the favorite color." in second_task
+    assert "You must use these known values if relevant: favorite_color=blue" in second_task
+    assert run_task.await_args_list[0].kwargs["app_hint"] == "notes"
     assert run_task.await_args_list[1].kwargs["app_hint"] == "browser"
     assert result["success"] is True
     assert result["workflow_mode"] == "multi_app"
-    assert result["blackboard"] == {"code": "1234"}
-    assert result["subtasks"][0]["app_hint"] == "messages"
+    assert result["blackboard"] == {"favorite_color": "blue"}
+    assert result["subtasks"][0]["app_hint"] == "notes"
     assert result["subtasks"][1]["app_hint"] == "browser"
 
 
@@ -969,7 +970,7 @@ async def test_gui_task_returns_state_note_for_partial_run(
     )
     result = json.loads(await tool.execute(task="Open Settings"))
 
-    assert set(result) == {
+    required_keys = {
         "success",
         "summary",
         "model_summary",
@@ -984,6 +985,7 @@ async def test_gui_task_returns_state_note_for_partial_run(
         "total_token_usage",
         "workflow_mode",
     }
+    assert required_keys <= set(result)
     assert result["success"] is False
     assert result["summary"].startswith("Status: partial")
     assert "Done:" in result["summary"]
