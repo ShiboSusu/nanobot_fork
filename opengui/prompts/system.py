@@ -103,6 +103,12 @@ def build_system_prompt(
     if platform != "unknown":
         sections.extend(["", f"- Platform: {platform}"])
 
+    if platform == "ios":
+        sections.extend([
+            "",
+            "- On iOS, do not launch apps by guessing from icon appearance. Prefer `open_app` with the target app name or bundle ID; if direct launch is unavailable, use Spotlight search and tap only a result with matching visible app-name text.",
+        ])
+
     if memory_context:
         sections.extend(["", "# Relevant Knowledge", "", memory_context])
 

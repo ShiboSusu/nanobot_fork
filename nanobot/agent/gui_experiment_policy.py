@@ -28,6 +28,9 @@ Sensitive actions such as send, pay, submit, delete, authorize, passwords, or ve
 GUI_E2E_COMPACT_GUI_TASK_DESCRIPTION = """Run a phone GUI task for app operations and app-visible information queries. Returns success, summary, model_summary, answer_candidates, evidence, safety, and s2_usage. Sensitive actions stop before execution and return needs_human_confirm."""
 
 
+GUI_NATIVE_APP_POLICY = """For named app tasks, use the native installed app when available. Do not use browser or web search results as a substitute unless the user explicitly asks for a web/browser task or the native app is unavailable."""
+
+
 GUI_APP_TASK_POLICY = """
 Phone/app GUI tasks must use gui_task.
 

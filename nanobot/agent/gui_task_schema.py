@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from opengui.skills.normalization import annotate_ios_apps, resolve_ios_bundle
+
 
 class GuiTaskType(str, Enum):
     OPERATION = "operation"
@@ -55,6 +57,7 @@ class GuiTaskRequestV1:
     task_type: GuiTaskType = GuiTaskType.OPERATION
     output_mode: GuiOutputMode = GuiOutputMode.OPERATION_STATUS
     app_hint: str | None = None
+    app_bundle_id: str | None = None
     success_condition: GuiSuccessCondition = field(default_factory=GuiSuccessCondition)
     evidence_requirements: GuiEvidenceRequirements = field(default_factory=GuiEvidenceRequirements)
     safety: GuiSafetyPolicy = field(default_factory=GuiSafetyPolicy)
@@ -67,6 +70,7 @@ class GuiTaskRequestV1:
             "task_type": self.task_type.value,
             "output_mode": self.output_mode.value,
             "app_hint": self.app_hint,
+            "app_bundle_id": self.app_bundle_id,
             "success_condition": {
                 "type": self.success_condition.type.value,
                 "required_key": self.success_condition.required_key,
@@ -159,6 +163,15 @@ def normalize_gui_task_request(raw: Any) -> GuiTaskRequestV1:
 
     task = _clean_optional_text(payload.get("task")) or ""
     app_hint = _clean_optional_text(payload.get("app_hint"))
+    app_bundle_id = _clean_optional_text(payload.get("app_bundle_id") or payload.get("appBundleId"))
+    app_text = " ".join(part for part in (app_hint or "", app_bundle_id or "", task) if part)
+    resolved_bundle = resolve_ios_bundle(app_text)
+    if not app_bundle_id and resolved_bundle and resolved_bundle != app_text:
+        app_bundle_id = resolved_bundle
+    if not app_hint and app_bundle_id:
+        annotated = annotate_ios_apps([app_bundle_id])
+        if annotated:
+            app_hint = annotated[0].split(": ", 1)[0]
     inferred = _infer_request(task)
 
     task_type = _coerce_enum(GuiTaskType, payload.get("task_type"), inferred.task_type)
@@ -178,6 +191,7 @@ def normalize_gui_task_request(raw: Any) -> GuiTaskRequestV1:
         task_type=task_type,
         output_mode=output_mode,
         app_hint=app_hint,
+        app_bundle_id=app_bundle_id,
         success_condition=success_condition,
         evidence_requirements=evidence_requirements,
         safety=safety,
@@ -324,4 +338,3 @@ def _float_or_default(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-

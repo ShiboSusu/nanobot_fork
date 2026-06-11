@@ -571,7 +571,8 @@ _IOS_BUNDLE_DISPLAY_NAMES: dict[str, str] = {
     "net.whatsapp.WhatsApp": "WhatsApp",
     "ph.telegra.Telegraph": "Telegram",
     "com.facebook.Facebook": "Facebook",
-    "com.bilibili.bilibili": "Bilibili",
+    "tv.danmaku.bilianime": "Bilibili/哔哩哔哩",
+    "com.bilibili.bilibili": "Bilibili/哔哩哔哩",
     # Shopping & Food
     "com.taobao.taobao4iphone": "Taobao",
     "com.jingdong.app.iphone": "JD",
@@ -635,38 +636,60 @@ _IOS_APP_ALIASES_BASE: dict[str, str] = {
     "ios settings": "com.apple.Preferences",
     "iphone settings": "com.apple.Preferences",
     "system settings": "com.apple.Preferences",
+    "设置": "com.apple.Preferences",
+    "系统设置": "com.apple.Preferences",
     "wechat": "com.tencent.xin",
     "weixin": "com.tencent.xin",
+    "微信": "com.tencent.xin",
     "alipay": "com.alipay.iphoneclient",
+    "支付宝": "com.alipay.iphoneclient",
     "taobao": "com.taobao.taobao4iphone",
+    "淘宝": "com.taobao.taobao4iphone",
     "jd": "com.jingdong.app.iphone",
     "jingdong": "com.jingdong.app.iphone",
+    "京东": "com.jingdong.app.iphone",
     "meituan": "com.meituan.imeituan",
+    "美团": "com.meituan.imeituan",
     "douyin": "com.ss.iphone.ugc.Aweme",
+    "抖音": "com.ss.iphone.ugc.Aweme",
     "tiktok": "com.ss.iphone.ugc.Aweme",
-    "bilibili": "com.bilibili.bilibili",
+    "bilibili": "tv.danmaku.bilianime",
+    "哔哩哔哩": "tv.danmaku.bilianime",
+    "b站": "tv.danmaku.bilianime",
     "didi": "com.xiaojukeji.didi",
+    "滴滴": "com.xiaojukeji.didi",
     "weibo": "com.sina.weibo",
+    "微博": "com.sina.weibo",
     "zhihu": "com.zhihu.ios",
+    "知乎": "com.zhihu.ios",
     "redbook": "com.xingin.discover",
     "rednote": "com.xingin.discover",
     "xiaohongshu": "com.xingin.discover",
+    "小红书": "com.xingin.discover",
     "pinduoduo": "com.xunmeng.pinduoduo",
+    "拼多多": "com.xunmeng.pinduoduo",
     "xianyu": "com.taobao.fleamarket",
     "ctrip": "ctrip.com",
+    "携程": "ctrip.com",
     "ctrip.android.view": "ctrip.com",
     "携程旅行": "ctrip.com",
+    "12306": "com.12306",
+    "铁路12306": "com.12306",
     "lark": "com.ss.iphone.lark",
     "feishu": "com.ss.iphone.lark",
     "wecom": "com.tencent.wework",
     "weread": "com.tencent.weread",
     "amap": "com.autonavi.amap",
     "gaode": "com.autonavi.amap",
+    "高德": "com.autonavi.amap",
+    "高德地图": "com.autonavi.amap",
     "twitter": "com.atebits.Tweetie2",
     "x": "com.atebits.Tweetie2",
     "chatgpt": "com.openai.chat",
     "deepseek": "com.deepseek.chat",
     "youtube": "com.google.ios.youtube",
+    "网易云音乐": "com.netease.cloudmusic",
+    "云音乐": "com.netease.cloudmusic",
     "apple store": "com.apple.MobileStore",
     "apple music": "com.apple.Music",
     "apple podcasts": "com.apple.podcasts",
@@ -676,28 +699,180 @@ _IOS_APP_ALIASES_BASE: dict[str, str] = {
     "chrome": "com.google.chrome.ios",
     "gmail": "com.google.Gmail",
     "google maps": "com.google.Maps",
+    "相机": "com.apple.camera",
+    "照片": "com.apple.mobileslideshow",
+    "备忘录": "com.apple.mobilenotes",
+    "提醒事项": "com.apple.reminders",
+    "地图": "com.apple.Maps",
+    "天气": "com.apple.weather",
+    "文件": "com.apple.DocumentsApp",
+    "电话": "com.apple.mobilephone",
+    "短信": "com.apple.MobileSMS",
 }
+
+
+def _clean_ios_app_text(app_text: str) -> str:
+    return " ".join((app_text or "").strip().strip("\"'“”‘’").split())
+
+
+def _canonical_ios_app_key(app_text: str) -> str:
+    cleaned = _clean_ios_app_text(app_text).casefold()
+    return re.sub(r"[\s._\-/:：·'\"“”‘’()（）]+", "", cleaned)
+
+
+def _ios_lookup_keys(app_text: str) -> tuple[str, ...]:
+    cleaned = _clean_ios_app_text(app_text)
+    lowered = cleaned.casefold()
+    canonical = _canonical_ios_app_key(cleaned)
+    keys: list[str] = []
+    for key in (lowered, canonical):
+        if key and key not in keys:
+            keys.append(key)
+    return tuple(keys)
+
+
+def _add_ios_alias(
+    aliases: dict[str, str],
+    alias: str,
+    bundle_id: str,
+    *,
+    overwrite: bool = False,
+) -> None:
+    for key in _ios_lookup_keys(alias):
+        if overwrite:
+            aliases[key] = bundle_id
+        else:
+            aliases.setdefault(key, bundle_id)
+
+
+def _looks_like_ios_bundle(value: str) -> bool:
+    cleaned = _clean_ios_app_text(value)
+    return "." in cleaned and " " not in cleaned and "\t" not in cleaned
+
+
+def _parse_ios_app_entry(entry: str) -> tuple[str | None, str | None]:
+    cleaned = _clean_ios_app_text(entry)
+    if not cleaned:
+        return None, None
+    for separator in (": ", "：", ":"):
+        if separator in cleaned:
+            display, bundle_id = cleaned.rsplit(separator, 1)
+            bundle_id = bundle_id.strip()
+            if display.strip() and _looks_like_ios_bundle(bundle_id):
+                return display.strip(), bundle_id
+    if _looks_like_ios_bundle(cleaned):
+        return None, cleaned
+    return cleaned, None
+
+
+def _ios_display_aliases(display: str) -> tuple[str, ...]:
+    aliases = [_clean_ios_app_text(display)]
+    aliases.extend(part.strip() for part in re.split(r"[/／|｜]", display) if part.strip())
+    aliases.extend(
+        suffix.strip()
+        for suffix in (display.removesuffix(" App"), display.removesuffix(" app"), display.removesuffix("应用"))
+        if suffix.strip()
+    )
+    result: list[str] = []
+    for alias in aliases:
+        if alias and alias not in result:
+            result.append(alias)
+    return tuple(result)
+
+
+def _ios_related_static_aliases(display_aliases: tuple[str, ...]) -> tuple[str, ...]:
+    related: list[str] = []
+    static_bundles: set[str] = set()
+    for alias in display_aliases:
+        for key in _ios_lookup_keys(alias):
+            static_bundle = _IOS_APP_ALIASES.get(key)
+            if static_bundle:
+                static_bundles.add(static_bundle)
+
+    for static_bundle in static_bundles:
+        display = _IOS_BUNDLE_DISPLAY_NAMES.get(static_bundle)
+        if display:
+            related.extend(_ios_display_aliases(display))
+        related.extend(
+            alias
+            for alias, bundle_id in _IOS_APP_ALIASES_BASE.items()
+            if bundle_id == static_bundle
+        )
+
+    deduped: list[str] = []
+    for alias in related:
+        if alias and alias not in deduped:
+            deduped.append(alias)
+    return tuple(deduped)
+
+
+def _build_ios_installed_aliases(installed_apps: list[str] | None) -> tuple[dict[str, str], set[str]]:
+    aliases: dict[str, str] = {}
+    bundle_ids: set[str] = set()
+    for entry in installed_apps or []:
+        display, bundle_id = _parse_ios_app_entry(entry)
+        if not bundle_id:
+            continue
+        bundle_ids.add(bundle_id)
+
+        display = display or _IOS_BUNDLE_DISPLAY_NAMES.get(bundle_id)
+        if display:
+            display_aliases = _ios_display_aliases(display)
+            for alias in display_aliases:
+                _add_ios_alias(aliases, alias, bundle_id)
+            for alias in _ios_related_static_aliases(display_aliases):
+                _add_ios_alias(aliases, alias, bundle_id)
+
+        tail = bundle_id.rsplit(".", 1)[-1]
+        if len(tail) >= 3:
+            _add_ios_alias(aliases, tail, bundle_id)
+    return aliases, bundle_ids
 
 
 def _build_ios_aliases() -> dict[str, str]:
     """Build reverse lookup: display name parts -> bundle ID."""
     aliases: dict[str, str] = {}
     for bundle_id, display in _IOS_BUNDLE_DISPLAY_NAMES.items():
-        # Add each "/" separated part as an alias
-        for part in display.split("/"):
-            key = part.strip().lower()
-            if key and key not in aliases:
-                aliases[key] = bundle_id
-        # Add the full display string
-        full = display.strip().lower()
-        if full not in aliases:
-            aliases[full] = bundle_id
-    # Manual aliases take priority
-    aliases.update(_IOS_APP_ALIASES_BASE)
+        for part in _ios_display_aliases(display):
+            _add_ios_alias(aliases, part, bundle_id)
+        _add_ios_alias(aliases, display, bundle_id)
+    for alias, bundle_id in _IOS_APP_ALIASES_BASE.items():
+        _add_ios_alias(aliases, alias, bundle_id, overwrite=True)
     return aliases
 
 
 _IOS_APP_ALIASES = _build_ios_aliases()
+
+
+IOS_BROWSER_BUNDLE_IDS: frozenset[str] = frozenset(
+    {
+        "com.apple.mobilesafari",
+        "com.google.chrome.ios",
+    }
+)
+
+
+def is_browser_bundle(bundle_id: str | None) -> bool:
+    return bool(bundle_id and bundle_id in IOS_BROWSER_BUNDLE_IDS)
+
+
+def task_explicitly_allows_browser(text: str | None) -> bool:
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "浏览器",
+            "网页",
+            "网页版",
+            "Safari",
+            "safari",
+            "Chrome",
+            "chrome",
+            "browser",
+            "web",
+        )
+    )
 
 
 def annotate_ios_apps(bundle_ids: list[str]) -> list[str]:
@@ -710,24 +885,44 @@ def annotate_ios_apps(bundle_ids: list[str]) -> list[str]:
     Returns a list like ``["WeChat: com.tencent.xin"]``.
     """
     result: list[str] = []
-    for bundle_id in bundle_ids:
-        display = _IOS_BUNDLE_DISPLAY_NAMES.get(bundle_id)
+    seen: set[str] = set()
+    for entry in bundle_ids:
+        display, bundle_id = _parse_ios_app_entry(entry)
+        if not bundle_id or bundle_id in seen:
+            continue
+        display = display or _IOS_BUNDLE_DISPLAY_NAMES.get(bundle_id)
         if display:
             result.append(f"{display}: {bundle_id}")
+            seen.add(bundle_id)
     return result
 
 
-def resolve_ios_bundle(app_text: str) -> str:
+def resolve_ios_bundle(app_text: str, installed_apps: list[str] | None = None) -> str:
     """Resolve a human-readable app name to its iOS bundle ID.
 
+    Device-discovered app names take precedence over the static alias table so
+    stale aliases do not break launch on devices that use different bundle IDs.
     Returns the matching bundle ID if found, otherwise the input unchanged.
     """
-    cleaned = " ".join((app_text or "").strip().strip("\"'").split())
+    cleaned = _clean_ios_app_text(app_text)
     if not cleaned:
         return app_text or ""
-    lowered = cleaned.lower()
-    if lowered in _IOS_APP_ALIASES:
-        return _IOS_APP_ALIASES[lowered]
+    installed_aliases, installed_bundle_ids = _build_ios_installed_aliases(installed_apps)
+    for key in _ios_lookup_keys(cleaned):
+        if key in installed_aliases:
+            return installed_aliases[key]
+    if _looks_like_ios_bundle(cleaned) and (
+        not installed_bundle_ids or cleaned in installed_bundle_ids
+    ):
+        return cleaned
+    candidate_keys = _ios_lookup_keys(cleaned)
+    for key in candidate_keys:
+        if key in _IOS_APP_ALIASES:
+            return _IOS_APP_ALIASES[key]
+    canonical_text = _canonical_ios_app_key(cleaned)
+    for alias_key, bundle_id in _IOS_APP_ALIASES.items():
+        if alias_key and alias_key in canonical_text:
+            return bundle_id
     return cleaned
 
 

@@ -67,8 +67,10 @@ from opengui.skills.compact_prompt import (
 from opengui.skills.deeplink import AppShortcutProfile
 from opengui.skills.normalization import (
     find_android_app_in_text,
+    is_browser_bundle,
     normalize_adb_app_identifier,
     normalize_app_identifier,
+    task_explicitly_allows_browser,
 )
 from opengui.skills.state_contract import evaluate_state_contract, infer_interaction_target
 from opengui.tool_schemas import (
@@ -573,6 +575,7 @@ class GuiAgent:
         *,
         max_retries: int = 3,
         app_hint: str | None = None,
+        expected_bundle_id: str | None = None,
     ) -> AgentResult:
         """Run the task with retry logic.
 
@@ -700,6 +703,7 @@ class GuiAgent:
                 try:
                     result = await self._run_once(
                         task, app_hint=app_hint, run_dir=run_dir,
+                        expected_bundle_id=expected_bundle_id,
                         memory_context=memory_context,
                         skill_context=skill_context,
                         prompt_skill_parts=prompt_skill_parts,
@@ -834,6 +838,7 @@ class GuiAgent:
         task: str,
         *,
         app_hint: str | None,
+        expected_bundle_id: str | None = None,
         run_dir: Path,
         memory_context: str | None = None,
         skill_context: str | None = None,
@@ -863,6 +868,15 @@ class GuiAgent:
             run_dir / "screenshots" / "step_000.png",
             timeout=self.step_timeout,
         )
+        browser_relaunch_attempted = False
+        if self._should_relaunch_expected_app(obs, expected_bundle_id=expected_bundle_id, task=task):
+            obs = await self._relaunch_expected_app(
+                obs,
+                expected_bundle_id=expected_bundle_id,
+                run_dir=run_dir,
+                screenshot_name="step_000_native_relaunch.png",
+            )
+            browser_relaunch_attempted = True
 
         history: list[HistoryTurn] = []
         previous_fingerprint: _ScreenFingerprint | None = None
@@ -888,6 +902,7 @@ class GuiAgent:
                 task=task,
                 current_observation=obs,
                 history=history,
+                expected_bundle_id=expected_bundle_id,
                 memory_context=effective_memory_context,
                 skill_context=skill_context,
                 prompt_skill_parts=prompt_skill_parts,
@@ -1114,6 +1129,38 @@ class GuiAgent:
                         )
                     ]
                     summary_observation = result.next_observation or obs
+
+            if (
+                result.next_observation is not None
+                and not browser_relaunch_attempted
+                and self._should_relaunch_expected_app(
+                    result.next_observation,
+                    expected_bundle_id=expected_bundle_id,
+                    task=task,
+                )
+            ):
+                next_observation = await self._relaunch_expected_app(
+                    result.next_observation,
+                    expected_bundle_id=expected_bundle_id,
+                    run_dir=run_dir,
+                    screenshot_name=f"step_{step_index:03d}_native_relaunch.png",
+                )
+                result = replace(
+                    result,
+                    next_observation=next_observation,
+                    execution_snapshot={
+                        **(result.execution_snapshot or {}),
+                        "native_app_validation": {
+                            "event": "app_mismatch",
+                            "reason": "wrong_app_browser",
+                            "expected_bundle_id": expected_bundle_id,
+                            "previous_foreground_app": result.next_observation.foreground_app,
+                            "foreground_app": next_observation.foreground_app,
+                        },
+                        "next_observation": self._serialize_observation(next_observation),
+                    },
+                )
+                browser_relaunch_attempted = True
 
             # Write trace entry
             await self._write_trace(
@@ -1526,6 +1573,61 @@ class GuiAgent:
             token_usage=total_usage,
             s2_usage=s2_usage.to_dict(),
         )
+
+    @staticmethod
+    def _should_relaunch_expected_app(
+        observation: Observation,
+        *,
+        expected_bundle_id: str | None,
+        task: str,
+    ) -> bool:
+        if not expected_bundle_id or task_explicitly_allows_browser(task):
+            return False
+        return is_browser_bundle(observation.foreground_app)
+
+    async def _relaunch_expected_app(
+        self,
+        observation: Observation,
+        *,
+        expected_bundle_id: str | None,
+        run_dir: Path,
+        screenshot_name: str,
+    ) -> Observation:
+        if not expected_bundle_id:
+            return observation
+        previous_foreground_app = observation.foreground_app
+        try:
+            await self.backend.execute(
+                Action(action_type="open_app", text=expected_bundle_id),
+                timeout=self.step_timeout,
+            )
+            screenshot_dir = run_dir / "screenshots"
+            screenshot_dir.mkdir(parents=True, exist_ok=True)
+            next_observation = await self.backend.observe(
+                screenshot_dir / screenshot_name,
+                timeout=self.step_timeout,
+            )
+            await self._log_attempt_event(
+                run_dir,
+                "native_app_relaunch",
+                monitor_event="app_mismatch",
+                reason="wrong_app_browser",
+                expected_bundle_id=expected_bundle_id,
+                previous_foreground_app=previous_foreground_app,
+                foreground_app=next_observation.foreground_app,
+            )
+            return next_observation
+        except Exception as exc:
+            await self._log_attempt_event(
+                run_dir,
+                "native_app_relaunch_failed",
+                monitor_event="app_mismatch",
+                reason="wrong_app_browser",
+                expected_bundle_id=expected_bundle_id,
+                previous_foreground_app=previous_foreground_app,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return observation
 
     # ------------------------------------------------------------------
     # Single step
@@ -2804,11 +2906,22 @@ class GuiAgent:
         task: str,
         current_observation: Observation,
         history: list[HistoryTurn],
+        expected_bundle_id: str | None = None,
         memory_context: str | None = None,
         skill_context: str | None = None,
         prompt_skill_parts: CompactPromptParts | None = None,
     ) -> list[dict[str, Any]]:
         task_context: list[str] = [task]
+        if expected_bundle_id:
+            task_context.extend([
+                "",
+                f"Expected native app bundle id: {expected_bundle_id}",
+                (
+                    "For named app tasks, use the native installed app when available. "
+                    "Do not use browser or web search results as a substitute unless "
+                    "the user explicitly asks for a web/browser task or the native app is unavailable."
+                ),
+            ])
         if memory_context:
             task_context.extend(["", "Relevant Knowledge:", memory_context])
         if skill_context:

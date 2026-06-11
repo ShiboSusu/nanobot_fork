@@ -20,6 +20,7 @@ from nanobot.agent.gui_adapter import NanobotEmbeddingAdapter, NanobotLLMAdapter
 from nanobot.agent.gui_experiment_policy import (
     GUI_E2E_COMPACT_GUI_TASK_DESCRIPTION,
     GUI_INFORMATION_QUERY_POLICY,
+    GUI_NATIVE_APP_POLICY,
     GUI_TASK_DESCRIPTION_POLICY,
     GUI_WORKFLOW_PLANNER_POLICY,
     is_gui_e2e_compact_mode,
@@ -31,6 +32,7 @@ from nanobot.agent.gui_task_schema import (
     normalize_gui_task_request,
 )
 from nanobot.agent.tools.base import Tool
+from opengui.action import Action
 from opengui.agent import GuiAgent
 from opengui.evidence import apply_evidence_contract
 from opengui.interfaces import InterventionHandler, InterventionRequest, InterventionResolution
@@ -39,7 +41,10 @@ from opengui.skills.normalization import (
     annotate_android_apps,
     find_android_apps_in_text,
     get_gui_skill_store_root,
+    is_browser_bundle,
     normalize_app_identifier,
+    resolve_ios_bundle,
+    task_explicitly_allows_browser,
 )
 from opengui.trajectory.recorder import TrajectoryRecorder
 
@@ -146,6 +151,22 @@ def _task_with_information_query_policy(task: str, task_request: Any | None) -> 
     if not policy or policy in task:
         return task
     return f"{task.rstrip()}\n\n{policy}"
+
+
+def _task_with_native_app_policy(task: str, task_request: Any | None) -> str:
+    if not getattr(task_request, "app_bundle_id", None):
+        return task
+    policy = GUI_NATIVE_APP_POLICY.strip()
+    if not policy or policy in task:
+        return task
+    return f"{task.rstrip()}\n\n{policy}"
+
+
+@dataclass(frozen=True)
+class NativeLaunchResult:
+    status: str
+    foreground_app: str | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -751,7 +772,8 @@ class GuiWorkflowRunner:
             blocked = self._single_fallback_safety_block(task=task, task_request=task_request)
             if blocked is not None:
                 return blocked
-            payload = await self._run_task(active_backend, task_with_hints, **kwargs)
+            run_kwargs = self._kwargs_with_request_app_target(dict(kwargs), task_request)
+            payload = await self._run_task(active_backend, task_with_hints, task_request=task_request, **run_kwargs)
             return self._with_workflow_mode(payload, "single", task_request=task_request)
         plan = self._normalize_plan_app_hints(
             plan,
@@ -761,7 +783,8 @@ class GuiWorkflowRunner:
             blocked = self._single_fallback_safety_block(task=task, task_request=task_request)
             if blocked is not None:
                 return blocked
-            payload = await self._run_task(active_backend, task_with_hints, **kwargs)
+            run_kwargs = self._kwargs_with_request_app_target(dict(kwargs), task_request)
+            payload = await self._run_task(active_backend, task_with_hints, task_request=task_request, **run_kwargs)
             return self._with_workflow_mode(payload, "single", task_request=task_request)
 
         return await self._run_multi_app(active_backend, task, plan, task_request=task_request, **kwargs)
@@ -770,6 +793,18 @@ class GuiWorkflowRunner:
     def _is_mixed_query_action(task_request: Any | None) -> bool:
         task_type = getattr(task_request, "task_type", None)
         return task_type == GuiTaskType.MIXED_QUERY_AND_ACTION
+
+    @staticmethod
+    def _kwargs_with_request_app_target(kwargs: dict[str, Any], task_request: Any | None) -> dict[str, Any]:
+        if task_request is None:
+            return kwargs
+        app_hint = getattr(task_request, "app_hint", None)
+        app_bundle_id = getattr(task_request, "app_bundle_id", None)
+        if app_hint is not None and "app_hint" not in kwargs:
+            kwargs["app_hint"] = app_hint
+        if app_bundle_id is not None and "app_bundle_id" not in kwargs:
+            kwargs["app_bundle_id"] = app_bundle_id
+        return kwargs
 
     def _single_fallback_safety_block(
         self,
@@ -1042,10 +1077,24 @@ class GuiWorkflowRunner:
             run_kwargs = dict(kwargs)
             if remaining_steps is not None:
                 run_kwargs["max_steps"] = remaining_steps
-            if subtask.app_hint is not None:
-                run_kwargs["app_hint"] = subtask.app_hint
+            inherited_app_hint = subtask.app_hint or getattr(task_request, "app_hint", None)
+            inherited_app_bundle_id = (
+                None if subtask.app_hint is not None else getattr(task_request, "app_bundle_id", None)
+            )
+            subtask_request = normalize_gui_task_request(
+                {
+                    "task": subtask.task,
+                    "app_hint": inherited_app_hint,
+                    "app_bundle_id": inherited_app_bundle_id,
+                }
+            )
+            run_kwargs = self._kwargs_with_request_app_target(run_kwargs, subtask_request)
             run_kwargs["task_request"] = normalize_gui_task_request(
-                {"task": subtask.task, "app_hint": subtask.app_hint}
+                {
+                    "task": subtask.task,
+                    "app_hint": subtask_request.app_hint,
+                    "app_bundle_id": subtask_request.app_bundle_id,
+                }
             )
 
             raw_payload = await self._run_task(active_backend, task_prompt, **run_kwargs)
@@ -1549,6 +1598,14 @@ class GuiSubagentTool(Tool):
                     "enum": ["adb", "ios", "hdc", "mobileworld", "local", "dry-run"],
                     "description": "Optional backend override. Defaults to the configured GUI backend.",
                 },
+                "app_hint": {
+                    "type": "string",
+                    "description": "Optional native app name hint, such as Weibo, Taobao, or Maps.",
+                },
+                "app_bundle_id": {
+                    "type": "string",
+                    "description": "Optional native app bundle/package id. If omitted, gui_task may infer it from the task.",
+                },
                 "require_background_isolation": {
                     "type": "boolean",
                     "description": "Block instead of falling back when isolated background execution is unavailable.",
@@ -1570,12 +1627,19 @@ class GuiSubagentTool(Tool):
         self,
         task: str | dict[str, Any],
         backend: str | None = None,
+        app_hint: str | None = None,
+        app_bundle_id: str | None = None,
         require_background_isolation: bool = False,
         acknowledge_background_fallback: bool = False,
         target_app_class: str | None = None,
         **kwargs: Any,
     ) -> str:
-        task_request = normalize_gui_task_request(task if isinstance(task, dict) else {"task": task})
+        raw_request = dict(task) if isinstance(task, dict) else {"task": task}
+        if app_hint is not None:
+            raw_request["app_hint"] = app_hint
+        if app_bundle_id is not None:
+            raw_request["app_bundle_id"] = app_bundle_id
+        task_request = normalize_gui_task_request(raw_request)
         task_text = task_request.task
         task_type = getattr(task_request, "task_type", None)
         output_mode = getattr(task_request, "output_mode", None)
@@ -1707,18 +1771,93 @@ class GuiSubagentTool(Tool):
         )
         return await runner.run(active_backend, task, **kwargs)
 
+    async def _list_backend_apps(self, active_backend: Any) -> list[str] | None:
+        list_apps = getattr(active_backend, "list_apps", None)
+        if not callable(list_apps):
+            return None
+        try:
+            apps = await list_apps()
+        except Exception as exc:
+            logger.debug("Unable to list GUI backend apps: %s", exc)
+            return None
+        if not apps:
+            return None
+        return [str(item) for item in apps if str(item).strip()]
+
+    @staticmethod
+    def _resolve_native_app_bundle(
+        *,
+        platform: str,
+        task: str,
+        app_hint: str | None,
+        app_bundle_id: str | None,
+        installed_apps: list[str] | None,
+    ) -> str | None:
+        if app_bundle_id:
+            return app_bundle_id
+        if (platform or "").lower() != "ios":
+            return None
+        text = " ".join(part for part in (app_hint or "", task or "") if part)
+        resolved = resolve_ios_bundle(text, installed_apps)
+        if resolved and resolved != text:
+            return resolved
+        return None
+
+    async def _ensure_native_app_opened(
+        self,
+        active_backend: Any,
+        *,
+        app_hint: str | None,
+        app_bundle_id: str | None,
+        task: str,
+        run_dir: Path,
+    ) -> NativeLaunchResult:
+        if not app_bundle_id:
+            return NativeLaunchResult(status="no_expected_app")
+        if task_explicitly_allows_browser(task):
+            return NativeLaunchResult(status="browser_allowed")
+        try:
+            preflight = getattr(active_backend, "preflight", None)
+            if callable(preflight):
+                await preflight()
+            await active_backend.execute(
+                Action(action_type="open_app", text=app_bundle_id),
+                timeout=10.0,
+            )
+            observe_dir = run_dir / "native_launch"
+            observe_dir.mkdir(parents=True, exist_ok=True)
+            observation = await active_backend.observe(
+                observe_dir / "foreground.png",
+                timeout=10.0,
+            )
+        except Exception as exc:
+            return NativeLaunchResult(status="launch_error", error=f"{type(exc).__name__}: {exc}")
+
+        foreground_app = getattr(observation, "foreground_app", None)
+        if foreground_app == app_bundle_id:
+            return NativeLaunchResult(status="opened", foreground_app=foreground_app)
+        if is_browser_bundle(foreground_app):
+            return NativeLaunchResult(status="wrong_app_browser", foreground_app=foreground_app)
+        return NativeLaunchResult(status="wrong_app", foreground_app=foreground_app)
+
     async def _run_task(
         self,
         active_backend: Any,
         task: str,
         *,
         app_hint: str | None = None,
+        app_bundle_id: str | None = None,
         task_request: Any | None = None,
         **kwargs: Any,
     ) -> str:
         if task_request is None:
-            task_request = normalize_gui_task_request({"task": task, "app_hint": app_hint})
+            task_request = normalize_gui_task_request(
+                {"task": task, "app_hint": app_hint, "app_bundle_id": app_bundle_id}
+            )
+        app_hint = app_hint or getattr(task_request, "app_hint", None)
+        app_bundle_id = app_bundle_id or getattr(task_request, "app_bundle_id", None)
         task = _task_with_information_query_policy(task, task_request)
+        task = _task_with_native_app_policy(task, task_request)
         raw_max_retries = kwargs.pop("max_retries", 1)
         try:
             max_retries = max(1, int(raw_max_retries))
@@ -1751,6 +1890,29 @@ class GuiSubagentTool(Tool):
             task=task,
             platform=active_backend.platform,
             event_callback=self._gui_event_callback,
+        )
+        installed_apps = await self._list_backend_apps(active_backend)
+        app_bundle_id = self._resolve_native_app_bundle(
+            platform=str(getattr(active_backend, "platform", "") or ""),
+            task=task,
+            app_hint=app_hint,
+            app_bundle_id=app_bundle_id,
+            installed_apps=installed_apps,
+        )
+        native_launch = await self._ensure_native_app_opened(
+            active_backend,
+            app_hint=app_hint,
+            app_bundle_id=app_bundle_id,
+            task=task,
+            run_dir=run_dir,
+        )
+        recorder.record_event(
+            "native_app_launch",
+            status=native_launch.status,
+            app_hint=app_hint,
+            expected_bundle_id=app_bundle_id,
+            foreground_app=native_launch.foreground_app,
+            error=native_launch.error,
         )
 
         skill_executor = None
@@ -1838,6 +2000,7 @@ class GuiSubagentTool(Tool):
             skill_reuser=skill_reuser,
             intervention_handler=self._build_intervention_handler(active_backend, task),
             memory_store=memory_store,
+            installed_apps=installed_apps,
             agent_profile=self._gui_config.agent_profile,
             image_scale_ratio=self._gui_config.image_scale_ratio,
             stagnation_limit=self._gui_config.stagnation_limit,
@@ -1865,6 +2028,8 @@ class GuiSubagentTool(Tool):
             run_kwargs["max_retries"] = max_retries
         if app_hint is not None and "app_hint" in run_params:
             run_kwargs["app_hint"] = app_hint
+        if app_bundle_id is not None and "expected_bundle_id" in run_params:
+            run_kwargs["expected_bundle_id"] = app_bundle_id
         result = await agent.run(task=task, **run_kwargs)
         summary = result.summary
         error = result.error
@@ -1911,6 +2076,13 @@ class GuiSubagentTool(Tool):
             "s2_usage": result_s2_usage,
             "answer_candidates": result_answer_candidates,
             "evidence": result_evidence,
+            "native_launch": {
+                "status": native_launch.status,
+                "app_hint": app_hint,
+                "expected_bundle_id": app_bundle_id,
+                "foreground_app": native_launch.foreground_app,
+                "error": native_launch.error,
+            },
         }
         _attach_request_metadata(payload, task_request)
         latest_step = self._load_latest_step_event(trace_path)
