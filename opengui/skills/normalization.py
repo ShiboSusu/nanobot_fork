@@ -585,7 +585,7 @@ _IOS_BUNDLE_DISPLAY_NAMES: dict[str, str] = {
     "com.autonavi.amap": "Amap",
     # Travel
     "ctrip.com": "Ctrip",
-    "com.12306": "12306",
+    "cn.12306.rails12306": "12306",
     # Finance
     "com.alipay.iphoneclient": "Alipay",
     # Entertainment
@@ -673,8 +673,8 @@ _IOS_APP_ALIASES_BASE: dict[str, str] = {
     "携程": "ctrip.com",
     "ctrip.android.view": "ctrip.com",
     "携程旅行": "ctrip.com",
-    "12306": "com.12306",
-    "铁路12306": "com.12306",
+    "12306": "cn.12306.rails12306",
+    "铁路12306": "cn.12306.rails12306",
     "lark": "com.ss.iphone.lark",
     "feishu": "com.ss.iphone.lark",
     "wecom": "com.tencent.wework",

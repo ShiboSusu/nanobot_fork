@@ -43,6 +43,7 @@ def test_ios_resolver_uses_common_aliases_and_annotations() -> None:
     assert resolve_ios_bundle("用网易云音乐播放歌单") == "com.netease.cloudmusic"
     assert resolve_ios_bundle("在小红书搜索夏日穿搭") == "com.xingin.discover"
     assert resolve_ios_bundle("淘宝搜索男士运动鞋") == "com.taobao.taobao4iphone"
+    assert resolve_ios_bundle("打开铁路12306查询高铁票") == "cn.12306.rails12306"
     assert annotate_ios_apps(["com.sina.weibo"]) == ["Weibo: com.sina.weibo"]
 
 
