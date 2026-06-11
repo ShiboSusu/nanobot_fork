@@ -99,6 +99,18 @@ def _empty_s2_usage() -> dict[str, Any]:
     }
 
 
+def _safe_record_event(recorder: Any | None, event_type: str, payload: dict[str, Any]) -> None:
+    if recorder is None:
+        return
+    try:
+        recorder.record_event(event_type, **payload)
+    except RuntimeError as exc:
+        if "Recorder not started" in str(exc):
+            logger.debug("skip recorder event before recorder start: %s", event_type)
+            return
+        raise
+
+
 def _safety_block_payload(
     *,
     task_request: Any | None,
@@ -1906,13 +1918,17 @@ class GuiSubagentTool(Tool):
             task=task,
             run_dir=run_dir,
         )
-        recorder.record_event(
+        native_launch_payload = {
+            "status": native_launch.status,
+            "app_hint": app_hint,
+            "expected_bundle_id": app_bundle_id,
+            "foreground_app": native_launch.foreground_app,
+            "error": native_launch.error,
+        }
+        _safe_record_event(
+            recorder,
             "native_app_launch",
-            status=native_launch.status,
-            app_hint=app_hint,
-            expected_bundle_id=app_bundle_id,
-            foreground_app=native_launch.foreground_app,
-            error=native_launch.error,
+            native_launch_payload,
         )
 
         skill_executor = None

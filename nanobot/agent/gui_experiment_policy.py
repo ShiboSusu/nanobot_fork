@@ -9,6 +9,10 @@ def is_gui_e2e_compact_mode() -> bool:
     return os.environ.get("NB_GUI_E2E_COMPACT") == "1"
 
 
+def is_fullsystem_tool_filter_enabled() -> bool:
+    return os.environ.get("NB_FULLSYSTEM_TOOL_FILTER") == "1"
+
+
 GUI_E2E_COMPACT_MAIN_PROMPT = """You are the main controller for a GUI-only mobile experiment.
 
 For phone/app tasks, call gui_task. Do not answer app-visible or account-specific information from memory.

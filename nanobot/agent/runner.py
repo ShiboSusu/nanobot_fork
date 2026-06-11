@@ -12,7 +12,10 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.agent.gui_experiment_policy import is_gui_e2e_compact_mode
+from nanobot.agent.gui_experiment_policy import (
+    is_fullsystem_tool_filter_enabled,
+    is_gui_e2e_compact_mode,
+)
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
 from nanobot.agent.tools.registry import ToolRegistry
@@ -48,6 +51,27 @@ _MICROCOMPACT_MIN_CHARS = 500
 _COMPACTABLE_TOOLS = frozenset({
     "read_file", "exec", "grep", "glob",
     "web_search", "web_fetch", "list_dir",
+})
+_FULLSYSTEM_DEV_TOOL_DENYLIST = frozenset({
+    "exec",
+    "spawn",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "glob",
+    "grep",
+    "notebook_edit",
+    "cron",
+})
+_FULLSYSTEM_CORE_ALLOWLIST = frozenset({
+    "gui_task",
+    "web_search",
+    "web_fetch",
+    "ask_user",
+    "message",
+    "human_confirm",
+    "confirm",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
 
@@ -601,6 +625,43 @@ class AgentRunner:
         return [tool for tool in tools if cls._tool_name(tool) == "gui_task"]
 
     @staticmethod
+    def _is_mcp_tool_name(name: str | None) -> bool:
+        return bool(
+            name
+            and (
+                name.startswith("mcp_")
+                or name.startswith("mcp.")
+                or name.startswith("my_")
+            )
+        )
+
+    @classmethod
+    def _filter_fullsystem_tools(cls, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if not is_fullsystem_tool_filter_enabled() or not tools:
+            return tools
+
+        filtered: list[dict[str, Any]] = []
+        for tool in tools:
+            name = cls._tool_name(tool)
+            if name in _FULLSYSTEM_DEV_TOOL_DENYLIST:
+                continue
+            if (
+                name in _FULLSYSTEM_CORE_ALLOWLIST
+                or cls._is_mcp_tool_name(name)
+                or name not in _FULLSYSTEM_DEV_TOOL_DENYLIST
+            ):
+                filtered.append(tool)
+        return filtered
+
+    @classmethod
+    def _filter_llm_tools(cls, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if is_gui_e2e_compact_mode():
+            return cls._filter_compact_tools(tools)
+        if is_fullsystem_tool_filter_enabled():
+            return cls._filter_fullsystem_tools(tools)
+        return tools
+
+    @staticmethod
     def _dump_first_llm_payload(kwargs: dict[str, Any]) -> None:
         dump_path = os.environ.get("NB_DUMP_FIRST_LLM_PAYLOAD")
         if not dump_path:
@@ -643,7 +704,7 @@ class AgentRunner:
         kwargs = self._build_request_kwargs(
             spec,
             messages,
-            tools=self._filter_compact_tools(spec.tools.get_definitions()),
+            tools=self._filter_llm_tools(spec.tools.get_definitions()),
         )
         self._dump_first_llm_payload(kwargs)
         wants_streaming = hook.wants_streaming()

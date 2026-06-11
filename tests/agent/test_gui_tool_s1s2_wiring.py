@@ -49,6 +49,29 @@ def test_gui_subagent_tool_uses_s1_model_override(tmp_path: Path) -> None:
     assert tool._s2_llm_adapter is None
 
 
+def test_safe_record_event_ignores_recorder_not_started() -> None:
+    from nanobot.agent.tools.gui import _safe_record_event
+
+    class NotStartedRecorder:
+        def record_event(self, event_type: str, **payload: Any) -> None:
+            del event_type, payload
+            raise RuntimeError("Recorder not started; call start() first")
+
+    _safe_record_event(NotStartedRecorder(), "native_app_launch", {"status": "opened"})
+
+
+def test_safe_record_event_reraises_other_runtime_errors() -> None:
+    from nanobot.agent.tools.gui import _safe_record_event
+
+    class BrokenRecorder:
+        def record_event(self, event_type: str, **payload: Any) -> None:
+            del event_type, payload
+            raise RuntimeError("different recorder error")
+
+    with pytest.raises(RuntimeError, match="different recorder error"):
+        _safe_record_event(BrokenRecorder(), "native_app_launch", {"status": "opened"})
+
+
 @pytest.mark.asyncio
 async def test_gui_subagent_tool_passes_no_s2_llm_when_disabled(
     tmp_path: Path,
