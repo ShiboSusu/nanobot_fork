@@ -44,7 +44,15 @@ def test_ios_resolver_uses_common_aliases_and_annotations() -> None:
     assert resolve_ios_bundle("在小红书搜索夏日穿搭") == "com.xingin.discover"
     assert resolve_ios_bundle("淘宝搜索男士运动鞋") == "com.taobao.taobao4iphone"
     assert resolve_ios_bundle("打开铁路12306查询高铁票") == "cn.12306.rails12306"
+    assert resolve_ios_bundle("去大众点评看看附近火锅店") == "com.dianping.dpscope"
     assert annotate_ios_apps(["com.sina.weibo"]) == ["Weibo: com.sina.weibo"]
+
+
+def test_ios_resolver_does_not_match_single_letter_x_inside_words() -> None:
+    assert resolve_ios_bundle("box hotel x value") == "box hotel x value"
+    assert resolve_ios_bundle("去大众点评看看附近有没有人均消费在100元以下的火锅店") == (
+        "com.dianping.dpscope"
+    )
 
 
 def test_ios_resolver_prefers_installed_app_aliases() -> None:

@@ -650,6 +650,8 @@ _IOS_APP_ALIASES_BASE: dict[str, str] = {
     "京东": "com.jingdong.app.iphone",
     "meituan": "com.meituan.imeituan",
     "美团": "com.meituan.imeituan",
+    "dianping": "com.dianping.dpscope",
+    "大众点评": "com.dianping.dpscope",
     "douyin": "com.ss.iphone.ugc.Aweme",
     "抖音": "com.ss.iphone.ugc.Aweme",
     "tiktok": "com.ss.iphone.ugc.Aweme",
@@ -844,6 +846,12 @@ def _build_ios_aliases() -> dict[str, str]:
 _IOS_APP_ALIASES = _build_ios_aliases()
 
 
+def _ios_alias_can_match_substring(alias_key: str) -> bool:
+    if re.search(r"[\u4e00-\u9fff]", alias_key):
+        return len(alias_key) >= 2
+    return len(alias_key) >= 3
+
+
 IOS_BROWSER_BUNDLE_IDS: frozenset[str] = frozenset(
     {
         "com.apple.mobilesafari",
@@ -919,7 +927,11 @@ def resolve_ios_bundle(app_text: str, installed_apps: list[str] | None = None) -
             return _IOS_APP_ALIASES[key]
     canonical_text = _canonical_ios_app_key(cleaned)
     for alias_key, bundle_id in _IOS_APP_ALIASES.items():
-        if alias_key and alias_key in canonical_text:
+        if (
+            alias_key
+            and _ios_alias_can_match_substring(alias_key)
+            and alias_key in canonical_text
+        ):
             return bundle_id
     return cleaned
 
