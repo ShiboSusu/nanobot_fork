@@ -869,8 +869,6 @@ def task_explicitly_allows_browser(text: str | None) -> bool:
             "safari",
             "Chrome",
             "chrome",
-            "browser",
-            "web",
         )
     )
 

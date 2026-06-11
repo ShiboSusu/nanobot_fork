@@ -12,6 +12,7 @@ from opengui.skills.normalization import (
     annotate_ios_apps,
     normalize_app_identifier,
     resolve_ios_bundle,
+    task_explicitly_allows_browser,
 )
 
 
@@ -50,6 +51,17 @@ def test_ios_resolver_prefers_installed_app_aliases() -> None:
 
     assert resolve_ios_bundle("Test Weibo", installed_apps) == "com.example.weibo.beta"
     assert normalize_app_identifier("ios", "微博") == "com.sina.weibo"
+
+
+def test_native_policy_text_does_not_count_as_browser_opt_in() -> None:
+    task = (
+        "打开微博App，看看今天热搜榜第三名。"
+        "\nFor named app tasks, use the native installed app when available. "
+        "Do not use browser or web search results as a substitute."
+    )
+
+    assert task_explicitly_allows_browser(task) is False
+    assert task_explicitly_allows_browser("用浏览器打开微博网页版") is True
 
 
 def _provider() -> MagicMock:
