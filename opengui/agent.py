@@ -402,6 +402,38 @@ class GuiAgent:
     _NO_SETTLE_ACTIONS = frozenset({"wait", "done", "request_intervention"})
     _STAGNATION_SSIM_SIZE = 64
     _STAGNATION_SSIM_THRESHOLD = 0.985
+    _IOS_TRANSIENT_SYSTEM_APPS = frozenset({
+        "com.apple.springboard",
+        "com.apple.ScreenshotServicesService",
+        "com.apple.notificationcenterui",
+        "com.apple.usernotificationsui",
+    })
+    _TRANSIENT_OVERLAY_TERMS = frozenset({
+        "notification",
+        "banner",
+        "popup",
+        "pop-up",
+        "permission",
+        "alert",
+        "allow",
+        "don't allow",
+        "not now",
+        "later",
+        "close",
+        "skip",
+        "通知",
+        "横幅",
+        "弹窗",
+        "弹出",
+        "权限",
+        "提醒",
+        "允许",
+        "不允许",
+        "暂不",
+        "稍后",
+        "关闭",
+        "跳过",
+    })
 
     def __init__(
         self,
@@ -1132,13 +1164,34 @@ class GuiAgent:
 
             if (
                 result.next_observation is not None
+                and self._is_transient_expected_app_interruption(
+                    current_observation=obs,
+                    next_observation=result.next_observation,
+                    expected_bundle_id=expected_bundle_id,
+                )
+            ):
+                result = await self._refresh_transient_expected_app_interruption(
+                    result,
+                    current_observation=obs,
+                    expected_bundle_id=expected_bundle_id,
+                    run_dir=run_dir,
+                    step_index=step_index,
+                )
+
+            if (
+                result.next_observation is not None
                 and not browser_relaunch_attempted
-                and self._should_relaunch_expected_app(
+                and self._classify_expected_app_observation(
+                    result.next_observation,
+                    expected_bundle_id=expected_bundle_id,
+                    task=task,
+                ).get("reason") == "wrong_app_browser"
+            ):
+                previous_validation = self._classify_expected_app_observation(
                     result.next_observation,
                     expected_bundle_id=expected_bundle_id,
                     task=task,
                 )
-            ):
                 next_observation = await self._relaunch_expected_app(
                     result.next_observation,
                     expected_bundle_id=expected_bundle_id,
@@ -1151,9 +1204,7 @@ class GuiAgent:
                     execution_snapshot={
                         **(result.execution_snapshot or {}),
                         "native_app_validation": {
-                            "event": "app_mismatch",
-                            "reason": "wrong_app_browser",
-                            "expected_bundle_id": expected_bundle_id,
+                            **previous_validation,
                             "previous_foreground_app": result.next_observation.foreground_app,
                             "foreground_app": next_observation.foreground_app,
                         },
@@ -1161,6 +1212,24 @@ class GuiAgent:
                     },
                 )
                 browser_relaunch_attempted = True
+
+            if result.next_observation is not None:
+                execution_snapshot = result.execution_snapshot or {}
+                if "native_app_validation" not in execution_snapshot:
+                    validation = self._classify_expected_app_observation(
+                        result.next_observation,
+                        expected_bundle_id=expected_bundle_id,
+                        task=task,
+                    )
+                    if validation.get("event") in {"app_mismatch", "transient_overlay"}:
+                        result = replace(
+                            result,
+                            execution_snapshot={
+                                **execution_snapshot,
+                                "native_app_validation": validation,
+                                "next_observation": self._serialize_observation(result.next_observation),
+                            },
+                        )
 
             # Write trace entry
             await self._write_trace(
@@ -1572,6 +1641,198 @@ class GuiAgent:
             ),
             token_usage=total_usage,
             s2_usage=s2_usage.to_dict(),
+        )
+
+    @staticmethod
+    def _observation_matches_expected_bundle(
+        observation: Observation | None,
+        *,
+        expected_bundle_id: str | None,
+    ) -> bool:
+        if not observation or not expected_bundle_id:
+            return False
+        actual = str(observation.foreground_app or "").casefold()
+        expected = str(expected_bundle_id or "").casefold()
+        return bool(actual and expected and actual == expected)
+
+    @staticmethod
+    def _observation_visible_text_blob(observation: Observation | None) -> str:
+        if observation is None:
+            return ""
+        extra = getattr(observation, "extra", None)
+        if not isinstance(extra, dict):
+            return ""
+        parts: list[str] = []
+        for key in ("visible_text", "texts", "labels", "ui_text"):
+            value = extra.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, (list, tuple, set)):
+                parts.extend(str(item) for item in value if item is not None)
+        return " ".join(parts).casefold()
+
+    def _transient_overlay_kind(
+        self,
+        observation: Observation | None,
+        *,
+        expected_bundle_id: str | None,
+    ) -> str | None:
+        if observation is None:
+            return None
+        platform = str(getattr(observation, "platform", "") or self.backend.platform or "").lower()
+        foreground_app = str(observation.foreground_app or "")
+        if platform == "ios" and foreground_app in self._IOS_TRANSIENT_SYSTEM_APPS:
+            return "ios_system_overlay"
+        if self._observation_matches_expected_bundle(observation, expected_bundle_id=expected_bundle_id):
+            blob = self._observation_visible_text_blob(observation)
+            if blob and any(term.casefold() in blob for term in self._TRANSIENT_OVERLAY_TERMS):
+                return "transient_overlay"
+        return None
+
+    def _classify_expected_app_observation(
+        self,
+        observation: Observation | None,
+        *,
+        expected_bundle_id: str | None,
+        task: str,
+    ) -> dict[str, Any]:
+        if observation is None:
+            return {
+                "event": "no_observation",
+                "expected_bundle_id": expected_bundle_id,
+                "foreground_app": None,
+                "matches_expected_app": False,
+                "app_mismatch": False,
+            }
+        foreground_app = str(observation.foreground_app or "")
+        matches = self._observation_matches_expected_bundle(
+            observation,
+            expected_bundle_id=expected_bundle_id,
+        )
+        transient_kind = self._transient_overlay_kind(
+            observation,
+            expected_bundle_id=expected_bundle_id,
+        )
+        base = {
+            "expected_bundle_id": expected_bundle_id,
+            "foreground_app": foreground_app or None,
+            "matches_expected_app": matches,
+            "app_mismatch": False,
+        }
+        if not expected_bundle_id or task_explicitly_allows_browser(task):
+            return {**base, "event": "not_app_constrained"}
+        if transient_kind is not None:
+            return {**base, "event": "transient_overlay", "reason": transient_kind}
+        if matches:
+            return {**base, "event": "expected_app"}
+        if not foreground_app:
+            return {**base, "event": "unknown_foreground_app"}
+        if is_browser_bundle(foreground_app):
+            return {
+                **base,
+                "event": "app_mismatch",
+                "reason": "wrong_app_browser",
+                "app_mismatch": True,
+            }
+        return {
+            **base,
+            "event": "app_mismatch",
+            "reason": "wrong_app",
+            "app_mismatch": True,
+        }
+
+    def _is_transient_expected_app_interruption(
+        self,
+        *,
+        current_observation: Observation,
+        next_observation: Observation | None,
+        expected_bundle_id: str | None,
+    ) -> bool:
+        if not expected_bundle_id or next_observation is None:
+            return False
+        if not self._observation_matches_expected_bundle(
+            current_observation,
+            expected_bundle_id=expected_bundle_id,
+        ):
+            return False
+        kind = self._transient_overlay_kind(
+            next_observation,
+            expected_bundle_id=expected_bundle_id,
+        )
+        return kind == "ios_system_overlay"
+
+    async def _refresh_transient_expected_app_interruption(
+        self,
+        result: StepResult,
+        *,
+        current_observation: Observation,
+        expected_bundle_id: str | None,
+        run_dir: Path,
+        step_index: int,
+    ) -> StepResult:
+        next_observation = result.next_observation
+        if not self._is_transient_expected_app_interruption(
+            current_observation=current_observation,
+            next_observation=next_observation,
+            expected_bundle_id=expected_bundle_id,
+        ):
+            return result
+        await asyncio.sleep(0.25)
+        screenshot_dir = run_dir / "screenshots"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            refreshed = await self.backend.observe(
+                screenshot_dir / f"step_{step_index:03d}_transient_reobserve.png",
+                timeout=self.step_timeout,
+            )
+        except Exception as exc:
+            await self._log_attempt_event(
+                run_dir,
+                "transient_overlay_reobserve_failed",
+                monitor_event="transient_overlay",
+                reason="ios_system_overlay",
+                expected_bundle_id=expected_bundle_id,
+                current_observation=self._serialize_observation(current_observation),
+                next_observation=self._serialize_observation(next_observation),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return result
+
+        validation = self._classify_expected_app_observation(
+            refreshed,
+            expected_bundle_id=expected_bundle_id,
+            task="",
+        )
+        await self._log_attempt_event(
+            run_dir,
+            "transient_overlay_reobserved",
+            monitor_event="transient_overlay",
+            reason="ios_system_overlay",
+            expected_bundle_id=expected_bundle_id,
+            current_observation=self._serialize_observation(current_observation),
+            next_observation=self._serialize_observation(next_observation),
+            refreshed_observation=self._serialize_observation(refreshed),
+            accepted=validation.get("matches_expected_app") is True,
+        )
+        if validation.get("matches_expected_app") is not True:
+            return result
+        return replace(
+            result,
+            next_observation=refreshed,
+            execution_snapshot={
+                **(result.execution_snapshot or {}),
+                "native_app_validation": {
+                    "event": "transient_overlay",
+                    "reason": "ios_system_overlay",
+                    "expected_bundle_id": expected_bundle_id,
+                    "previous_foreground_app": (
+                        next_observation.foreground_app if next_observation else None
+                    ),
+                    "foreground_app": refreshed.foreground_app,
+                    "app_mismatch": False,
+                },
+                "next_observation": self._serialize_observation(refreshed),
+            },
         )
 
     @staticmethod
