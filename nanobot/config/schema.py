@@ -299,6 +299,8 @@ class GuiConfig(Base):
     s2_trigger_on_max_steps_near: bool = False
     s2_trigger_on_done_missing_evidence: bool = True
     s2_trigger_on_step_error: bool = True
+    s2_trigger_on_wrong_app: bool = True
+    s2_max_steps_near_margin: int = Field(default=3, ge=1, le=10)
     s2_prompt_max_chars: int = Field(default=6000, ge=1000, le=30000)
     validator_model: str | None = None
     grounder_model: str | None = None
@@ -311,7 +313,7 @@ class GuiConfig(Base):
     mobileworld: MobileWorldGuiBackendConfig = Field(default_factory=MobileWorldGuiBackendConfig)
     artifacts_dir: str = "gui_runs"
     max_steps: int = 15
-    stagnation_limit: int = 0
+    stagnation_limit: int = 2
     skill_threshold: float = 0.6
     embedding_model: str | None = None
     embedding_api_key: str = ""

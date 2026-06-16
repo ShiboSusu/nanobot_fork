@@ -178,7 +178,7 @@ def test_load_config_env_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.provider.model == "qwen-gui"
     assert cfg.provider.api_key == "env-key"
     assert cfg.image_scale_ratio == pytest.approx(0.5)
-    assert cfg.stagnation_limit == 0
+    assert cfg.stagnation_limit == 2
 
     custom_config = _write_config(
         tmp_path / "custom.yaml",
@@ -326,7 +326,7 @@ def test_cli_runs_dry_run_agent_loop(
     assert agent_state["model"] == "qwen-gui"
     assert agent_state["agent_profile"] == "seed"
     assert agent_state["artifacts_root"] == recorder_state["output_dir"]
-    assert agent_state["stagnation_limit"] == 0
+    assert agent_state["stagnation_limit"] == 2
 
 
 def test_cli_json_output(

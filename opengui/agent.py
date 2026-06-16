@@ -53,6 +53,7 @@ from opengui.s2_policy import (
     S2Usage,
     decide_s2_mode,
 )
+from opengui.evidence import extract_gui_evidence
 from opengui.skills.compact_prompt import (
     ALWAYS_ON_SKILL_TAG,
     COMPOSITE_ACTION_DEFINITIONS,
@@ -462,7 +463,7 @@ class GuiAgent:
         memory_store: Any = None,
         agent_profile: str | None = None,
         image_scale_ratio: float = 0.5,
-        stagnation_limit: int = 0,
+        stagnation_limit: int = 2,
         enable_prompt_skill_selection: bool = False,
         prompt_skill_top_k: int = 5,
         prompt_shortcut_only: bool = False,
@@ -476,6 +477,11 @@ class GuiAgent:
         s2_takeover_after_hints: int = 1,
         s2_max_takeover_steps: int = 8,
         s2_trigger_on_stagnation: bool = True,
+        s2_trigger_on_max_steps_near: bool = False,
+        s2_trigger_on_done_missing_evidence: bool = True,
+        s2_trigger_on_step_error: bool = True,
+        s2_trigger_on_wrong_app: bool = True,
+        s2_max_steps_near_margin: int = 3,
         s2_prompt_max_chars: int = 6000,
     ) -> None:
         self.llm = llm
@@ -538,7 +544,29 @@ class GuiAgent:
         self._s2_takeover_after_hints = max(0, int(s2_takeover_after_hints))
         self._s2_max_takeover_steps = max(1, int(s2_max_takeover_steps))
         self._s2_trigger_on_stagnation = bool(s2_trigger_on_stagnation)
+        self._s2_max_steps_near_margin = max(1, int(s2_max_steps_near_margin))
+        self._s2_allowed_triggers = frozenset(
+            trigger
+            for trigger, enabled in (
+                (S2Trigger.STAGNATION, s2_trigger_on_stagnation),
+                (S2Trigger.MAX_STEPS_NEAR, s2_trigger_on_max_steps_near),
+                (S2Trigger.MISSING_EVIDENCE, s2_trigger_on_done_missing_evidence),
+                (S2Trigger.STEP_ERROR, s2_trigger_on_step_error),
+                (S2Trigger.WRONG_APP, s2_trigger_on_wrong_app),
+            )
+            if enabled
+        )
+        # Follow-up: wire S2Trigger.WRONG_APP into the wrong-app relaunch failure
+        # path. WS-2 batch 1 only hooks max_steps_near, missing_evidence, and step_error.
         self._s2_prompt_max_chars = max(1000, int(s2_prompt_max_chars))
+        self._s2_usage = S2Usage(enabled=self._s2_enabled)
+        self._s2_guidance_notes: list[str] = []
+        self._s2_pending_takeover_steps = 0
+        self._s2_last_takeover_reason = ""
+        self._s2_last_stagnation_streak = 0
+        self._s2_current_task = ""
+        self._s2_run_dir: Path | None = None
+        self._s2_actor_before = "s1"
 
     def _build_tools_list(self) -> list[dict[str, Any]]:
         tools = [COMPUTER_USE_TOOL]
@@ -878,6 +906,13 @@ class GuiAgent:
     ) -> AgentResult:
         """Execute one full attempt of the task."""
         s2_usage = S2Usage(enabled=self._s2_enabled)
+        self._s2_usage = s2_usage
+        self._s2_guidance_notes = []
+        self._s2_pending_takeover_steps = 0
+        self._s2_last_takeover_reason = ""
+        self._s2_last_stagnation_streak = 0
+        self._s2_current_task = task
+        self._s2_run_dir = run_dir
         # 1. Preflight
         try:
             await self.backend.preflight()
@@ -914,7 +949,7 @@ class GuiAgent:
         previous_fingerprint: _ScreenFingerprint | None = None
         previous_action_type: str | None = None
         stagnation_streak = 0
-        s2_guidance_notes: list[str] = []
+        s2_guidance_notes = self._s2_guidance_notes
         takeover_remaining = 0
         last_s2_takeover_reason = ""
         last_s2_stagnation_streak = 0
@@ -926,6 +961,32 @@ class GuiAgent:
         total_usage: dict[str, int] = {}
         for step in range(self.max_steps):
             step_index = step + 1
+            if (
+                S2Trigger.MAX_STEPS_NEAR in self._s2_allowed_triggers
+                and self._s2_enabled
+                and not s2_usage.takeover_used
+                and (self.max_steps - step_index) <= self._s2_max_steps_near_margin
+            ):
+                self._s2_actor_before = "s1"
+                s2_mode = await self._maybe_invoke_s2(
+                    trigger=S2Trigger.MAX_STEPS_NEAR,
+                    step_index=step_index,
+                    history=history,
+                    reason=(
+                        f"Approaching max_steps: step_index={step_index}, "
+                        f"max_steps={self.max_steps}, margin={self._s2_max_steps_near_margin}."
+                    ),
+                    observation=obs,
+                    metadata={
+                        "max_steps": self.max_steps,
+                        "remaining_steps": max(self.max_steps - step_index, 0),
+                        "margin": self._s2_max_steps_near_margin,
+                    },
+                )
+                if s2_mode == S2Mode.TAKEOVER:
+                    takeover_remaining = self._s2_pending_takeover_steps
+                    last_s2_takeover_reason = self._s2_last_takeover_reason
+                    last_s2_stagnation_streak = self._s2_last_stagnation_streak
             effective_memory_context = self._memory_context_with_s2_guidance(
                 memory_context,
                 s2_guidance_notes,
@@ -982,6 +1043,21 @@ class GuiAgent:
                     "event": "timeout", "step_index": step_index,
                     "timestamp": time.time(),
                 })
+                self._s2_actor_before = actor
+                s2_mode = await self._maybe_invoke_s2(
+                    trigger=S2Trigger.STEP_ERROR,
+                    step_index=step_index,
+                    history=history,
+                    reason=f"Step {step_index} timed out before producing a usable GUI action.",
+                    observation=obs,
+                    metadata={"error": "step_timeout"},
+                )
+                if s2_mode in {S2Mode.HINT, S2Mode.TAKEOVER}:
+                    if s2_mode == S2Mode.TAKEOVER:
+                        takeover_remaining = self._s2_pending_takeover_steps
+                        last_s2_takeover_reason = self._s2_last_takeover_reason
+                        last_s2_stagnation_streak = self._s2_last_stagnation_streak
+                    continue
                 return AgentResult(
                     success=False,
                     summary=self._build_state_note(
@@ -1008,6 +1084,24 @@ class GuiAgent:
                     s2_usage=s2_usage.to_dict(),
                 )
             except _StepExecutionError as exc:
+                self._s2_actor_before = actor
+                s2_mode = await self._maybe_invoke_s2(
+                    trigger=S2Trigger.STEP_ERROR,
+                    step_index=step_index,
+                    history=history,
+                    reason=f"Step {step_index} failed with {type(exc).__name__}: {exc}",
+                    observation=obs,
+                    metadata={
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                if s2_mode in {S2Mode.HINT, S2Mode.TAKEOVER}:
+                    if s2_mode == S2Mode.TAKEOVER:
+                        takeover_remaining = self._s2_pending_takeover_steps
+                        last_s2_takeover_reason = self._s2_last_takeover_reason
+                        last_s2_stagnation_streak = self._s2_last_stagnation_streak
+                    continue
                 raise _StepExecutionError(
                     str(exc),
                     model_snapshot=exc.model_snapshot,
@@ -1338,6 +1432,36 @@ class GuiAgent:
 
             if result.done:
                 success = self._resolve_done_status(result.action) == "success"
+                if (
+                    success
+                    and S2Trigger.MISSING_EVIDENCE in self._s2_allowed_triggers
+                    and self._done_missing_evidence(
+                        task=task,
+                        result=result,
+                        current_observation=obs,
+                    )
+                ):
+                    evidence_observation = result.next_observation or obs
+                    self._s2_actor_before = actor
+                    s2_mode = await self._maybe_invoke_s2(
+                        trigger=S2Trigger.MISSING_EVIDENCE,
+                        step_index=step_index,
+                        history=history,
+                        reason=(
+                            "Done action did not provide required answer_candidates "
+                            "or visible evidence for an information query."
+                        ),
+                        observation=evidence_observation,
+                        metadata={"done_status": "success"},
+                    )
+                    if s2_mode in {S2Mode.HINT, S2Mode.TAKEOVER}:
+                        if result.next_observation is not None:
+                            obs = result.next_observation
+                        if s2_mode == S2Mode.TAKEOVER:
+                            takeover_remaining = self._s2_pending_takeover_steps
+                            last_s2_takeover_reason = self._s2_last_takeover_reason
+                            last_s2_stagnation_streak = self._s2_last_stagnation_streak
+                        continue
                 return AgentResult(
                     success=success,
                     summary=self._build_state_note(
@@ -1438,51 +1562,20 @@ class GuiAgent:
                         f"{stagnation_streak} consecutive step(s) in app {app_label}; "
                         "task would stop to avoid repeating the same action loop."
                     )
-                    s2_mode = decide_s2_mode(
-                        enabled=self._s2_enabled,
+                    self._s2_actor_before = actor
+                    s2_mode = await self._maybe_invoke_s2(
                         trigger=S2Trigger.STAGNATION,
-                        hints_used=s2_usage.hints_used,
-                        max_hints=self._s2_max_hints,
-                        hint_enabled=self._s2_hint_enabled,
-                        takeover_enabled=self._s2_takeover_enabled,
-                        takeover_after_hints=self._s2_takeover_after_hints,
-                        takeover_used=s2_usage.takeover_used,
+                        step_index=step_index,
+                        history=history_with_current_step,
+                        reason=stagnation_reason,
+                        observation=result.next_observation or obs,
+                        metadata={
+                            "foreground_app": app_label,
+                            "stagnation_streak": stagnation_streak,
+                            "stagnation_limit": self.stagnation_limit,
+                        },
                     )
                     if s2_mode == S2Mode.HINT:
-                        hint = await self._request_s2_hint(
-                            task=task,
-                            step_index=step_index,
-                            current_observation=result.next_observation or obs,
-                            history=history_with_current_step,
-                            last_action_summary=result.state_summary or result.action_summary,
-                            reason=stagnation_reason,
-                        )
-                        s2_usage.hints_used += 1
-                        s2_usage.triggers.append(
-                            S2TriggerEvent(
-                                step_index=step_index,
-                                trigger=S2Trigger.STAGNATION,
-                                mode=S2Mode.HINT,
-                                reason=stagnation_reason,
-                                actor_before=actor,
-                                metadata={
-                                    "foreground_app": app_label,
-                                    "stagnation_streak": stagnation_streak,
-                                    "stagnation_limit": self.stagnation_limit,
-                                    "hint_available": bool(hint),
-                                },
-                            )
-                        )
-                        if hint:
-                            s2_guidance_notes.append(hint)
-                        await self._log_attempt_event(
-                            run_dir,
-                            "s2_hint",
-                            step_index=step_index,
-                            reason=stagnation_reason,
-                            foreground_app=app_label,
-                            hint_available=bool(hint),
-                        )
                         history.append(history_with_current_step[-1])
                         if result.next_observation is not None:
                             obs = result.next_observation
@@ -1491,42 +1584,17 @@ class GuiAgent:
                         previous_action_type = None
                         continue
 
-                    if s2_mode == S2Mode.TAKEOVER and self._s2_llm is not None:
-                        remaining_steps = max(self.max_steps - step_index, 0)
-                        takeover_remaining = min(self._s2_max_takeover_steps, remaining_steps)
-                        if takeover_remaining > 0:
-                            last_s2_takeover_reason = stagnation_reason
-                            last_s2_stagnation_streak = stagnation_streak
-                            s2_usage.takeover_used = True
-                            s2_usage.triggers.append(
-                                S2TriggerEvent(
-                                    step_index=step_index,
-                                    trigger=S2Trigger.STAGNATION,
-                                    mode=S2Mode.TAKEOVER,
-                                    reason=stagnation_reason,
-                                    actor_before=actor,
-                                    metadata={
-                                        "foreground_app": app_label,
-                                        "stagnation_streak": stagnation_streak,
-                                        "stagnation_limit": self.stagnation_limit,
-                                    },
-                                )
-                            )
-                            await self._log_attempt_event(
-                                run_dir,
-                                "s2_takeover",
-                                step_index=step_index,
-                                reason=stagnation_reason,
-                                foreground_app=app_label,
-                                takeover_remaining=takeover_remaining,
-                            )
-                            history.append(history_with_current_step[-1])
-                            if result.next_observation is not None:
-                                obs = result.next_observation
-                            stagnation_streak = 0
-                            previous_fingerprint = self._build_screen_fingerprint(obs)
-                            previous_action_type = None
-                            continue
+                    if s2_mode == S2Mode.TAKEOVER:
+                        takeover_remaining = self._s2_pending_takeover_steps
+                        last_s2_takeover_reason = self._s2_last_takeover_reason
+                        last_s2_stagnation_streak = self._s2_last_stagnation_streak
+                        history.append(history_with_current_step[-1])
+                        if result.next_observation is not None:
+                            obs = result.next_observation
+                        stagnation_streak = 0
+                        previous_fingerprint = self._build_screen_fingerprint(obs)
+                        previous_action_type = None
+                        continue
 
                     termination_summary = await self._generate_termination_summary(
                         task=task,
@@ -1889,6 +1957,173 @@ class GuiAgent:
                 error=f"{type(exc).__name__}: {exc}",
             )
             return observation
+
+    async def _maybe_invoke_s2(
+        self,
+        *,
+        trigger: S2Trigger,
+        step_index: int,
+        history: list[HistoryTurn],
+        reason: str,
+        observation: Observation,
+        metadata: dict[str, Any] | None = None,
+    ) -> S2Mode:
+        usage = self._s2_usage
+        mode = decide_s2_mode(
+            enabled=self._s2_enabled,
+            trigger=trigger,
+            hints_used=usage.hints_used,
+            max_hints=self._s2_max_hints,
+            hint_enabled=self._s2_hint_enabled,
+            takeover_enabled=self._s2_takeover_enabled,
+            takeover_after_hints=self._s2_takeover_after_hints,
+            takeover_used=usage.takeover_used,
+            allowed_triggers=self._s2_allowed_triggers,
+        )
+        if mode == S2Mode.OFF:
+            return mode
+
+        event_metadata = dict(metadata or {})
+        app_label = observation.foreground_app or event_metadata.get("foreground_app") or "unknown"
+        event_metadata.setdefault("foreground_app", str(app_label))
+        actor_before = self._s2_actor_before or "s1"
+
+        if mode == S2Mode.HINT:
+            last_action_summary = None
+            if history:
+                last_turn = history[-1]
+                last_action_summary = last_turn.state_summary or last_turn.action_summary
+            hint = await self._request_s2_hint(
+                task=self._s2_current_task,
+                step_index=step_index,
+                current_observation=observation,
+                history=history,
+                last_action_summary=last_action_summary,
+                reason=reason,
+            )
+            usage.hints_used += 1
+            event_metadata["hint_available"] = bool(hint)
+            usage.triggers.append(
+                S2TriggerEvent(
+                    step_index=step_index,
+                    trigger=trigger,
+                    mode=S2Mode.HINT,
+                    reason=reason,
+                    actor_before=actor_before,
+                    metadata=event_metadata,
+                )
+            )
+            if hint:
+                self._s2_guidance_notes.append(hint)
+            if self._s2_run_dir is not None:
+                await self._log_attempt_event(
+                    self._s2_run_dir,
+                    "s2_hint",
+                    step_index=step_index,
+                    trigger=trigger.value,
+                    reason=reason,
+                    foreground_app=app_label,
+                    hint_available=bool(hint),
+                )
+            return mode
+
+        if mode == S2Mode.TAKEOVER and self._s2_llm is not None:
+            remaining_steps = max(self.max_steps - step_index, 0)
+            takeover_steps = min(self._s2_max_takeover_steps, remaining_steps)
+            if takeover_steps <= 0:
+                return S2Mode.OFF
+            self._s2_pending_takeover_steps = takeover_steps
+            self._s2_last_takeover_reason = reason
+            self._s2_last_stagnation_streak = int(event_metadata.get("stagnation_streak") or 0)
+            usage.takeover_used = True
+            usage.triggers.append(
+                S2TriggerEvent(
+                    step_index=step_index,
+                    trigger=trigger,
+                    mode=S2Mode.TAKEOVER,
+                    reason=reason,
+                    actor_before=actor_before,
+                    metadata=event_metadata,
+                )
+            )
+            if self._s2_run_dir is not None:
+                await self._log_attempt_event(
+                    self._s2_run_dir,
+                    "s2_takeover",
+                    step_index=step_index,
+                    trigger=trigger.value,
+                    reason=reason,
+                    foreground_app=app_label,
+                    takeover_remaining=takeover_steps,
+                )
+            return mode
+
+        return S2Mode.OFF
+
+    @staticmethod
+    def _task_likely_requires_answer(task: str) -> bool:
+        lowered = str(task or "").casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "告诉我",
+                "看看",
+                "查",
+                "查询",
+                "是什么",
+                "是谁",
+                "哪个",
+                "哪家",
+                "多少",
+                "第几",
+                "热搜",
+                "榜",
+                "排名",
+                "price",
+                "status",
+                "what",
+                "which",
+                "who",
+            )
+        )
+
+    def _done_missing_evidence(
+        self,
+        *,
+        task: str,
+        result: StepResult,
+        current_observation: Observation,
+    ) -> bool:
+        if not self._task_likely_requires_answer(task):
+            return False
+        request = {
+            "task": task,
+            "task_type": "information_query",
+            "output_mode": "answer_required",
+            "evidence_requirements": {"answer_candidates_required": True},
+            "success_condition": {"required_key": "answer"},
+        }
+        payload = {
+            "success": True,
+            "summary": result.state_summary or result.action_summary,
+            "model_summary": result.state_summary or result.action_summary,
+            "answer_candidates": [],
+        }
+        observation = result.next_observation or current_observation
+        latest_step = {
+            "text": result.state_summary or result.action_summary,
+            "observation": {
+                "foreground_app": observation.foreground_app,
+                "text": result.tool_result,
+                "extra": observation.extra,
+            },
+        }
+        extracted = extract_gui_evidence(
+            request=request,
+            payload=payload,
+            latest_step=latest_step,
+        )
+        return not bool(extracted.get("answer_candidates"))
 
     # ------------------------------------------------------------------
     # Single step

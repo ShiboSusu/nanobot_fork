@@ -54,26 +54,31 @@ def test_stagnation_second_trigger_returns_takeover() -> None:
     assert mode == S2Mode.TAKEOVER
 
 
-def test_non_stagnation_trigger_returns_off_in_v0_policy() -> None:
-    for trigger in [
-        S2Trigger.LOW_CONFIDENCE,
-        S2Trigger.FAKE_DONE,
-        S2Trigger.MISSING_EVIDENCE,
-        S2Trigger.MAX_STEPS_NEAR,
-        S2Trigger.STEP_ERROR,
-    ]:
-        mode = decide_s2_mode(
-            enabled=True,
-            trigger=trigger,
-            hints_used=0,
-            max_hints=1,
-            hint_enabled=True,
-            takeover_enabled=True,
-            takeover_after_hints=1,
-            takeover_used=False,
-        )
+def test_non_stagnation_trigger_requires_allowed_trigger() -> None:
+    denied = decide_s2_mode(
+        enabled=True,
+        trigger=S2Trigger.MAX_STEPS_NEAR,
+        hints_used=0,
+        max_hints=1,
+        hint_enabled=True,
+        takeover_enabled=True,
+        takeover_after_hints=1,
+        takeover_used=False,
+    )
+    allowed = decide_s2_mode(
+        enabled=True,
+        trigger=S2Trigger.MAX_STEPS_NEAR,
+        allowed_triggers=frozenset({S2Trigger.MAX_STEPS_NEAR}),
+        hints_used=0,
+        max_hints=1,
+        hint_enabled=True,
+        takeover_enabled=True,
+        takeover_after_hints=1,
+        takeover_used=False,
+    )
 
-        assert mode == S2Mode.OFF
+    assert denied == S2Mode.OFF
+    assert allowed == S2Mode.HINT
 
 
 def test_takeover_used_disables_repeated_takeover() -> None:

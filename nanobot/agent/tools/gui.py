@@ -2041,6 +2041,11 @@ class GuiSubagentTool(Tool):
             s2_takeover_after_hints=self._gui_config.s2_takeover_after_hints,
             s2_max_takeover_steps=self._gui_config.s2_max_takeover_steps,
             s2_trigger_on_stagnation=self._gui_config.s2_trigger_on_stagnation,
+            s2_trigger_on_max_steps_near=self._gui_config.s2_trigger_on_max_steps_near,
+            s2_trigger_on_done_missing_evidence=self._gui_config.s2_trigger_on_done_missing_evidence,
+            s2_trigger_on_step_error=self._gui_config.s2_trigger_on_step_error,
+            s2_trigger_on_wrong_app=self._gui_config.s2_trigger_on_wrong_app,
+            s2_max_steps_near_margin=self._gui_config.s2_max_steps_near_margin,
             s2_prompt_max_chars=self._gui_config.s2_prompt_max_chars,
         )
 

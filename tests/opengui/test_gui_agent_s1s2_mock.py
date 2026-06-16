@@ -8,9 +8,10 @@ import pytest
 from PIL import Image
 
 from opengui.action import Action
-from opengui.agent import GuiAgent, StepResult
+from opengui.agent import GuiAgent, StepResult, _StepExecutionError
 from opengui.interfaces import LLMResponse
 from opengui.observation import Observation
+from opengui.s2_policy import S2Mode, S2Trigger, S2Usage
 from opengui.trajectory.recorder import TrajectoryRecorder
 
 
@@ -220,6 +221,241 @@ async def test_s2_hint_uses_small_token_budget_and_extracts_json_after_thinking(
     assert "diagnosis: stuck" in hint
     assert "next_subgoal: open search" in hint
     assert "avoid: repeat tap" in hint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        S2Trigger.MAX_STEPS_NEAR,
+        S2Trigger.MISSING_EVIDENCE,
+        S2Trigger.STEP_ERROR,
+    ],
+)
+async def test_maybe_invoke_s2_records_allowed_pre_failure_triggers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    trigger: S2Trigger,
+) -> None:
+    async def fake_hint(self: GuiAgent, **kwargs: Any) -> str:
+        del self, kwargs
+        return "diagnosis: pre-failure\nnext_subgoal: recover before failing"
+
+    monkeypatch.setattr(GuiAgent, "_request_s2_hint", fake_hint)
+    agent = GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        max_steps=4,
+        stagnation_limit=1,
+        s2_llm=_NoopLLM(),
+        s2_enabled=True,
+        s2_hint_enabled=True,
+        s2_takeover_enabled=False,
+        s2_trigger_on_stagnation=False,
+        s2_trigger_on_max_steps_near=trigger == S2Trigger.MAX_STEPS_NEAR,
+        s2_trigger_on_done_missing_evidence=trigger == S2Trigger.MISSING_EVIDENCE,
+        s2_trigger_on_step_error=trigger == S2Trigger.STEP_ERROR,
+    )
+    screenshot = tmp_path / "screen.png"
+    _write_png(screenshot)
+    observation = Observation(
+        screenshot_path=str(screenshot),
+        screen_width=64,
+        screen_height=64,
+        foreground_app="DryRun",
+        platform="dry-run",
+    )
+    agent._s2_usage = S2Usage(enabled=True)
+    agent._s2_guidance_notes = []
+
+    mode = await agent._maybe_invoke_s2(
+        trigger=trigger,
+        step_index=2,
+        history=[],
+        reason=f"{trigger.value} rescue",
+        observation=observation,
+    )
+
+    assert mode == S2Mode.HINT
+    assert agent._s2_usage.hints_used == 1
+    assert agent._s2_usage.triggers[0].trigger == trigger
+    assert agent._s2_usage.triggers[0].mode == S2Mode.HINT
+    assert agent._s2_guidance_notes == [
+        "diagnosis: pre-failure\nnext_subgoal: recover before failing"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_max_steps_near_hook_invokes_s2_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_hint(self: GuiAgent, **kwargs: Any) -> str:
+        del self, kwargs
+        return "diagnosis: near max steps\nnext_subgoal: finish carefully"
+
+    async def fake_run_step(
+        self: GuiAgent,
+        messages: list[dict[str, Any]],
+        prompt_snapshot: dict[str, Any] | None,
+        step_index: int,
+        total_steps: int,
+        current_observation: Observation,
+        *,
+        llm_override: Any = None,
+        actor: str = "s1",
+    ) -> StepResult:
+        del self, messages, prompt_snapshot, total_steps, llm_override, actor
+        return _step_result(
+            step_index=step_index,
+            current_observation=current_observation,
+            done=True,
+        )
+
+    monkeypatch.setattr(GuiAgent, "_request_s2_hint", fake_hint)
+    monkeypatch.setattr(GuiAgent, "_run_step", fake_run_step)
+    agent = GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        max_steps=2,
+        s2_llm=_NoopLLM(),
+        s2_enabled=True,
+        s2_takeover_enabled=False,
+        s2_trigger_on_stagnation=False,
+        s2_trigger_on_max_steps_near=True,
+        s2_trigger_on_done_missing_evidence=False,
+        s2_trigger_on_step_error=False,
+        s2_max_steps_near_margin=2,
+    )
+
+    result = await agent.run("open settings", max_retries=1)
+
+    assert result.success is True
+    assert result.s2_usage["triggers"][0]["trigger"] == "max_steps_near"
+    assert result.s2_usage["triggers"][0]["mode"] == "hint"
+
+
+@pytest.mark.asyncio
+async def test_done_missing_evidence_hook_continues_with_s2_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_hint(self: GuiAgent, **kwargs: Any) -> str:
+        del self, kwargs
+        return "diagnosis: missing answer\nnext_subgoal: read visible answer"
+
+    calls = {"count": 0}
+
+    async def fake_run_step(
+        self: GuiAgent,
+        messages: list[dict[str, Any]],
+        prompt_snapshot: dict[str, Any] | None,
+        step_index: int,
+        total_steps: int,
+        current_observation: Observation,
+        *,
+        llm_override: Any = None,
+        actor: str = "s1",
+    ) -> StepResult:
+        del self, messages, prompt_snapshot, total_steps, llm_override, actor
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _step_result(
+                step_index=step_index,
+                current_observation=current_observation,
+                done=True,
+            )
+        result = _step_result(
+            step_index=step_index,
+            current_observation=current_observation,
+            done=True,
+        )
+        return replace(result, state_summary="答案是测试事件A", action_summary="答案是测试事件A")
+
+    monkeypatch.setattr(GuiAgent, "_request_s2_hint", fake_hint)
+    monkeypatch.setattr(GuiAgent, "_run_step", fake_run_step)
+    agent = GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        s2_llm=_NoopLLM(),
+        s2_enabled=True,
+        s2_takeover_enabled=False,
+        s2_trigger_on_stagnation=False,
+        s2_trigger_on_max_steps_near=False,
+        s2_trigger_on_done_missing_evidence=True,
+        s2_trigger_on_step_error=False,
+    )
+
+    result = await agent.run("告诉我屏幕上的答案是什么", max_retries=1)
+
+    assert result.success is True
+    assert calls["count"] == 2
+    assert result.s2_usage["triggers"][0]["trigger"] == "missing_evidence"
+    assert result.s2_usage["triggers"][0]["mode"] == "hint"
+
+
+@pytest.mark.asyncio
+async def test_step_error_hook_continues_with_s2_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fake_hint(self: GuiAgent, **kwargs: Any) -> str:
+        del self, kwargs
+        return "diagnosis: step error\nnext_subgoal: retry safely"
+
+    calls = {"count": 0}
+
+    async def fake_run_step(
+        self: GuiAgent,
+        messages: list[dict[str, Any]],
+        prompt_snapshot: dict[str, Any] | None,
+        step_index: int,
+        total_steps: int,
+        current_observation: Observation,
+        *,
+        llm_override: Any = None,
+        actor: str = "s1",
+    ) -> StepResult:
+        del self, messages, prompt_snapshot, total_steps, llm_override, actor
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise _StepExecutionError("profile parse failed")
+        return _step_result(
+            step_index=step_index,
+            current_observation=current_observation,
+            done=True,
+        )
+
+    monkeypatch.setattr(GuiAgent, "_request_s2_hint", fake_hint)
+    monkeypatch.setattr(GuiAgent, "_run_step", fake_run_step)
+    agent = GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        max_steps=3,
+        s2_llm=_NoopLLM(),
+        s2_enabled=True,
+        s2_takeover_enabled=False,
+        s2_trigger_on_stagnation=False,
+        s2_trigger_on_max_steps_near=False,
+        s2_trigger_on_done_missing_evidence=False,
+        s2_trigger_on_step_error=True,
+    )
+
+    result = await agent.run("recover from parser error", max_retries=1)
+
+    assert result.success is True
+    assert calls["count"] == 2
+    assert result.s2_usage["triggers"][0]["trigger"] == "step_error"
+    assert result.s2_usage["triggers"][0]["mode"] == "hint"
 
 
 @pytest.mark.asyncio

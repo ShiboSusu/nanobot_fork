@@ -175,7 +175,7 @@ class CliConfig:
     hdc: HdcConfig = field(default_factory=HdcConfig)
     mobileworld: MobileWorldConfig = field(default_factory=MobileWorldConfig)
     max_steps: int = 15
-    stagnation_limit: int = 0
+    stagnation_limit: int = 2
     image_scale_ratio: float = 0.5
     memory_dir: Path | None = None
     skills_dir: Path | None = None
@@ -456,7 +456,7 @@ def load_config(path: Path | None = None) -> CliConfig:
         hdc=hdc,
         mobileworld=mobileworld,
         max_steps=_coerce_positive_int(raw.get("max_steps"), default=15),
-        stagnation_limit=_coerce_non_negative_int(raw.get("stagnation_limit"), default=0),
+        stagnation_limit=_coerce_non_negative_int(raw.get("stagnation_limit"), default=2),
         image_scale_ratio=_coerce_image_scale_ratio(raw.get("image_scale_ratio"), default=0.5),
         memory_dir=_optional_path(raw.get("memory_dir")),
         skills_dir=_optional_path(raw.get("skills_dir")),

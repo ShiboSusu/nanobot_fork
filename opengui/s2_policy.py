@@ -18,6 +18,7 @@ class S2Trigger(str, Enum):
     FAKE_DONE = "fake_done"
     MISSING_EVIDENCE = "missing_evidence"
     MAX_STEPS_NEAR = "max_steps_near"
+    WRONG_APP = "wrong_app"
 
 
 @dataclass
@@ -74,12 +75,13 @@ def decide_s2_mode(
     takeover_enabled: bool,
     takeover_after_hints: int,
     takeover_used: bool = False,
+    allowed_triggers: frozenset[S2Trigger] = frozenset({S2Trigger.STAGNATION}),
 ) -> S2Mode:
-    """Decide the minimal V0 S2 mode for stagnation recovery."""
+    """Decide the minimal V0 S2 mode for configured recovery triggers."""
     if not enabled:
         return S2Mode.OFF
 
-    if trigger != S2Trigger.STAGNATION:
+    if trigger not in allowed_triggers:
         return S2Mode.OFF
 
     if hint_enabled and max_hints > 0 and hints_used < max_hints:
