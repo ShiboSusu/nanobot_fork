@@ -39,7 +39,7 @@ def test_blackboard_meta_becomes_answer_candidate() -> None:
     assert out["answer_candidates"][0]["text"] == "测试事件A"
 
 
-def test_model_summary_extracts_weibo_hot_rank_3() -> None:
+def test_model_summary_alone_does_not_extract_answer_candidate() -> None:
     request = normalize_gui_task_request({"task": "打开微博,看看今天热搜榜的第三名是什么"})
     payload = {
         "success": True,
@@ -48,9 +48,9 @@ def test_model_summary_extracts_weibo_hot_rank_3() -> None:
 
     out = apply_evidence_contract(request=request, payload=payload)
 
-    assert out["success"] is True
-    assert out["answer_candidates"]
-    assert out["answer_candidates"][0]["text"] == "测试事件A"
+    assert out["success"] is False
+    assert out["error"] == "missing_required_answer_evidence"
+    assert out["answer_candidates"] == []
 
 
 def test_information_query_without_candidate_is_downgraded() -> None:
@@ -79,4 +79,3 @@ def test_operation_task_does_not_require_answer_candidates() -> None:
     out = apply_evidence_contract(request=request, payload=payload)
 
     assert out["success"] is True
-

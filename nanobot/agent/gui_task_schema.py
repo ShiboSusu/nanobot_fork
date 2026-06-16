@@ -241,12 +241,6 @@ def requires_gui_task_routing(task: str) -> bool:
 
 
 def _inferred_extract_condition(task: str) -> GuiSuccessCondition:
-    if "热搜" in task and ("第三" in task or "第3" in task):
-        return GuiSuccessCondition(
-            type=GuiSuccessConditionType.EXTRACT_FIELD,
-            required_key="hot_rank_3",
-            required_fields=("rank", "title"),
-        )
     return GuiSuccessCondition(
         type=GuiSuccessConditionType.EXTRACT_FIELD,
         required_key="answer",

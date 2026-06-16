@@ -20,8 +20,8 @@ def test_normalize_weibo_hot_rank_information_query() -> None:
 
     assert request.task_type == GuiTaskType.INFORMATION_QUERY
     assert request.output_mode == GuiOutputMode.ANSWER_REQUIRED
-    assert request.success_condition.required_key == "hot_rank_3"
-    assert "rank" in request.success_condition.required_fields
+    assert request.success_condition.required_key == "answer"
+    assert request.success_condition.required_fields == ()
     assert request.evidence_requirements.answer_candidates_required is True
 
 

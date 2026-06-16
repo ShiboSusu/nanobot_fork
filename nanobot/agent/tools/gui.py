@@ -2042,6 +2042,7 @@ class GuiSubagentTool(Tool):
             s2_trigger_on_wrong_app=self._gui_config.s2_trigger_on_wrong_app,
             s2_max_steps_near_margin=self._gui_config.s2_max_steps_near_margin,
             s2_prompt_max_chars=self._gui_config.s2_prompt_max_chars,
+            evidence_request=task_request,
         )
 
         run_kwargs: dict[str, Any] = {}

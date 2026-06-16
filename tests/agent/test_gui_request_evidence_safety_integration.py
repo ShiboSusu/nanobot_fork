@@ -43,7 +43,7 @@ def test_single_information_query_without_evidence_is_partial() -> None:
     assert out["error"] == "missing_required_answer_evidence"
 
 
-def test_single_information_query_extracts_candidate_from_model_summary() -> None:
+def test_single_information_query_model_summary_without_candidate_is_partial() -> None:
     request = normalize_gui_task_request({"task": "打开微博,看看今天热搜榜的第三名是什么"})
     payload = {
         "success": True,
@@ -52,8 +52,9 @@ def test_single_information_query_extracts_candidate_from_model_summary() -> Non
 
     out = apply_evidence_contract(request=request, payload=payload)
 
-    assert out["success"] is True
-    assert out["answer_candidates"][0]["text"] == "测试事件A"
+    assert out["success"] is False
+    assert out["error"] == "missing_required_answer_evidence"
+    assert out["answer_candidates"] == []
 
 
 @pytest.mark.asyncio
@@ -101,4 +102,3 @@ async def test_multi_app_stops_before_external_send_with_blackboard() -> None:
     assert payload["error"] == "needs_human_confirm"
     assert payload["blackboard"]["hot_rank_3"] == "测试事件A"
     assert payload["pending_action"]["known_values"]["hot_rank_3"] == "测试事件A"
-

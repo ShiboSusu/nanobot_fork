@@ -1203,6 +1203,8 @@ class AgentRunner:
         result: Any,
     ) -> Any:
         result = ensure_nonempty_tool_result(tool_name, result)
+        if tool_name == "gui_task":
+            result = self._sanitize_gui_task_result_for_model(result)
         try:
             content = maybe_persist_tool_result(
                 spec.workspace,
@@ -1222,6 +1224,24 @@ class AgentRunner:
         if isinstance(content, str) and len(content) > spec.max_tool_result_chars:
             return truncate_text(content, spec.max_tool_result_chars)
         return content
+
+    @staticmethod
+    def _sanitize_gui_task_result_for_model(result: Any) -> Any:
+        data = AgentRunner._parse_json_tool_result(result)
+        if data is None:
+            return result
+        allowed = (
+            "success",
+            "summary",
+            "model_summary",
+            "answer_candidates",
+            "evidence",
+            "error",
+        )
+        return json.dumps(
+            {key: data.get(key) for key in allowed if key in data},
+            ensure_ascii=False,
+        )
 
     @staticmethod
     def _drop_orphan_tool_results(

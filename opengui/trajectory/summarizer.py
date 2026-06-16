@@ -67,6 +67,23 @@ def is_state_note(text: str) -> bool:
     return True
 
 
+def strip_completed_status_prefix(text: str | None) -> str | None:
+    """Remove literal state-note labels before text is surfaced as model_summary."""
+    if text is None:
+        return None
+    raw = str(text).strip()
+    if not raw:
+        return raw
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return raw
+    if lines[0].casefold() != "status: completed":
+        return raw
+    done_line = next((line for line in lines[1:] if line.startswith("Done:")), "")
+    done = done_line.split(":", 1)[1].strip() if ":" in done_line else ""
+    return done or "\n".join(lines[1:]).strip()
+
+
 def _normalize_note_value(value: Any, *, default: str) -> str:
     if value is None:
         return default

@@ -81,6 +81,7 @@ from opengui.tool_schemas import (
     minimal_tool_schema,
 )
 from opengui.trajectory.recorder import ExecutionPhase, TrajectoryRecorder
+from opengui.trajectory.summarizer import strip_completed_status_prefix
 from opengui.trajectory.summarizer import build_state_note, is_state_note
 
 logger = logging.getLogger(__name__)
@@ -484,6 +485,7 @@ class GuiAgent:
         s2_trigger_on_wrong_app: bool = True,
         s2_max_steps_near_margin: int = 3,
         s2_prompt_max_chars: int = 6000,
+        evidence_request: Any = None,
     ) -> None:
         self.llm = llm
         self.backend = backend
@@ -499,6 +501,7 @@ class GuiAgent:
         self._trajectory_recorder = trajectory_recorder
         self._memory_retriever = memory_retriever
         self._policy_context = policy_context
+        self._evidence_request = evidence_request
         self._skill_library = skill_library
         self._skill_executor = skill_executor
         self._memory_top_k = memory_top_k
@@ -865,6 +868,12 @@ class GuiAgent:
                 error=last_error or result.error,
             )
 
+        result = dataclasses.replace(
+            result,
+            model_summary=strip_completed_status_prefix(result.model_summary),
+        )
+        result = await self._attach_produced_evidence(result)
+
         # 6. Finish trajectory
         self._trajectory_recorder.finish(
             success=result.success,
@@ -891,6 +900,157 @@ class GuiAgent:
         await self._skill_maintenance(skill_match_for_maintenance, skill_exec_success)
 
         return result
+
+    async def _attach_produced_evidence(self, result: AgentResult) -> AgentResult:
+        """Populate AgentResult evidence from the latest trace step using declared keys."""
+        if result.answer_candidates or self._evidence_request is None:
+            return result
+        allowed_keys = self._declared_evidence_keys(self._evidence_request)
+        if not allowed_keys:
+            return result
+        latest_step = self._load_latest_trace_step(result.trace_path)
+        if latest_step is None:
+            return result
+        produced = await self._produce_answer_candidates(
+            request=self._evidence_request,
+            latest_step=latest_step,
+            allowed_keys=allowed_keys,
+        )
+        candidates = produced.get("answer_candidates") if isinstance(produced, dict) else None
+        if not candidates:
+            return result
+        extracted = extract_gui_evidence(
+            request=self._evidence_request,
+            payload={"answer_candidates": candidates},
+            latest_step=latest_step,
+        )
+        evidence = extracted.get("evidence") if isinstance(extracted, dict) else {}
+        if isinstance(evidence, dict):
+            evidence = {**evidence, "producer": "llm", "allowed_keys": allowed_keys}
+        return dataclasses.replace(
+            result,
+            answer_candidates=list(candidates),
+            evidence=evidence if isinstance(evidence, dict) else {},
+        )
+
+    async def _produce_answer_candidates(
+        self,
+        *,
+        request: Any,
+        latest_step: dict[str, Any],
+        allowed_keys: list[str],
+    ) -> dict[str, Any]:
+        system_prompt = (
+            "Extract structured GUI task outputs from the latest step only. "
+            "If a value is not explicitly present, omit the key. Do not guess. "
+            "Return JSON object using only these keys: "
+            f"{', '.join(allowed_keys)}."
+        )
+        user_payload = {
+            "task": self._evidence_request_task(request),
+            "allowed_keys": allowed_keys,
+            "latest_step": latest_step,
+        }
+        try:
+            response = await self.llm.chat(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, default=str)},
+                ],
+                max_tokens=512,
+            )
+        except Exception:
+            logger.debug("GUI evidence producer failed", exc_info=True)
+            return {"answer_candidates": []}
+        raw = self._parse_json_object(response.content)
+        if not isinstance(raw, dict):
+            return {"answer_candidates": []}
+        candidates: list[dict[str, Any]] = []
+        for key in allowed_keys:
+            value = raw.get(key)
+            if value is None:
+                continue
+            text = self._candidate_text(value)
+            if not text:
+                continue
+            candidates.append(
+                {
+                    "key": key,
+                    "text": text,
+                    "type": "answer",
+                    "confidence": 1.0,
+                    "source": "llm_evidence_producer",
+                    "evidence_refs": ["latest_step"],
+                }
+            )
+        return {"answer_candidates": candidates}
+
+    @staticmethod
+    def _declared_evidence_keys(request: Any) -> list[str]:
+        success_condition = getattr(request, "success_condition", None)
+        required_key = getattr(success_condition, "required_key", None)
+        key = str(required_key or "").strip()
+        if key:
+            return [key]
+        output_mode = getattr(getattr(request, "output_mode", None), "value", getattr(request, "output_mode", None))
+        task_type = getattr(getattr(request, "task_type", None), "value", getattr(request, "task_type", None))
+        if output_mode == "answer_required" or task_type in {"information_query", "mixed_query_and_action"}:
+            return ["answer"]
+        return []
+
+    @staticmethod
+    def _evidence_request_task(request: Any) -> str:
+        return str(getattr(request, "task", "") or "")
+
+    @staticmethod
+    def _load_latest_trace_step(trace_path: str | None) -> dict[str, Any] | None:
+        if not trace_path:
+            return None
+        path = Path(trace_path)
+        if path.is_dir():
+            path = path / "trace.jsonl"
+        if not path.exists():
+            return None
+        latest: dict[str, Any] | None = None
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if isinstance(event, dict) and event.get("event") == "step":
+                    latest = event
+        except Exception:
+            logger.debug("Failed to read latest GUI trace step from %s", path, exc_info=True)
+            return None
+        return latest
+
+    @staticmethod
+    def _parse_json_object(text: str) -> dict[str, Any] | None:
+        raw = (text or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE | re.DOTALL).strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if not match:
+                return None
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _candidate_text(value: Any) -> str:
+        if isinstance(value, dict):
+            for key in ("text", "answer", "value", "title"):
+                if value.get(key) is not None:
+                    return str(value[key]).strip()
+            return ""
+        if isinstance(value, list):
+            return ", ".join(str(item).strip() for item in value if str(item).strip())
+        return str(value).strip()
 
     # ------------------------------------------------------------------
     # Single attempt
@@ -1372,7 +1532,7 @@ class GuiAgent:
                 screenshot_path=(
                     str(result.next_observation.screenshot_path)
                     if result.next_observation and result.next_observation.screenshot_path
-                    else obs.screenshot_path
+                    else str(obs.screenshot_path) if obs.screenshot_path is not None else None
                 ),
                 foreground_app=(
                     result.next_observation.foreground_app
@@ -4018,7 +4178,11 @@ class GuiAgent:
         if observation is None:
             return None
         return {
-            "screenshot_path": observation.screenshot_path,
+            "screenshot_path": (
+                str(observation.screenshot_path)
+                if observation.screenshot_path is not None
+                else None
+            ),
             "screen_width": observation.screen_width,
             "screen_height": observation.screen_height,
             "foreground_app": observation.foreground_app,

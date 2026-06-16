@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 
@@ -34,8 +33,8 @@ def extract_gui_evidence(
             "sources": sources,
         },
         "uncertainty": {
-            "level": "low" if candidates or not _requires_answer_candidates(request) else "high",
-            "reasons": [] if candidates or not _requires_answer_candidates(request) else ["no_answer_candidate_extracted"],
+            "level": "low" if candidates or not _is_answer_required(request) else "high",
+            "reasons": [] if candidates or not _is_answer_required(request) else ["no_answer_candidate_extracted"],
         },
     }
 
@@ -62,7 +61,7 @@ def apply_evidence_contract(
     if not out.get("uncertainty"):
         out["uncertainty"] = extracted["uncertainty"]
 
-    if _requires_answer_candidates(request) and not out["answer_candidates"] and out.get("success") is True:
+    if _is_answer_required(request) and not out["answer_candidates"] and out.get("success") is True:
         out["success"] = False
         out["status"] = "partial"
         out["error"] = "missing_required_answer_evidence"
@@ -150,32 +149,17 @@ def _extract_answer_candidates_from_text(
         search_items.append((f"visible_text[{index}]", text))
 
     required_key = _required_key(request)
-    for source, text in search_items:
-        if required_key == "hot_rank_3" or _mentions_hot_rank_3(_request_task(request)):
-            title = _extract_hot_rank_3(text)
-            if title:
-                return [
-                    {
-                        "key": "hot_rank_3",
-                        "text": title,
-                        "type": "ranking_item",
-                        "confidence": 0.78,
-                        "fields": {"rank": 3, "title": title},
-                        "source": source,
-                        "evidence_refs": [source],
-                    }
-                ], [source]
-
-    if required_key and required_key != "hot_rank_3":
+    if required_key:
+        minimum_confidence = _minimum_confidence(request)
         for source, text in search_items:
-            answer = _extract_generic_answer(text)
+            answer = _extract_generic_answer(text, minimum_confidence=minimum_confidence)
             if answer:
                 return [
                     {
                         "key": required_key,
                         "text": answer,
                         "type": "answer",
-                        "confidence": 0.6,
+                        "confidence": 0.5,
                         "source": source,
                         "evidence_refs": [source],
                     }
@@ -184,32 +168,16 @@ def _extract_answer_candidates_from_text(
     return [], []
 
 
-def _extract_hot_rank_3(text: str) -> str | None:
-    patterns = (
-        r"(?:微博)?热搜(?:榜)?第三名(?:是|为|:|：)?\s*(?P<title>[^\n。；;，,]+)",
-        r"热搜(?:榜)?第\s*3\s*名(?:是|为|:|：)?\s*(?P<title>[^\n。；;，,]+)",
-        r"第\s*3\s*名(?:是|为|:|：)?\s*(?P<title>[^\n。；;，,]+)",
-        r"(?:^|\n)\s*3[.、]\s*(?P<title>[^\n。；;，,]+)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        title = _clean_answer_text(match.group("title"))
-        if title:
-            return title
+def _extract_generic_answer(text: str, *, minimum_confidence: float) -> str | None:
+    del text
+    fallback_confidence = 0.5
+    if fallback_confidence < minimum_confidence:
+        return None
     return None
 
 
-def _extract_generic_answer(text: str) -> str | None:
-    match = re.search(r"(?:是|为|:|：)\s*(?P<answer>[^\n。；;，,]+)", text)
-    if not match:
-        return None
-    return _clean_answer_text(match.group("answer"))
-
-
 def _clean_answer_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip(" \t\r\n\"'“”‘’。；;，,")
+    return " ".join(text.split()).strip(" \t\r\n\"'“”‘’。；;，,")
 
 
 def _visible_text_from_latest_step(latest_step: dict[str, Any] | None) -> list[str]:
@@ -222,7 +190,27 @@ def _visible_text_from_latest_step(latest_step: dict[str, Any] | None) -> list[s
     if isinstance(observation, dict):
         for key in ("visible_text", "screen_text", "text"):
             values.extend(_coerce_text_list(observation.get(key)))
+        values.extend(_recursive_text_values(observation.get("extra")))
     return values
+
+
+def _recursive_text_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        values: list[str] = []
+        for item in value.values():
+            values.extend(_recursive_text_values(item))
+        return values
+    if isinstance(value, list | tuple):
+        values: list[str] = []
+        for item in value:
+            values.extend(_recursive_text_values(item))
+        return values
+    return []
 
 
 def _coerce_text_list(value: Any) -> list[str]:
@@ -274,13 +262,13 @@ def _required_key(request: Any) -> str | None:
     return text or None
 
 
-def _request_task(request: Any) -> str:
-    value = _get_value(request, "task")
-    return "" if value is None else str(value)
-
-
-def _mentions_hot_rank_3(text: str) -> bool:
-    return "热搜" in text and ("第三" in text or "第3" in text)
+def _minimum_confidence(request: Any) -> float:
+    value = _nested_get(request, "evidence_requirements", "minimum_confidence")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = 0.0
+    return parsed if parsed > 0 else 0.75
 
 
 def _nested_get(value: Any, first: str, second: str) -> Any:
