@@ -85,6 +85,17 @@ Required:
 - do not treat merely opening the target page or app as task completion
 """
 
+GUI_BOUNDED_LIST_COLLECTION_POLICY = """
+For tasks that collect items from a scrollable list, feed, search result page, ticket list, hotel list, shop list, product list, or note/video list:
+- collect only visible and newly revealed items
+- max_scrolls = 3 by default
+- max_items = 10 by default
+- stop early if the requested answer is found
+- stop if two consecutive scrolls reveal no clearly new useful item
+- do not keep scrolling to exhaust an open-ended list
+- when the budget is reached, summarize the collected evidence and state that the result is not exhaustive
+"""
+
 GUI_FINAL_ANSWER_POLICY = """
 When reading gui_task results:
 - Answer the user in natural language.

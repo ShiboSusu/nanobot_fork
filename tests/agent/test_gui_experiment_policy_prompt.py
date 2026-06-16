@@ -81,6 +81,17 @@ def test_information_query_policy_requires_answer_extraction() -> None:
     assert "merely opening the target page or app" in text
 
 
+def test_bounded_list_collection_policy_limits_open_ended_scrolling() -> None:
+    from nanobot.agent import gui_experiment_policy as p
+
+    text = p.GUI_BOUNDED_LIST_COLLECTION_POLICY
+    assert "scrollable list" in text
+    assert "max_scrolls" in text
+    assert "max_items" in text
+    assert "do not keep scrolling to exhaust an open-ended list" in text
+    assert "not exhaustive" in text
+
+
 def test_final_answer_policy_blocks_internal_leaks() -> None:
     from nanobot.agent import gui_experiment_policy as p
 
@@ -186,6 +197,8 @@ async def test_information_query_policy_is_added_to_gui_task_prompt(monkeypatch:
 
     assert "For information_query tasks, do not mark done unless the requested information is explicitly extracted." in seen["task"]
     assert "do not treat merely opening the target page or app as task completion" in seen["task"]
+    assert "For tasks that collect items from a scrollable list" in seen["task"]
+    assert "do not keep scrolling to exhaust an open-ended list" in seen["task"]
 
 
 @pytest.mark.asyncio

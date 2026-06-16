@@ -18,6 +18,7 @@ import numpy as np
 
 from nanobot.agent.gui_adapter import NanobotEmbeddingAdapter, NanobotLLMAdapter
 from nanobot.agent.gui_experiment_policy import (
+    GUI_BOUNDED_LIST_COLLECTION_POLICY,
     GUI_E2E_COMPACT_GUI_TASK_DESCRIPTION,
     GUI_INFORMATION_QUERY_POLICY,
     GUI_NATIVE_APP_POLICY,
@@ -159,10 +160,15 @@ def _task_with_information_query_policy(task: str, task_request: Any | None) -> 
     task_type = getattr(task_request, "task_type", None)
     if task_type not in {GuiTaskType.INFORMATION_QUERY, GuiTaskType.MIXED_QUERY_AND_ACTION}:
         return task
-    policy = GUI_INFORMATION_QUERY_POLICY.strip()
-    if not policy or policy in task:
-        return task
-    return f"{task.rstrip()}\n\n{policy}"
+    policies = [
+        GUI_INFORMATION_QUERY_POLICY.strip(),
+        GUI_BOUNDED_LIST_COLLECTION_POLICY.strip(),
+    ]
+    appended = task.rstrip()
+    for policy in policies:
+        if policy and policy not in appended:
+            appended = f"{appended}\n\n{policy}"
+    return appended
 
 
 def _task_with_native_app_policy(task: str, task_request: Any | None) -> str:
