@@ -56,8 +56,33 @@ _RISK_KEYWORDS: tuple[tuple[GuiSafetyRisk, tuple[str, ...]], ...] = (
     ),
     (
         GuiSafetyRisk.EXTERNAL_SEND,
-        ("发送", "发给", "转发", "发消息", "评论", "发帖", "send", "forward", "post", "comment"),
+        (
+            "发送",
+            "发给",
+            "发给我",
+            "发我",
+            "发出去",
+            "转发",
+            "转发给",
+            "发消息",
+            "评论",
+            "发帖",
+            "分享",
+            "截图",
+            "send",
+            "send me",
+            "forward",
+            "post",
+            "comment",
+            "share",
+            "screenshot",
+        ),
     ),
+)
+SENSITIVE_ACTION_KEYWORDS: tuple[str, ...] = tuple(
+    keyword
+    for _, keywords in _RISK_KEYWORDS
+    for keyword in keywords
 )
 
 _PREPARE_ONLY_PHRASES = (

@@ -87,3 +87,61 @@ def test_fullsystem_tool_filter_removes_development_tools(monkeypatch) -> None:
         "notebook_edit",
         "cron",
     }.isdisjoint(names)
+
+
+def test_fullsystem_tool_filter_keeps_only_gui_for_sensitive_app_context(monkeypatch) -> None:
+    monkeypatch.delenv("NB_GUI_E2E_COMPACT", raising=False)
+    monkeypatch.setenv("NB_FULLSYSTEM_TOOL_FILTER", "1")
+    tools = [
+        _tool("gui_task"),
+        _tool("web_search"),
+        _tool("web_fetch"),
+        _tool("mcp_calendar_search"),
+        _tool("glob"),
+    ]
+
+    filtered = AgentRunner._filter_llm_tools(
+        tools,
+        messages=[{"role": "user", "content": "打开微信，找通话截图分享给我"}],
+    )
+
+    assert _names(filtered or []) == ["gui_task"]
+
+
+def test_fullsystem_tool_filter_keeps_only_gui_for_explicit_app_context(monkeypatch) -> None:
+    monkeypatch.delenv("NB_GUI_E2E_COMPACT", raising=False)
+    monkeypatch.setenv("NB_FULLSYSTEM_TOOL_FILTER", "1")
+    tools = [
+        _tool("gui_task"),
+        _tool("web_search"),
+        _tool("web_fetch"),
+        _tool("mcp_calendar_search"),
+    ]
+
+    filtered = AgentRunner._filter_llm_tools(
+        tools,
+        messages=[{"role": "user", "content": "打开微博看看今天热搜榜第三名是什么"}],
+    )
+
+    assert _names(filtered or []) == ["gui_task"]
+
+
+def test_fullsystem_tool_filter_preserves_web_and_mcp_for_non_app_context(monkeypatch) -> None:
+    monkeypatch.delenv("NB_GUI_E2E_COMPACT", raising=False)
+    monkeypatch.setenv("NB_FULLSYSTEM_TOOL_FILTER", "1")
+    tools = [
+        _tool("gui_task"),
+        _tool("web_search"),
+        _tool("web_fetch"),
+        _tool("mcp_calendar_search"),
+        _tool("glob"),
+    ]
+
+    filtered = AgentRunner._filter_llm_tools(
+        tools,
+        messages=[{"role": "user", "content": "搜索一下今天上海天气并总结"}],
+    )
+    names = set(_names(filtered or []))
+
+    assert {"gui_task", "web_search", "web_fetch", "mcp_calendar_search"} <= names
+    assert "glob" not in names

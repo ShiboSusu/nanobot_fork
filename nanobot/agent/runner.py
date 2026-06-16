@@ -16,6 +16,7 @@ from nanobot.agent.gui_experiment_policy import (
     is_fullsystem_tool_filter_enabled,
     is_gui_e2e_compact_mode,
 )
+from nanobot.agent.gui_task_schema import requires_gui_task_routing
 from nanobot.agent.hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.ask import AskUserInterrupt
 from nanobot.agent.tools.registry import ToolRegistry
@@ -664,9 +665,43 @@ class AgentRunner:
         )
 
     @classmethod
-    def _filter_fullsystem_tools(cls, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    def _latest_user_text(cls, messages: list[dict[str, Any]] | None) -> str:
+        if not messages:
+            return ""
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                        if isinstance(text, str):
+                            parts.append(text)
+                    elif isinstance(item, str):
+                        parts.append(item)
+                return "\n".join(parts)
+        return ""
+
+    @classmethod
+    def _messages_require_gui_task(cls, messages: list[dict[str, Any]] | None) -> bool:
+        text = cls._latest_user_text(messages)
+        return bool(text and requires_gui_task_routing(text))
+
+    @classmethod
+    def _filter_fullsystem_tools(
+        cls,
+        tools: list[dict[str, Any]] | None,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]] | None:
         if not is_fullsystem_tool_filter_enabled() or not tools:
             return tools
+        if cls._messages_require_gui_task(messages):
+            return [tool for tool in tools if cls._tool_name(tool) == "gui_task"]
 
         filtered: list[dict[str, Any]] = []
         for tool in tools:
@@ -682,11 +717,16 @@ class AgentRunner:
         return filtered
 
     @classmethod
-    def _filter_llm_tools(cls, tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    def _filter_llm_tools(
+        cls,
+        tools: list[dict[str, Any]] | None,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]] | None:
         if is_gui_e2e_compact_mode():
             return cls._filter_compact_tools(tools)
         if is_fullsystem_tool_filter_enabled():
-            return cls._filter_fullsystem_tools(tools)
+            return cls._filter_fullsystem_tools(tools, messages=messages)
         return tools
 
     @staticmethod
@@ -732,7 +772,7 @@ class AgentRunner:
         kwargs = self._build_request_kwargs(
             spec,
             messages,
-            tools=self._filter_llm_tools(spec.tools.get_definitions()),
+            tools=self._filter_llm_tools(spec.tools.get_definitions(), messages=messages),
         )
         self._dump_first_llm_payload(kwargs)
         wants_streaming = hook.wants_streaming()

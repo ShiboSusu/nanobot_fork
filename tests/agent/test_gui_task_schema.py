@@ -40,6 +40,19 @@ def test_normalize_mixed_query_and_action() -> None:
     assert request.evidence_requirements.answer_candidates_required is True
 
 
+def test_sensitive_external_share_synonyms_are_detected() -> None:
+    for text in (
+        "找通话截图发我",
+        "把截图分享给我",
+        "share the screenshot with me",
+        "转发给张三",
+    ):
+        request = normalize_gui_task_request({"task": text})
+
+        assert request.task_type == GuiTaskType.SENSITIVE_ACTION
+        assert request.output_mode == GuiOutputMode.NEEDS_HUMAN_CONFIRM
+
+
 def test_explicit_request_payload_is_preserved() -> None:
     request = normalize_gui_task_request(
         {
@@ -56,4 +69,3 @@ def test_explicit_request_payload_is_preserved() -> None:
     )
 
     assert request.success_condition.required_key == "logistics_status"
-

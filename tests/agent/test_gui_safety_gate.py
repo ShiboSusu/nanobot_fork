@@ -22,6 +22,20 @@ def test_external_send_requires_confirm() -> None:
     assert decision.risk == GuiSafetyRisk.EXTERNAL_SEND
 
 
+def test_external_share_synonyms_require_confirm() -> None:
+    for text in (
+        "找通话截图发我",
+        "把截图分享给我",
+        "share the screenshot with me",
+        "转发给张三",
+    ):
+        decision = check_gui_safety(task=text)
+
+        assert decision.allowed is False
+        assert decision.requires_human_confirm is True
+        assert decision.risk == GuiSafetyRisk.EXTERNAL_SEND
+
+
 def test_prepare_before_send_is_allowed_at_subtask_level() -> None:
     decision = check_gui_safety(
         task="在微信准备把 hot_rank_3 发给张三，但停在发送前，不要真的发送",

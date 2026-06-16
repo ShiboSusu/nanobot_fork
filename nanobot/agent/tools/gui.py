@@ -28,7 +28,6 @@ from nanobot.agent.gui_experiment_policy import (
 )
 from nanobot.agent.gui_safety import check_gui_safety
 from nanobot.agent.gui_task_schema import (
-    GuiOutputMode,
     GuiTaskType,
     normalize_gui_task_request,
 )
@@ -830,9 +829,6 @@ class GuiWorkflowRunner:
         task: str,
         task_request: Any | None,
     ) -> str | None:
-        if not self._is_mixed_query_action(task_request):
-            return None
-
         safety_decision = check_gui_safety(
             task=task,
             app_hint=getattr(task_request, "app_hint", None),
@@ -845,7 +841,11 @@ class GuiWorkflowRunner:
         payload = _safety_block_payload(
             task_request=task_request,
             safety_decision=safety_decision,
-            workflow_mode="blocked_mixed_single_fallback",
+            workflow_mode=(
+                "blocked_mixed_single_fallback"
+                if self._is_mixed_query_action(task_request)
+                else "blocked_single_fallback"
+            ),
             summary=(
                 "This GUI task includes a sensitive follow-up action and could not be "
                 "safely decomposed into separate GUI subtasks. Human confirmation is required."
@@ -1659,26 +1659,19 @@ class GuiSubagentTool(Tool):
             raw_request["app_bundle_id"] = app_bundle_id
         task_request = normalize_gui_task_request(raw_request)
         task_text = task_request.task
-        task_type = getattr(task_request, "task_type", None)
-        output_mode = getattr(task_request, "output_mode", None)
-        is_direct_sensitive = (
-            task_type == GuiTaskType.SENSITIVE_ACTION
-            or output_mode == GuiOutputMode.NEEDS_HUMAN_CONFIRM
+        safety_decision = check_gui_safety(
+            task=task_text,
+            app_hint=getattr(task_request, "app_hint", None),
+            known_values={},
+            stage="before_gui_task",
         )
-        if is_direct_sensitive:
-            safety_decision = check_gui_safety(
-                task=task_text,
-                app_hint=getattr(task_request, "app_hint", None),
-                known_values={},
-                stage="before_gui_task",
+        if not safety_decision.allowed:
+            payload = _safety_block_payload(
+                task_request=task_request,
+                safety_decision=safety_decision,
+                workflow_mode="blocked_before_gui_task",
             )
-            if not safety_decision.allowed:
-                payload = _safety_block_payload(
-                    task_request=task_request,
-                    safety_decision=safety_decision,
-                    workflow_mode="blocked_before_gui_task",
-                )
-                return json.dumps(payload, ensure_ascii=False)
+            return json.dumps(payload, ensure_ascii=False)
 
         active_backend = self._select_backend(backend)
         try:

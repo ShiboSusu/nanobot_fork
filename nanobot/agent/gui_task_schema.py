@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from opengui.skills.normalization import annotate_ios_apps, resolve_ios_bundle
+from nanobot.agent.gui_safety import SENSITIVE_ACTION_KEYWORDS
+from opengui.skills.normalization import annotate_ios_apps, find_android_app_in_text, resolve_ios_bundle
 
 
 class GuiTaskType(str, Enum):
@@ -128,26 +129,16 @@ _INFORMATION_QUERY_KEYWORDS = (
     "status",
 )
 
-_SENSITIVE_ACTION_KEYWORDS = (
-    "发送",
-    "发给",
-    "转发",
-    "付款",
-    "支付",
-    "下单",
-    "提交",
-    "删除",
-    "评论",
-    "发帖",
-    "授权",
-    "登录",
-    "验证码",
-    "密码",
-    "隐私",
-    "send",
-    "pay",
-    "submit",
-    "delete",
+_EXPLICIT_GUI_CONTEXT_KEYWORDS = (
+    "打开",
+    "进入",
+    "使用",
+    "手机",
+    "应用",
+    "app",
+    "ios",
+    "android",
+    "安卓",
 )
 
 
@@ -168,6 +159,10 @@ def normalize_gui_task_request(raw: Any) -> GuiTaskRequestV1:
     resolved_bundle = resolve_ios_bundle(app_text)
     if not app_bundle_id and resolved_bundle and resolved_bundle != app_text:
         app_bundle_id = resolved_bundle
+    if not app_bundle_id:
+        android_package = find_android_app_in_text(app_text)
+        if android_package:
+            app_bundle_id = android_package
     if not app_hint and app_bundle_id:
         annotated = annotate_ios_apps([app_bundle_id])
         if annotated:
@@ -201,7 +196,7 @@ def normalize_gui_task_request(raw: Any) -> GuiTaskRequestV1:
 
 def _infer_request(task: str) -> GuiTaskRequestV1:
     has_information = _contains_any(task, _INFORMATION_QUERY_KEYWORDS)
-    has_sensitive = _contains_any(task, _SENSITIVE_ACTION_KEYWORDS)
+    has_sensitive = _contains_any(task, SENSITIVE_ACTION_KEYWORDS)
 
     success_condition = GuiSuccessCondition()
     evidence_requirements = GuiEvidenceRequirements()
@@ -232,6 +227,17 @@ def _infer_request(task: str) -> GuiTaskRequestV1:
             output_mode=GuiOutputMode.NEEDS_HUMAN_CONFIRM,
         )
     return GuiTaskRequestV1(task=task)
+
+
+def requires_gui_task_routing(task: str) -> bool:
+    request = normalize_gui_task_request({"task": task})
+    if request.task_type in {GuiTaskType.SENSITIVE_ACTION, GuiTaskType.MIXED_QUERY_AND_ACTION}:
+        return True
+    if request.output_mode == GuiOutputMode.NEEDS_HUMAN_CONFIRM:
+        return True
+    if (request.app_hint or request.app_bundle_id) and _contains_any(task, _EXPLICIT_GUI_CONTEXT_KEYWORDS):
+        return True
+    return False
 
 
 def _inferred_extract_condition(task: str) -> GuiSuccessCondition:

@@ -88,6 +88,27 @@ async def test_direct_external_send_is_blocked_before_workflow(
 
 
 @pytest.mark.asyncio
+async def test_t26_screenshot_share_is_blocked_before_backend_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tool = _tool(tmp_path)
+
+    def fail_select_backend(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("_select_backend should not be called for screenshot sharing task")
+
+    monkeypatch.setattr(tool, "_select_backend", fail_select_backend)
+
+    payload = json.loads(await tool.execute("找通话截图发我"))
+
+    assert payload["success"] is False
+    assert payload["status"] == "needs_human_confirm"
+    assert payload["error"] == "needs_human_confirm"
+    assert payload["steps_taken"] == 0
+    assert payload["safety"]["risk"] == "external_send"
+
+
+@pytest.mark.asyncio
 async def test_direct_prepare_before_send_is_allowed_to_enter_workflow(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -154,4 +175,3 @@ async def test_mixed_query_action_single_fallback_is_blocked(monkeypatch: pytest
     assert payload["error"] == "needs_human_confirm"
     assert payload["workflow_mode"] == "blocked_mixed_single_fallback"
     assert payload["steps_taken"] == 0
-
