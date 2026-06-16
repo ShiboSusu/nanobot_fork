@@ -567,7 +567,14 @@ async def test_gui_task_workflow_planner_single_falls_back_to_one_agent_run(
     plan_workflow.assert_awaited_once()
     assert plan_workflow.await_args.args == ("Open Settings",)
     assert plan_workflow.await_args.kwargs["router_context"] is None
-    run_task.assert_awaited_once_with(tool._backend, "Open Settings")
+    run_task.assert_awaited_once()
+    assert run_task.await_args.args == (tool._backend, "Open Settings")
+    assert run_task.await_args.kwargs["app_hint"] == "Settings"
+    assert run_task.await_args.kwargs["app_bundle_id"] == "com.apple.Preferences"
+    task_request = run_task.await_args.kwargs["task_request"]
+    assert task_request.task == "Open Settings"
+    assert task_request.app_hint == "Settings"
+    assert task_request.app_bundle_id == "com.apple.Preferences"
     assert result["success"] is True
     assert result["summary"] == "done"
     assert result["workflow_mode"] == "single"
@@ -1052,6 +1059,14 @@ async def test_auto_skill_extraction(tmp_workspace: Path, monkeypatch: pytest.Mo
     extraction_result = json.loads(
         (Path(result["trace_path"]).parent / "extraction_result.json").read_text(encoding="utf-8")
     )
+    trace_lines = [
+        json.loads(line)
+        for line in Path(result["trace_path"]).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    metadata = next(event for event in trace_lines if event.get("type") == "metadata")
+    assert metadata["task"] == "Open calculator"
+    assert "For named app tasks" not in metadata["task"]
     assert extraction_result["status"] == "processed_code"
     assert extraction_result["platform"] == "dry-run"
     assert extraction_result["task"] == "Open calculator"

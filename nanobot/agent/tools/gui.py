@@ -1865,10 +1865,11 @@ class GuiSubagentTool(Tool):
             task_request = normalize_gui_task_request(
                 {"task": task, "app_hint": app_hint, "app_bundle_id": app_bundle_id}
             )
+        canonical_task = str(getattr(task_request, "task", None) or task)
         app_hint = app_hint or getattr(task_request, "app_hint", None)
         app_bundle_id = app_bundle_id or getattr(task_request, "app_bundle_id", None)
-        task = _task_with_information_query_policy(task, task_request)
-        task = _task_with_native_app_policy(task, task_request)
+        agent_task = _task_with_information_query_policy(canonical_task, task_request)
+        agent_task = _task_with_native_app_policy(agent_task, task_request)
         raw_max_retries = kwargs.pop("max_retries", 1)
         try:
             max_retries = max(1, int(raw_max_retries))
@@ -1898,14 +1899,14 @@ class GuiSubagentTool(Tool):
         run_dir = self._make_run_dir()
         recorder = TrajectoryRecorder(
             output_dir=run_dir,
-            task=task,
+            task=canonical_task,
             platform=active_backend.platform,
             event_callback=self._gui_event_callback,
         )
         installed_apps = await self._list_backend_apps(active_backend)
         app_bundle_id = self._resolve_native_app_bundle(
             platform=str(getattr(active_backend, "platform", "") or ""),
-            task=task,
+            task=canonical_task,
             app_hint=app_hint,
             app_bundle_id=app_bundle_id,
             installed_apps=installed_apps,
@@ -1914,7 +1915,7 @@ class GuiSubagentTool(Tool):
             active_backend,
             app_hint=app_hint,
             app_bundle_id=app_bundle_id,
-            task=task,
+            task=canonical_task,
             run_dir=run_dir,
         )
         native_launch_payload = {
@@ -2013,7 +2014,7 @@ class GuiSubagentTool(Tool):
             skill_threshold=self._gui_config.skill_threshold,
             skill_executor=skill_executor,
             skill_reuser=skill_reuser,
-            intervention_handler=self._build_intervention_handler(active_backend, task),
+            intervention_handler=self._build_intervention_handler(active_backend, canonical_task),
             memory_store=memory_store,
             installed_apps=installed_apps,
             agent_profile=self._gui_config.agent_profile,
@@ -2053,7 +2054,7 @@ class GuiSubagentTool(Tool):
             run_kwargs["app_hint"] = app_hint
         if app_bundle_id is not None and "expected_bundle_id" in run_params:
             run_kwargs["expected_bundle_id"] = app_bundle_id
-        result = await agent.run(task=task, **run_kwargs)
+        result = await agent.run(task=agent_task, **run_kwargs)
         summary = result.summary
         error = result.error
         if error and error.startswith("intervention_cancelled:"):
@@ -2118,7 +2119,7 @@ class GuiSubagentTool(Tool):
             trace_path,
             is_success=bool(payload.get("success")),
             platform=active_backend.platform,
-            task=task,
+            task=canonical_task,
         )
 
         return json.dumps(payload, ensure_ascii=False)
