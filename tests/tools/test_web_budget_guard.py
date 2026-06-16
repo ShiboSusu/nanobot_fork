@@ -15,7 +15,7 @@ def _fake_resolve_public(hostname, port, family=0, type_=0):
 
 
 @pytest.mark.asyncio
-async def test_web_search_defaults_to_three_results_even_when_config_is_larger(monkeypatch):
+async def test_web_search_defaults_to_configured_max_results(monkeypatch):
     seen: dict[str, int] = {}
 
     async def fake_search(self, query: str, n: int) -> str:
@@ -27,11 +27,11 @@ async def test_web_search_defaults_to_three_results_even_when_config_is_larger(m
     tool = WebSearchTool(config=WebSearchConfig(provider="duckduckgo", max_results=10))
 
     assert await tool.execute(query="深圳 亲子 周末") == "ok"
-    assert seen["n"] == 3
+    assert seen["n"] == 10
 
 
 @pytest.mark.asyncio
-async def test_web_fetch_returns_structured_summary_under_default_budget(monkeypatch):
+async def test_web_fetch_returns_text_without_structured_summary(monkeypatch):
     body = "".join(f"<p>Relevant family point {idx} with useful detail.</p>" for idx in range(80))
     fake_html = f"<html><head><title>Family Guide</title></head><body>{body}</body></html>"
 
@@ -77,10 +77,9 @@ async def test_web_fetch_returns_structured_summary_under_default_budget(monkeyp
         result = await tool.execute(url="https://example.com/family")
 
     data = json.loads(result)
-    assert data["title"] == "Family Guide"
-    assert data["source"] == "https://example.com/family"
-    assert data["raw_length"] > data["returned_length"]
-    assert data["returned_length"] <= 2000
-    assert data["relevant_points"]
-    assert "Relevant family point 79" not in json.dumps(data, ensure_ascii=False)
-    assert "text" not in data
+    assert data["extractor"] == "readability"
+    assert data["length"] > 2000
+    assert data["text"].startswith("[External content")
+    assert "Relevant family point 79" in data["text"]
+    assert "relevant_points" not in data
+    assert "web_budget" not in data

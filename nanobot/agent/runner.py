@@ -75,33 +75,6 @@ _FULLSYSTEM_CORE_ALLOWLIST = frozenset({
     "confirm",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
-_WEB_SEARCH_RESULT_LIMIT = 3
-_WEB_SEARCH_MAX_CALLS = 3
-_WEB_FETCH_MAX_CALLS = 1
-_WEB_FETCH_MAX_RETURNED_CHARS = 2000
-_WEB_FETCH_TOTAL_RETURNED_CHARS = 4000
-
-
-@dataclass(slots=True)
-class _WebBudgetState:
-    web_search_count: int = 0
-    web_fetch_count: int = 0
-    web_fetch_chars_raw: int = 0
-    web_fetch_chars_returned: int = 0
-    web_budget_exceeded: bool = False
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "web_search_count": self.web_search_count,
-            "web_fetch_count": self.web_fetch_count,
-            "web_fetch_chars_raw": self.web_fetch_chars_raw,
-            "web_fetch_chars_returned": self.web_fetch_chars_returned,
-            "web_budget_exceeded": self.web_budget_exceeded,
-            "max_web_search_count": _WEB_SEARCH_MAX_CALLS,
-            "max_web_fetch_count": _WEB_FETCH_MAX_CALLS,
-            "max_web_fetch_chars_returned": _WEB_FETCH_TOTAL_RETURNED_CHARS,
-        }
-
 
 
 @dataclass(slots=True)
@@ -291,7 +264,6 @@ class AgentRunner:
         stop_reason = "completed"
         tool_events: list[dict[str, str]] = []
         external_lookup_counts: dict[str, int] = {}
-        web_budget_state = _WebBudgetState()
         empty_content_retries = 0
         length_recovery_count = 0
         had_injections = False
@@ -367,7 +339,6 @@ class AgentRunner:
                     spec,
                     tool_calls,
                     external_lookup_counts,
-                    web_budget_state,
                 )
                 tool_events.extend(new_events)
                 context.tool_results = list(results)
@@ -864,10 +835,8 @@ class AgentRunner:
         spec: AgentRunSpec,
         tool_calls: list[ToolCallRequest],
         external_lookup_counts: dict[str, int],
-        web_budget_state: _WebBudgetState | None = None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
         batches = self._partition_tool_batches(spec, tool_calls)
-        web_budget_state = web_budget_state or _WebBudgetState()
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
         for batch in batches:
             if (
@@ -876,7 +845,7 @@ class AgentRunner:
                 and not any(tool_call.name in {"web_fetch", "web_search"} for tool_call in batch)
             ):
                 batch_results = await asyncio.gather(*(
-                    self._run_tool(spec, tool_call, external_lookup_counts, web_budget_state)
+                    self._run_tool(spec, tool_call, external_lookup_counts)
                     for tool_call in batch
                 ))
                 tool_results.extend(batch_results)
@@ -887,7 +856,6 @@ class AgentRunner:
                         spec,
                         tool_call,
                         external_lookup_counts,
-                        web_budget_state,
                     )
                     tool_results.append(result)
                     batch_results.append(result)
@@ -911,9 +879,7 @@ class AgentRunner:
         spec: AgentRunSpec,
         tool_call: ToolCallRequest,
         external_lookup_counts: dict[str, int],
-        web_budget_state: _WebBudgetState | None = None,
     ) -> tuple[Any, dict[str, str], BaseException | None]:
-        web_budget_state = web_budget_state or _WebBudgetState()
         hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
             tool_call.name,
@@ -955,37 +921,6 @@ class AgentRunner:
                 return prep_error, event, RuntimeError(prep_error)
             return prep_error + hint, event, RuntimeError(prep_error) if spec.fail_on_tool_error else None
 
-        if tool_call.name == "web_search" and isinstance(params, dict):
-            blocked = self._web_search_budget_block(tool_call, web_budget_state)
-            if blocked is not None:
-                return blocked, {
-                    "name": tool_call.name,
-                    "status": "error",
-                    "detail": "web_search budget exceeded",
-                }, None
-            params = dict(params)
-            raw_count = params.get("count")
-            try:
-                requested_count = int(raw_count) if raw_count is not None else _WEB_SEARCH_RESULT_LIMIT
-            except (TypeError, ValueError):
-                requested_count = _WEB_SEARCH_RESULT_LIMIT
-            params["count"] = min(max(requested_count, 1), _WEB_SEARCH_RESULT_LIMIT)
-            web_budget_state.web_search_count += 1
-
-        if tool_call.name == "web_fetch":
-            blocked = self._web_fetch_budget_block(tool_call, web_budget_state)
-            if blocked is not None:
-                return blocked, {
-                    "name": tool_call.name,
-                    "status": "error",
-                    "detail": "web_fetch budget exceeded",
-                }, None
-            if isinstance(params, dict):
-                params = dict(params)
-                params["maxChars"] = min(
-                    int(params.get("maxChars") or _WEB_FETCH_MAX_RETURNED_CHARS),
-                    _WEB_FETCH_MAX_RETURNED_CHARS,
-                )
         try:
             if tool is not None:
                 result = await tool.execute(**params)
@@ -1036,9 +971,6 @@ class AgentRunner:
                 return result + hint, event, RuntimeError(result)
             return result + hint, event, None
 
-        if tool_call.name == "web_fetch":
-            result = self._record_web_fetch_result(result, web_budget_state)
-
         detail = "" if result is None else str(result)
         detail = detail.replace("\n", " ").strip()
         if not detail:
@@ -1046,54 +978,6 @@ class AgentRunner:
         elif len(detail) > 120:
             detail = detail[:120] + "..."
         return result, {"name": tool_call.name, "status": "ok", "detail": detail}, None
-
-    @staticmethod
-    def _web_search_budget_block(
-        tool_call: ToolCallRequest,
-        state: _WebBudgetState,
-    ) -> str | None:
-        if state.web_search_count < _WEB_SEARCH_MAX_CALLS:
-            return None
-        state.web_budget_exceeded = True
-        return json.dumps(
-            {
-                "query": tool_call.arguments.get("query") if isinstance(tool_call.arguments, dict) else None,
-                "error": "web_search_budget_exceeded",
-                "reason": "max_web_search_count_exceeded",
-                "web_budget_exceeded": True,
-                "web_answer_from_snippet_only": True,
-                "instruction": (
-                    "Use existing search snippets or answer that evidence is insufficient; "
-                    "do not keep searching."
-                ),
-                "web_budget": state.to_payload(),
-            },
-            ensure_ascii=False,
-        )
-
-    @staticmethod
-    def _web_fetch_budget_block(
-        tool_call: ToolCallRequest,
-        state: _WebBudgetState,
-    ) -> str | None:
-        reason = ""
-        if state.web_fetch_count >= _WEB_FETCH_MAX_CALLS:
-            reason = "max_web_fetch_count_exceeded"
-        elif state.web_fetch_chars_returned >= _WEB_FETCH_TOTAL_RETURNED_CHARS:
-            reason = "max_web_fetch_chars_returned_exceeded"
-        if not reason:
-            return None
-        state.web_budget_exceeded = True
-        return json.dumps(
-            {
-                "url": tool_call.arguments.get("url") if isinstance(tool_call.arguments, dict) else None,
-                "error": "web_fetch_budget_exceeded",
-                "reason": reason,
-                "web_budget_exceeded": True,
-                "web_budget": state.to_payload(),
-            },
-            ensure_ascii=False,
-        )
 
     @staticmethod
     def _parse_json_tool_result(result: Any) -> dict[str, Any] | None:
@@ -1104,48 +988,6 @@ class AgentRunner:
         except json.JSONDecodeError:
             return None
         return parsed if isinstance(parsed, dict) else None
-
-    @staticmethod
-    def _fit_web_fetch_payload(data: dict[str, Any], max_chars: int) -> str:
-        def encode() -> str:
-            return json.dumps(data, ensure_ascii=False)
-
-        while len(encode()) > max_chars and isinstance(data.get("relevant_points"), list) and data["relevant_points"]:
-            data["relevant_points"].pop()
-        if len(encode()) > max_chars and isinstance(data.get("title"), str):
-            data["title"] = data["title"][:120]
-        encoded = encode()
-        data["returned_length"] = len(encoded)
-        encoded = encode()
-        if len(encoded) > max_chars and isinstance(data.get("relevant_points"), list):
-            data["relevant_points"] = []
-            encoded = encode()
-            data["returned_length"] = len(encoded)
-            encoded = encode()
-        return encoded
-
-    def _record_web_fetch_result(self, result: Any, state: _WebBudgetState) -> Any:
-        data = self._parse_json_tool_result(result)
-        if data is None:
-            text = str(result)
-            data = {
-                "source": "",
-                "title": "",
-                "relevant_points": [truncate_text(text, min(len(text), 500))] if text else [],
-                "raw_length": len(text),
-                "returned_length": 0,
-                "web_fetch_summary": True,
-            }
-        raw_chars = int(data.get("raw_length") or data.get("length") or len(str(result)))
-        state.web_fetch_count += 1
-        state.web_fetch_chars_raw += raw_chars
-        data["web_budget_exceeded"] = False
-        data["web_budget"] = state.to_payload()
-        encoded = self._fit_web_fetch_payload(data, _WEB_FETCH_MAX_RETURNED_CHARS)
-        returned_chars = len(encoded)
-        state.web_fetch_chars_returned += returned_chars
-        data["web_budget"] = state.to_payload()
-        return self._fit_web_fetch_payload(data, _WEB_FETCH_MAX_RETURNED_CHARS)
 
     # Markers identifying tool results that represent a workspace / safety boundary rejection.
     _WORKSPACE_BLOCK_MARKERS: tuple[str, ...] = (

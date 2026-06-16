@@ -80,7 +80,7 @@ class _FakeWebSearchTool(Tool):
 
 
 @pytest.mark.asyncio
-async def test_runner_allows_one_web_fetch_per_task_and_blocks_second_fetch():
+async def test_runner_allows_multiple_web_fetches_without_budget_payload():
     provider = MagicMock()
     captured_second_call: list[dict[str, Any]] = []
     call_count = {"n": 0}
@@ -123,20 +123,20 @@ async def test_runner_allows_one_web_fetch_per_task_and_blocks_second_fetch():
     )
 
     assert result.final_content == "done"
-    assert fetch_tool.calls == ["https://example.com/one"]
+    assert fetch_tool.calls == ["https://example.com/one", "https://example.com/two"]
 
     tool_messages = {
         msg["tool_call_id"]: json.loads(msg["content"])
         for msg in captured_second_call
         if msg.get("role") == "tool"
     }
-    assert tool_messages["fetch_1"]["web_budget"]["web_fetch_count"] == 1
-    assert tool_messages["fetch_2"]["web_budget_exceeded"] is True
-    assert tool_messages["fetch_2"]["web_budget"]["web_fetch_count"] == 1
+    assert "web_budget" not in tool_messages["fetch_1"]
+    assert "web_budget" not in tool_messages["fetch_2"]
+    assert "web_budget_exceeded" not in tool_messages["fetch_2"]
 
 
 @pytest.mark.asyncio
-async def test_runner_blocks_web_search_after_total_search_budget():
+async def test_runner_does_not_block_repeated_web_search_or_clamp_count():
     provider = MagicMock()
     captured_final_call: list[dict[str, Any]] = []
     call_count = {"n": 0}
@@ -177,14 +177,14 @@ async def test_runner_blocks_web_search_after_total_search_budget():
     )
 
     assert result.final_content == "done"
-    assert len(search_tool.calls) == 3
-    assert {call["count"] for call in search_tool.calls} == {3}
+    assert len(search_tool.calls) == 4
+    assert {call["count"] for call in search_tool.calls} == {10}
 
     tool_messages = {
-        msg["tool_call_id"]: json.loads(msg["content"])
+        msg["tool_call_id"]: str(msg["content"])
         for msg in captured_final_call
-        if msg.get("role") == "tool" and str(msg.get("content", "")).startswith("{")
+        if msg.get("role") == "tool"
     }
-    assert tool_messages["search_4"]["error"] == "web_search_budget_exceeded"
-    assert tool_messages["search_4"]["web_budget_exceeded"] is True
-    assert tool_messages["search_4"]["web_budget"]["web_search_count"] == 3
+    assert "search_4" in tool_messages
+    assert "web_budget" not in tool_messages["search_4"]
+    assert "web_budget_exceeded" not in tool_messages["search_4"]
