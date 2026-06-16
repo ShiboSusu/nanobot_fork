@@ -10,6 +10,7 @@ import pytest
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import GuiConfig
+from nanobot.providers.base import LLMResponse
 from opengui.agent import AgentResult
 
 
@@ -47,6 +48,28 @@ def test_gui_subagent_tool_uses_s1_model_override(tmp_path: Path) -> None:
 
     assert tool._s1_model == "small-gui"
     assert tool._s2_llm_adapter is None
+
+
+@pytest.mark.asyncio
+async def test_nanobot_llm_adapter_passes_reasoning_effort() -> None:
+    from nanobot.agent.gui_adapter import NanobotLLMAdapter
+
+    provider = MagicMock()
+    captured: dict[str, Any] = {}
+
+    async def chat_with_retry(**kwargs: Any) -> LLMResponse:
+        captured.update(kwargs)
+        return LLMResponse(content="ok")
+
+    provider.chat_with_retry = chat_with_retry
+    adapter = NanobotLLMAdapter(provider, "gui-model")
+
+    await adapter.chat(
+        messages=[{"role": "user", "content": "act"}],
+        reasoning_effort="high",
+    )
+
+    assert captured["reasoning_effort"] == "high"
 
 
 def test_safe_record_event_ignores_recorder_not_started() -> None:
@@ -131,6 +154,36 @@ async def test_gui_subagent_tool_passes_s2_llm_when_enabled(
     assert captured_kwargs["s2_takeover_enabled"] is True
     assert captured_kwargs["s2_max_hints"] == 0
     assert captured_kwargs["s2_max_takeover_steps"] == 5
+
+
+@pytest.mark.asyncio
+async def test_gui_subagent_tool_passes_per_actor_reasoning_effort(
+    tmp_path: Path,
+) -> None:
+    gui_config = GuiConfig(
+        backend="dry-run",
+        s1_reasoning_effort="none",
+        s2_enabled=True,
+        s2_model="slow-gui",
+        s2_reasoning_effort="high",
+    )
+    tool = _tool(gui_config, tmp_path, s2_provider=None)
+    captured_kwargs: dict[str, Any] = {}
+
+    def fake_init(self, *args: Any, **kwargs: Any) -> None:
+        del self, args
+        captured_kwargs.update(kwargs)
+
+    with (
+        patch("nanobot.agent.tools.gui.GuiAgent.__init__", fake_init),
+        patch("opengui.agent.GuiAgent.run", new_callable=AsyncMock) as mock_run,
+    ):
+        mock_run.return_value = AgentResult(success=True, summary="ok")
+        payload = json.loads(await tool._run_task(tool._backend, "open settings"))
+
+    assert payload["success"] is True
+    assert captured_kwargs["s1_reasoning_effort"] == "none"
+    assert captured_kwargs["s2_reasoning_effort"] == "high"
 
 
 def test_agent_loop_passes_independent_s2_provider_to_gui_tool(

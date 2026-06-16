@@ -16,6 +16,9 @@ from opengui.trajectory.recorder import TrajectoryRecorder
 
 
 class _NoopLLM:
+    def __init__(self) -> None:
+        self.reasoning_efforts_seen: list[str | None] = []
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -23,8 +26,10 @@ class _NoopLLM:
         tool_choice: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         del messages, tools, tool_choice, model, max_tokens
+        self.reasoning_efforts_seen.append(reasoning_effort)
         return LLMResponse(content="")
 
 
@@ -32,6 +37,8 @@ class _HintLLM:
     def __init__(self, content: str) -> None:
         self.content = content
         self.max_tokens_seen: list[int | None] = []
+        self.reasoning_efforts_seen: list[str | None] = []
+        self.messages_seen: list[list[dict[str, Any]]] = []
 
     async def chat(
         self,
@@ -40,9 +47,12 @@ class _HintLLM:
         tool_choice: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        del messages, tools, tool_choice, model
+        del tools, tool_choice, model
         self.max_tokens_seen.append(max_tokens)
+        self.reasoning_efforts_seen.append(reasoning_effort)
+        self.messages_seen.append(messages)
         return LLMResponse(content=self.content)
 
 
@@ -151,6 +161,28 @@ def test_build_s2_takeover_context_includes_failure_history(tmp_path: Path) -> N
     assert "/no_think" in text
 
 
+def test_s2_takeover_context_omits_no_think_when_s2_reasoning_enabled(tmp_path: Path) -> None:
+    agent = GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        s2_reasoning_effort="high",
+    )
+
+    text = agent._build_s2_takeover_context(
+        task="recover",
+        trigger_reason="max_steps_near",
+        stagnation_streak=0,
+        stagnation_limit=1,
+        recent_history=[],
+        s2_guidance_notes=[],
+    )
+
+    assert "S2 takeover context" in text
+    assert "/no_think" not in text
+
+
 def test_takeover_context_does_not_include_raw_model_response(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     recent = agent._recent_history_for_takeover(
@@ -221,6 +253,76 @@ async def test_s2_hint_uses_small_token_budget_and_extracts_json_after_thinking(
     assert "diagnosis: stuck" in hint
     assert "next_subgoal: open search" in hint
     assert "avoid: repeat tap" in hint
+
+
+@pytest.mark.asyncio
+async def test_s2_hint_uses_s2_reasoning_effort_and_conditional_no_think(
+    tmp_path: Path,
+) -> None:
+    slow_llm = _HintLLM('{"diagnosis":"ok","next_subgoal":"continue"}')
+    agent = GuiAgent(
+        _NoopLLM(),
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        s2_llm=slow_llm,
+        s2_enabled=True,
+        s2_reasoning_effort="high",
+    )
+    screenshot = tmp_path / "screen.png"
+    _write_png(screenshot)
+
+    await agent._request_s2_hint(
+        task="recover",
+        step_index=1,
+        current_observation=Observation(
+            screenshot_path=str(screenshot),
+            screen_width=64,
+            screen_height=64,
+            foreground_app="DryRun",
+            platform="dry-run",
+        ),
+        history=[],
+        last_action_summary=None,
+        reason="same screen",
+    )
+
+    assert slow_llm.reasoning_efforts_seen == ["high"]
+    system_text = str(slow_llm.messages_seen[0][0]["content"])
+    assert "/no_think" not in system_text
+
+
+@pytest.mark.asyncio
+async def test_s1_step_uses_s1_reasoning_effort(tmp_path: Path) -> None:
+    llm = _NoopLLM()
+    agent = GuiAgent(
+        llm,
+        _StaticBackend(),
+        trajectory_recorder=_recorder(tmp_path),
+        artifacts_root=tmp_path / "runs",
+        s1_reasoning_effort="high",
+    )
+    screenshot = tmp_path / "screen.png"
+    _write_png(screenshot)
+
+    with pytest.raises(_StepExecutionError):
+        await agent._run_step(
+            messages=[{"role": "user", "content": "act"}],
+            prompt_snapshot={},
+            step_index=1,
+            total_steps=1,
+            current_observation=Observation(
+                screenshot_path=str(screenshot),
+                screen_width=64,
+                screen_height=64,
+                foreground_app="DryRun",
+                platform="dry-run",
+            ),
+            actor="s1",
+        )
+
+    assert llm.reasoning_efforts_seen
+    assert set(llm.reasoning_efforts_seen) == {"high"}
 
 
 @pytest.mark.asyncio

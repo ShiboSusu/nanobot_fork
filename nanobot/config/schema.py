@@ -290,6 +290,8 @@ class GuiConfig(Base):
     s2_enabled: bool = False
     s2_provider: str | None = None
     s2_model: str | None = None
+    s1_reasoning_effort: str | None = None
+    s2_reasoning_effort: str | None = None
     s2_hint_enabled: bool = True
     s2_takeover_enabled: bool = True
     s2_max_hints: int = Field(default=1, ge=0, le=5)

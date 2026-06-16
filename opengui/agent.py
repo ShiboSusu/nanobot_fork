@@ -96,7 +96,6 @@ Keep the output concise.
 """
 
 S2_TAKEOVER_ACTION_POLICY = (
-    f"{S2_NO_THINKING_POLICY.strip()}\n\n"
     "Return only the required GUI action output.\n"
     "Do not explain the action.\n"
     "Follow the active GUI action contract exactly."
@@ -471,6 +470,8 @@ class GuiAgent:
         s2_llm: LLMProvider | None = None,
         s2_model: str | None = None,
         s2_enabled: bool = False,
+        s1_reasoning_effort: str | None = None,
+        s2_reasoning_effort: str | None = None,
         s2_hint_enabled: bool = True,
         s2_takeover_enabled: bool = True,
         s2_max_hints: int = 1,
@@ -538,6 +539,8 @@ class GuiAgent:
         self._s2_llm = s2_llm
         self._s2_model = s2_model or ""
         self._s2_enabled = bool(s2_enabled and s2_llm is not None)
+        self._s1_reasoning_effort = s1_reasoning_effort
+        self._s2_reasoning_effort = s2_reasoning_effort
         self._s2_hint_enabled = bool(s2_hint_enabled)
         self._s2_takeover_enabled = bool(s2_takeover_enabled)
         self._s2_max_hints = max(0, int(s2_max_hints))
@@ -2160,11 +2163,19 @@ class GuiAgent:
                 if actor == "s2_takeover"
                 else messages
             )
-            response: LLMResponse = await active_llm.chat(
-                messages=request_messages,
-                tools=self._build_tools_list() if native_tools_enabled else None,
-                tool_choice="required" if native_tools_enabled else None,
+            reasoning_effort = (
+                self._s2_reasoning_effort
+                if actor == "s2_takeover"
+                else self._s1_reasoning_effort
             )
+            chat_kwargs: dict[str, Any] = {
+                "messages": request_messages,
+                "tools": self._build_tools_list() if native_tools_enabled else None,
+                "tool_choice": "required" if native_tools_enabled else None,
+            }
+            if reasoning_effort is not None:
+                chat_kwargs["reasoning_effort"] = reasoning_effort
+            response: LLMResponse = await active_llm.chat(**chat_kwargs)
             for k, v in (response.usage or {}).items():
                 step_usage[k] = step_usage.get(k, 0) + v
             if response.latency_s is not None:
@@ -3217,10 +3228,10 @@ class GuiAgent:
         recent_history: list[dict[str, str]],
         s2_guidance_notes: list[str],
     ) -> str:
-        del self
-        lines: list[str] = [
-            "/no_think",
-            "",
+        lines: list[str] = []
+        if self._s2_uses_no_think():
+            lines.extend([S2_NO_THINKING_POLICY.strip(), ""])
+        lines.extend([
             "S2 takeover context:",
             "You are now taking over from the small GUI executor because the previous GUI steps reached a stagnation condition.",
             "Use the current screen and the recent step history to recover.",
@@ -3235,7 +3246,7 @@ class GuiAgent:
             f"Trigger reason: {trigger_reason}",
             f"Stagnation streak: {stagnation_streak}",
             f"Stagnation limit: {stagnation_limit}",
-        ]
+        ])
 
         if recent_history:
             lines.append("")
@@ -3261,6 +3272,16 @@ class GuiAgent:
         lines.append("- For information queries, do not mark done unless the requested answer is visible or explicitly extracted.")
 
         return "\n".join(lines).strip()
+
+    def _s2_uses_no_think(self) -> bool:
+        effort = self._s2_reasoning_effort
+        return effort is None or str(effort).strip().casefold() == "none"
+
+    def _s2_prefixed_policy(self, policy: str) -> str:
+        policy = policy.strip()
+        if self._s2_uses_no_think():
+            return f"{S2_NO_THINKING_POLICY.strip()}\n\n{policy}".strip()
+        return policy
 
     def _with_s2_takeover_context(
         self,
@@ -3313,28 +3334,28 @@ class GuiAgent:
             f"Stagnation reason: {reason}"
         )
         user_content = self._truncate_text(user_content, self._s2_prompt_max_chars)
+        system_content = self._s2_prefixed_policy(
+            "You are the slow-reasoning recovery model for a GUI agent.\n\n"
+            "You must not directly answer the user.\n"
+            "You must not invent screen content.\n"
+            "You must provide a concise recovery hint for the small GUI executor.\n\n"
+            "Return ONLY one minified JSON object.\n"
+            "Keep the JSON under 120 tokens.\n"
+            'Schema: {"diagnosis":"...","next_subgoal":"...",'
+            '"avoid":["..."],"stop_condition":"..."}'
+        )
+        chat_kwargs: dict[str, Any] = {
+            "messages": [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+            "tools": None,
+            "max_tokens": 180,
+        }
+        if self._s2_reasoning_effort is not None:
+            chat_kwargs["reasoning_effort"] = self._s2_reasoning_effort
         try:
-            response = await self._s2_llm.chat(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            f"{S2_NO_THINKING_POLICY.strip()}\n\n"
-                            "You are the slow-reasoning recovery model for a GUI agent.\n\n"
-                            "You must not directly answer the user.\n"
-                            "You must not invent screen content.\n"
-                            "You must provide a concise recovery hint for the small GUI executor.\n\n"
-                            "Return ONLY one minified JSON object.\n"
-                            "Keep the JSON under 120 tokens.\n"
-                            'Schema: {"diagnosis":"...","next_subgoal":"...",'
-                            '"avoid":["..."],"stop_condition":"..."}'
-                        ),
-                    },
-                    {"role": "user", "content": user_content},
-                ],
-                tools=None,
-                max_tokens=180,
-            )
+            response = await self._s2_llm.chat(**chat_kwargs)
         except Exception:
             logger.warning("GUI S2 hint request failed.", exc_info=True)
             return None
@@ -3438,18 +3459,18 @@ class GuiAgent:
             compact_prompt_parts=prompt_skill_parts,
         )
 
-    @staticmethod
-    def _messages_with_s2_takeover_policy(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _messages_with_s2_takeover_policy(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        policy = self._s2_prefixed_policy(S2_TAKEOVER_ACTION_POLICY)
         if not messages:
-            return [{"role": "system", "content": S2_TAKEOVER_ACTION_POLICY}]
+            return [{"role": "system", "content": policy}]
         updated = [dict(message) for message in messages]
         first = dict(updated[0])
         content = first.get("content")
         if isinstance(content, str):
-            first["content"] = f"{content}\n\n{S2_TAKEOVER_ACTION_POLICY}"
+            first["content"] = f"{content}\n\n{policy}"
             updated[0] = first
             return updated
-        updated.insert(0, {"role": "system", "content": S2_TAKEOVER_ACTION_POLICY})
+        updated.insert(0, {"role": "system", "content": policy})
         return updated
 
     def _build_instruction_prompt(

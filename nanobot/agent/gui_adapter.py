@@ -41,6 +41,7 @@ class NanobotLLMAdapter:
         tool_choice: str | None = None,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> OpenGuiLLMResponse:
         kwargs: dict[str, Any] = dict(
             messages=messages,
@@ -50,6 +51,8 @@ class NanobotLLMAdapter:
         )
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
 
         ttft_s: float | None = None
         start = time.perf_counter()
@@ -93,4 +96,3 @@ class NanobotEmbeddingAdapter:
 
     async def embed(self, texts: list[str]) -> np.ndarray:
         return await self._embed_fn(texts)
-

@@ -2035,6 +2035,8 @@ class GuiSubagentTool(Tool):
             s2_llm=self._s2_llm_adapter,
             s2_model=self._s2_model,
             s2_enabled=self._gui_config.s2_enabled and self._s2_llm_adapter is not None,
+            s1_reasoning_effort=self._gui_config.s1_reasoning_effort,
+            s2_reasoning_effort=self._gui_config.s2_reasoning_effort,
             s2_hint_enabled=self._gui_config.s2_hint_enabled,
             s2_takeover_enabled=self._gui_config.s2_takeover_enabled,
             s2_max_hints=self._gui_config.s2_max_hints,
