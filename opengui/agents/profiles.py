@@ -377,7 +377,7 @@ def _build_general_e2e_messages(
 ) -> list[dict[str, Any]]:
     observations = [turn.observation for turn in history] + [current_observation]
     tool_results = [turn.tool_result_message.get("content") for turn in history]
-    responses = [_history_raw_response(turn) for turn in history]
+    responses = [_history_compact_response(turn) for turn in history]
     scale_factor = _general_e2e_scale_factor(
         model_name,
         int(current_observation.screen_width or 999),
@@ -633,6 +633,23 @@ def _history_raw_response(turn: Any) -> str:
     return str(content or turn.action_summary or "")
 
 
+def _history_compact_response(turn: Any) -> str:
+    step = getattr(turn, "step_index", "?")
+    summary = getattr(turn, "action_intent", None) or getattr(turn, "action_summary", None)
+    lines = [f"Step {step}: {summary or _history_raw_response(turn)}"]
+    state = getattr(turn, "state_summary", None)
+    if isinstance(state, str) and state.strip():
+        lines.append(f"State summary: {state.strip()}")
+    tool_result_message = getattr(turn, "tool_result_message", {}) or {}
+    tool_result = (
+        tool_result_message.get("content")
+        if isinstance(tool_result_message, dict) else None
+    )
+    if isinstance(tool_result, str) and tool_result.strip():
+        lines.append(f"Tool result: {tool_result.strip()}")
+    return "\n".join(lines)
+
+
 def _general_user_message(
     observation: Observation,
     *,
@@ -769,7 +786,10 @@ def _general_e2e_action_text(content: str) -> str:
             _thought, action_str = general_e2e_agent.parse_action(content)
         except ValueError:
             action_str = content.strip()
-    parsed = general_e2e_agent.parse_json_markdown(action_str)
+    try:
+        parsed = general_e2e_agent.parse_json_markdown(action_str)
+    except Exception:
+        parsed = _last_json_object(action_str) or _last_json_object(content)
     if isinstance(parsed, list) and len(parsed) == 1 and isinstance(parsed[0], dict):
         parsed = parsed[0]
     if isinstance(parsed, dict):
@@ -780,6 +800,21 @@ def _general_e2e_action_text(content: str) -> str:
             action["coordinate"] = action.pop("target")
         return json.dumps(action, ensure_ascii=False)
     return action_str
+
+
+def _last_json_object(text: str) -> dict[str, Any] | None:
+    decoder = json.JSONDecoder()
+    found: dict[str, Any] | None = None
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            found = parsed
+    return found
 
 
 def _hide_history_images_like_general(

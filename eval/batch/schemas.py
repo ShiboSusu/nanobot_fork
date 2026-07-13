@@ -24,7 +24,12 @@ class RunMetrics:
     steps: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    thinking_tokens: int = 0
+    cached_tokens: int = 0
     total_tokens: int = 0
+    cost_yuan: float = 0.0
+    step_costs_yuan: list[float] = field(default_factory=list)
+    cost_note: str = ""
     avg_step_duration_s: float | None = None
     avg_chat_latency_s: float | None = None
     avg_ttft_s: float | None = None
@@ -68,12 +73,21 @@ class PhaseSummary:
     n_tasks: int
     n_trials: int
     pass_at_1: float
+    pass_at_1_ci95: tuple[float, float]
+    pass_at_2: float
+    pass_at_2_ci95: tuple[float, float]
     pass_at_k: float
+    pass_at_k_ci95: tuple[float, float]
     skill_hit_rate: float
     avg_steps: float
     avg_prompt_tokens: float
     avg_completion_tokens: float
     avg_total_tokens: float
+    total_cost_yuan: float
+    avg_cost_yuan: float
+    token_per_success: float | None
+    cost_per_success: float | None
+    cost_note: str
     avg_step_duration_s: float | None
     avg_chat_latency_s: float | None
     avg_ttft_s: float | None

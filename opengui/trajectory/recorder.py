@@ -9,6 +9,7 @@ to distinguish different execution modes in the trajectory log.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -49,6 +50,8 @@ class TrajectoryRecorder:
     output_dir: Path
     task: str
     platform: str = "unknown"
+    metadata: dict[str, Any] | None = None
+    record_per_step: bool = False
     event_callback: Callable[[dict[str, Any]], None] | None = None
 
     _path: Path | None = field(default=None, init=False, repr=False)
@@ -58,6 +61,7 @@ class TrajectoryRecorder:
     _current_phase: ExecutionPhase = field(default=ExecutionPhase.AGENT, init=False, repr=False)
     _step_metrics: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _metrics_path: Path | None = field(default=None, init=False, repr=False)
+    _last_screen_hash: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.output_dir = Path(self.output_dir)
@@ -94,6 +98,8 @@ class TrajectoryRecorder:
             "type": "metadata",
             "task": self.task,
             "platform": self.platform,
+            "metadata": self.metadata or {},
+            "record_per_step": self.record_per_step,
             "initial_phase": phase.value,
             "timestamp": self._start_time,
             "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -160,6 +166,15 @@ class TrajectoryRecorder:
         duration_s: float | None = None,
         chat_latency_s: float | None = None,
         ttft_s: float | None = None,
+        arm: str | None = None,
+        model_name: str | None = None,
+        reasoning_effort: str | None = None,
+        action_repr: str | None = None,
+        actor: str | None = None,
+        stagnation: bool | None = None,
+        logprob: float | None = None,
+        per_step_screenshot_path: str | None = None,
+        router_trace: dict[str, Any] | None = None,
     ) -> None:
         """Record one agent step.
 
@@ -193,6 +208,8 @@ class TrajectoryRecorder:
         """
         if self._closed:
             raise RuntimeError("Recorder already closed")
+        if self._path is None:
+            self.start(phase=phase or self._current_phase)
 
         obs: dict[str, Any] | None = None
         if foreground_app or screen_width is not None or observation_extra:
@@ -212,6 +229,25 @@ class TrajectoryRecorder:
                 obs["extra"] = _compact_observation_extra(observation_extra)
 
         phase_value = (phase or self._current_phase).value
+        screen_hash = _stable_screen_hash(screenshot_path, observation_extra)
+        prev_screen_changed: bool | None = None
+        if screen_hash is not None:
+            prev_screen_changed = (
+                False if self._last_screen_hash is None
+                else screen_hash != self._last_screen_hash
+            )
+        if screen_hash is not None:
+            self._last_screen_hash = screen_hash
+
+        route = router_trace.get("final_route") if isinstance(router_trace, dict) else None
+        step_arm = arm or (str(route) if route else None)
+        if step_arm is None and actor:
+            step_arm = str(actor)
+        step_reasoning_effort = reasoning_effort
+        if step_reasoning_effort is None and step_arm:
+            step_reasoning_effort = "slow" if str(step_arm).endswith("_slow") else "fast"
+        step_action_repr = action_repr or _compact_action_repr(action)
+
         event: dict[str, Any] = {
             "type": "step",
             "step_index": self._step_count,
@@ -221,7 +257,33 @@ class TrajectoryRecorder:
             "model_output": model_output,
             "screenshot_path": screenshot_path,
             "observation": obs,
+            "arm": step_arm,
+            "model_name": model_name,
+            "reasoning_effort": step_reasoning_effort,
+            "token_in": _token_value(token_usage, "prompt_tokens"),
+            "token_out": _token_value(token_usage, "completion_tokens"),
+            "token_think": _first_token_value(
+                token_usage,
+                "reasoning_tokens",
+                "thinking_tokens",
+            ),
+            "token_cached": _token_value(token_usage, "cached_tokens"),
+            "screen_hash": screen_hash,
+            "prev_screen_changed": prev_screen_changed,
+            "foreground_app": foreground_app,
+            "action_type": action.get("action_type") if isinstance(action, dict) else None,
+            "action_repr": step_action_repr,
         }
+        if actor is not None:
+            event["actor"] = actor
+        if stagnation is not None:
+            event["stagnation"] = stagnation
+        if logprob is not None:
+            event["logprob"] = logprob
+        if per_step_screenshot_path is not None:
+            event["per_step_screenshot_path"] = per_step_screenshot_path
+        if router_trace:
+            event["router_trace"] = router_trace
         if interaction_target:
             event["interaction_target"] = interaction_target
         if token_usage:
@@ -327,6 +389,56 @@ def _compact_observation_extra(extra: dict[str, Any]) -> dict[str, Any]:
         else:
             compact[key] = value
     return compact
+
+
+def _token_value(token_usage: dict[str, int] | None, key: str) -> int | None:
+    if not isinstance(token_usage, dict):
+        return None
+    value = token_usage.get(key)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_token_value(token_usage: dict[str, int] | None, *keys: str) -> int | None:
+    for key in keys:
+        value = _token_value(token_usage, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _compact_action_repr(action: dict[str, Any]) -> str | None:
+    if not isinstance(action, dict):
+        return None
+    action_type = action.get("action_type")
+    if not action_type:
+        return None
+    parts = [str(action_type)]
+    for key in ("x", "y", "text", "direction", "app_name"):
+        if key in action and action[key] not in (None, ""):
+            parts.append(f"{key}={action[key]}")
+    return " ".join(parts)
+
+
+def _stable_screen_hash(
+    screenshot_path: str | None,
+    observation_extra: dict[str, Any] | None,
+) -> str | None:
+    if screenshot_path:
+        try:
+            path = Path(screenshot_path)
+            if path.is_file():
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    if observation_extra:
+        payload = json.dumps(observation_extra, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+    return None
 
 
 def _step_metric_from_event(

@@ -11,6 +11,7 @@ injected fakes following the established P0/_FakeEmbedder patterns.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -135,12 +136,55 @@ def test_trajectory_recorder_step_details_are_persisted(tmp_path: Path) -> None:
     assert "execution" not in step_event
 
 
-def test_trajectory_recorder_not_started_raises(tmp_path: Path) -> None:
-    """Calling record_step() before start() raises RuntimeError."""
+def test_trajectory_recorder_records_rpr_step_fields(tmp_path: Path) -> None:
+    rec = TrajectoryRecorder(output_dir=tmp_path, task="rpr", platform="android")
+    path = rec.start()
+    screen = tmp_path / "screen.png"
+    screen.write_bytes(b"screen-one")
+
+    rec.record_step(
+        action={"action_type": "tap", "x": 100, "y": 200},
+        model_output="tap",
+        screenshot_path=str(screen),
+        foreground_app="com.example.app",
+        token_usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 3,
+            "cached_tokens": 2,
+        },
+        arm="s1_fast",
+        model_name="qwen3.5-9b",
+        reasoning_effort="none",
+        action_repr="tap at (100, 200)",
+    )
+    rec.finish(success=True)
+
+    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    step_event = next(event for event in events if event["type"] == "step")
+
+    assert step_event["arm"] == "s1_fast"
+    assert step_event["model_name"] == "qwen3.5-9b"
+    assert step_event["reasoning_effort"] == "none"
+    assert step_event["token_in"] == 10
+    assert step_event["token_out"] == 3
+    assert step_event["token_think"] is None
+    assert step_event["token_cached"] == 2
+    assert step_event["screen_hash"] == hashlib.sha256(b"screen-one").hexdigest()
+    assert step_event["prev_screen_changed"] is False
+    assert step_event["foreground_app"] == "com.example.app"
+    assert step_event["action_type"] == "tap"
+    assert step_event["action_repr"] == "tap at (100, 200)"
+
+
+def test_trajectory_recorder_record_step_lazy_starts(tmp_path: Path) -> None:
+    """record_step() can lazy-start for MobileGym per-step sessions."""
     rec = TrajectoryRecorder(output_dir=tmp_path, task="test", platform="android")
 
-    with pytest.raises(RuntimeError, match="Recorder not started"):
-        rec.record_step(action={"action_type": "tap", "x": 0, "y": 0})
+    rec.record_step(action={"action_type": "tap", "x": 0, "y": 0})
+
+    assert rec.path is not None
+    events = [json.loads(line) for line in rec.path.read_text(encoding="utf-8").splitlines()]
+    assert [event["type"] for event in events] == ["metadata", "step"]
 
 
 def test_trajectory_recorder_finish_failure(tmp_path: Path) -> None:

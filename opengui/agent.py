@@ -148,6 +148,9 @@ class StepResult:
     duration_s: float = 0.0
     chat_latency_s: float | None = None
     ttft_s: float | None = None
+    arm: str | None = None
+    model_name: str | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -479,6 +482,8 @@ class GuiAgent:
         s2_takeover_after_hints: int = 1,
         s2_max_takeover_steps: int = 8,
         s2_trigger_on_stagnation: bool = True,
+        s2_trigger_on_low_confidence: bool = False,
+        s2_low_confidence_threshold: float = 0.35,
         s2_trigger_on_max_steps_near: bool = False,
         s2_trigger_on_done_missing_evidence: bool = True,
         s2_trigger_on_step_error: bool = True,
@@ -550,6 +555,8 @@ class GuiAgent:
         self._s2_takeover_after_hints = max(0, int(s2_takeover_after_hints))
         self._s2_max_takeover_steps = max(1, int(s2_max_takeover_steps))
         self._s2_trigger_on_stagnation = bool(s2_trigger_on_stagnation)
+        self._s2_trigger_on_low_confidence = bool(s2_trigger_on_low_confidence)
+        self._s2_low_confidence_threshold = float(s2_low_confidence_threshold)
         self._s2_max_steps_near_margin = max(1, int(s2_max_steps_near_margin))
         self._s2_allowed_triggers = frozenset(
             trigger
@@ -1494,7 +1501,9 @@ class GuiAgent:
                 self._scrub_for_artifact({
                     "event": "step",
                     "step_index": step_index,
+                    "actor": actor,
                     "prompt": result.prompt_snapshot,
+                    "prompt_stats": self._prompt_stats(result.prompt_snapshot),
                     "model_output": result.model_snapshot,
                     "execution": result.execution_snapshot,
                     "action": self._serialize_action(result.action),
@@ -1507,6 +1516,13 @@ class GuiAgent:
                         else obs.screenshot_path
                     ),
                     "done": result.done,
+                    "token_usage": result.step_usage or None,
+                    "duration_s": round(result.duration_s, 3) if result.duration_s else None,
+                    "chat_latency_s": (
+                        round(result.chat_latency_s, 3)
+                        if result.chat_latency_s is not None else None
+                    ),
+                    "ttft_s": round(result.ttft_s, 3) if result.ttft_s is not None else None,
                     "timestamp": time.time(),
                 }),
             )
@@ -1559,6 +1575,10 @@ class GuiAgent:
                 duration_s=result.duration_s or None,
                 chat_latency_s=result.chat_latency_s,
                 ttft_s=result.ttft_s,
+                arm=result.arm,
+                model_name=result.model_name,
+                reasoning_effort=result.reasoning_effort,
+                action_repr=describe_action(result.action),
             )
 
             if intervention_cancelled:
@@ -2328,6 +2348,10 @@ class GuiAgent:
                 if actor == "s2_takeover"
                 else self._s1_reasoning_effort
             )
+            model_name = self._model_name_for_step(
+                active_llm,
+                self._s2_model if actor == "s2_takeover" else self.model,
+            )
             chat_kwargs: dict[str, Any] = {
                 "messages": request_messages,
                 "tools": self._build_tools_list() if native_tools_enabled else None,
@@ -2451,7 +2475,12 @@ class GuiAgent:
                         action_intent=action_intent,
                         state_summary=state_summary,
                     )
-                    return self._tag_step_actor(special_result, actor)
+                    return self._tag_step_actor(
+                        special_result,
+                        actor,
+                        model_name=model_name,
+                        reasoning_effort=reasoning_effort,
+                    )
                 except ActionError as exc:
                     if retries_left > 0:
                         messages.append({
@@ -2539,7 +2568,7 @@ class GuiAgent:
                     duration_s=time.monotonic() - _step_start,
                     chat_latency_s=step_chat_latency_s or None,
                     ttft_s=step_ttft_s,
-                ), actor)
+                ), actor, model_name=model_name, reasoning_effort=reasoning_effort)
 
             if action.action_type == "request_intervention":
                 return self._tag_step_actor(StepResult(
@@ -2562,7 +2591,7 @@ class GuiAgent:
                     duration_s=time.monotonic() - _step_start,
                     chat_latency_s=step_chat_latency_s or None,
                     ttft_s=step_ttft_s,
-                ), actor)
+                ), actor, model_name=model_name, reasoning_effort=reasoning_effort)
 
             # Normalize app identifiers for mobile open/close actions.
             if (
@@ -2623,21 +2652,52 @@ class GuiAgent:
                 duration_s=time.monotonic() - _step_start,
                 chat_latency_s=step_chat_latency_s or None,
                 ttft_s=step_ttft_s,
-            ), actor)
+            ), actor, model_name=model_name, reasoning_effort=reasoning_effort)
 
         raise RuntimeError("GUI model did not return a valid computer_use call after retries.")
 
     @staticmethod
-    def _tag_step_actor(result: StepResult, actor: str) -> StepResult:
+    def _tag_step_actor(
+        result: StepResult,
+        actor: str,
+        *,
+        model_name: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> StepResult:
         model_snapshot = dict(result.model_snapshot or {})
         model_snapshot["actor"] = actor
+        model_snapshot["model_name"] = model_name
+        model_snapshot["reasoning_effort"] = reasoning_effort
         execution_snapshot = dict(result.execution_snapshot or {})
         execution_snapshot["actor"] = actor
+        execution_snapshot["arm"] = GuiAgent._arm_for_step(actor, reasoning_effort)
         return replace(
             result,
             model_snapshot=model_snapshot,
             execution_snapshot=execution_snapshot,
+            arm=GuiAgent._arm_for_step(actor, reasoning_effort),
+            model_name=model_name,
+            reasoning_effort=reasoning_effort,
         )
+
+    @staticmethod
+    def _model_name_for_step(llm: LLMProvider, fallback: str | None) -> str | None:
+        for attr in ("model", "_model", "model_name", "default_model"):
+            value = getattr(llm, attr, None)
+            if value:
+                return str(value)
+        return str(fallback) if fallback else None
+
+    @staticmethod
+    def _arm_for_step(actor: str, reasoning_effort: str | None) -> str:
+        actor_label = "s2" if str(actor).startswith("s2") else "s1"
+        effort = str(reasoning_effort or "").strip().lower()
+        think = (
+            "fast"
+            if effort in {"", "none", "minimal", "minimum", "fast", "false", "off", "0"}
+            else "slow"
+        )
+        return f"{actor_label}_{think}"
 
     async def _dispatch_prompt_special_action(
         self,
@@ -4039,6 +4099,27 @@ class GuiAgent:
             ],
             "current_observation": self._serialize_observation(current_observation),
         }
+
+    @staticmethod
+    def _prompt_stats(prompt_snapshot: dict[str, Any] | None) -> dict[str, int]:
+        messages = (prompt_snapshot or {}).get("messages") or []
+        stats = {"message_count": 0, "text_chars": 0, "image_count": 0}
+        if not isinstance(messages, list):
+            return stats
+        stats["message_count"] = len(messages)
+        for message in messages:
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, str):
+                stats["text_chars"] += len(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "text":
+                        stats["text_chars"] += len(str(item.get("text") or ""))
+                    elif item.get("type") == "image_url":
+                        stats["image_count"] += 1
+        return stats
 
     def _snapshot_model_response(
         self,

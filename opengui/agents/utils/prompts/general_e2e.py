@@ -75,6 +75,7 @@ Note:
 3. If not, choose the most appropriate action to complete the task.
 4. Output in exact format below, and ensure the Action is a valid JSON string:
 5. The action output format is different for GUI actions and MCP tool actions. Note only one tool call is allowed in one action.
+6. The `Action:` line must contain only one JSON object. Do not write natural language after `Action:`.
 
 {% if compact_skill_instructions -%}
 {{ compact_skill_instructions }}
@@ -82,7 +83,7 @@ Note:
 {% endif -%}
 # Expected Output Format (`Thought: ` and `Action: ` are required):
 Thought: [Analysis including reference to key steps/points when applicable]
-Action: [Single JSON action]
+Action: [Single JSON action object, no prose]
 
 # Output Format Example
 ## for GUI actions:

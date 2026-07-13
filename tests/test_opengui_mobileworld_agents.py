@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -80,6 +81,53 @@ def test_general_e2e_messages_use_mobileworld_prompt(tmp_path: Path) -> None:
     assert messages[1]["role"] == "user"
     assert messages[1]["content"][0]["text"] == "Open Settings"
     assert messages[1]["content"][1]["type"] == "image_url"
+
+
+def test_general_e2e_history_uses_compact_summary_not_raw_response(tmp_path: Path) -> None:
+    history = [
+        SimpleNamespace(
+            step_index=1,
+            observation=_observation(tmp_path / "previous.png"),
+            action_intent="tap Settings",
+            action_summary="tap Settings",
+            state_summary="Settings opened",
+            tool_result_message={"content": "executed:tap"},
+            assistant_message={"role": "assistant", "content": "assistant fallback"},
+            raw_response_content="RAW_SHOULD_NOT_APPEAR " * 100,
+        )
+    ]
+
+    messages = build_mobileworld_messages(
+        "general_e2e",
+        task="Open Wi-Fi",
+        current_observation=_observation(tmp_path / "current.png"),
+        history=history,
+        model_name="qwen",
+        history_image_window=1,
+    )
+    assistant_text = messages[2]["content"][0]["text"]
+
+    assert "RAW_SHOULD_NOT_APPEAR" not in assistant_text
+    assert "Step 1: tap Settings" in assistant_text
+    assert "State summary: Settings opened" in assistant_text
+    assert "Tool result: executed:tap" in assistant_text
+
+
+def test_prompt_stats_counts_messages_text_and_images() -> None:
+    stats = GuiAgent._prompt_stats({
+        "messages": [
+            {"role": "system", "content": "abc"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+                ],
+            },
+        ]
+    })
+
+    assert stats == {"message_count": 2, "text_chars": 8, "image_count": 1}
 
 
 def test_general_e2e_parse_uses_real_screen_dimensions() -> None:
@@ -163,6 +211,31 @@ def test_general_e2e_parse_accepts_bare_json_list_action_target() -> None:
     assert arguments["y"] == 977
 
 
+def test_general_e2e_parse_extracts_json_after_slow_thinking() -> None:
+    response = LLMResponse(
+        content=(
+            "The model wrote a long chain of text before the action.\n"
+            "Action: click the password field first.\n"
+            "After reconsidering, output the actual action:\n"
+            '{"action_type":"click","coordinate":[250,400],"confidence":0.7}'
+        ),
+        tool_calls=None,
+    )
+
+    normalized = normalize_profile_response_for_screen(
+        "general_e2e",
+        response,
+        screen_width=1000,
+        screen_height=1000,
+    )
+
+    assert normalized.tool_calls is not None
+    arguments = normalized.tool_calls[0].arguments
+    assert arguments["action_type"] == "tap"
+    assert arguments["x"] == 250
+    assert arguments["y"] == 400
+
+
 def test_general_e2e_scroll_adds_opengui_default_pixels() -> None:
     response = LLMResponse(
         content='Thought: scroll\nAction: {"action_type":"scroll","direction":"up"}',
@@ -211,7 +284,7 @@ def test_qwen3vl_parse_uses_real_screen_dimensions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gui_agent_uses_mobileworld_messages_and_raw_history(tmp_path: Path) -> None:
+async def test_gui_agent_uses_mobileworld_messages_and_compact_history(tmp_path: Path) -> None:
     first_response = 'Thought: wait\nAction: {"action_type":"wait"}'
     second_response = 'Thought: done\nAction: {"action_type":"status","goal_status":"complete"}'
     llm = _RecordingLLM(
@@ -236,6 +309,10 @@ async def test_gui_agent_uses_mobileworld_messages_and_raw_history(tmp_path: Pat
     assert len(llm.calls) == 2
     assert "# Role: Android Phone Operator AI" in llm.calls[0][0]["content"]
     assert llm.calls[1][2]["role"] == "assistant"
-    assert llm.calls[1][2]["content"][0]["text"] == first_response
+    history_text = llm.calls[1][2]["content"][0]["text"]
+    assert history_text != first_response
+    assert "Step 1:" in history_text
+    assert 'Action: {"action_type":"wait"}' in history_text
+    assert "Tool result: [dry-run] wait" in history_text
     assert llm.calls[1][3]["content"][0]["text"].startswith("Tool call result:")
     assert llm.calls[1][3]["content"][1]["type"] == "image_url"
